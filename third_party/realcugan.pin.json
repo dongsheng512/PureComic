@@ -1,0 +1,24 @@
+{
+  "comment": "Pinned nihui/realcugan-ncnn-vulkan 20220728 (latest public release).",
+  "repo": "nihui/realcugan-ncnn-vulkan",
+  "tag": "20220728",
+  "assets": {
+    "darwin-arm64": {
+      "name": "realcugan-ncnn-vulkan-20220728-macos.zip",
+      "binary": "realcugan-ncnn-vulkan"
+    },
+    "darwin-x64": {
+      "name": "realcugan-ncnn-vulkan-20220728-macos.zip",
+      "binary": "realcugan-ncnn-vulkan"
+    },
+    "linux-x64": {
+      "name": "realcugan-ncnn-vulkan-20220728-ubuntu.zip",
+      "binary": "realcugan-ncnn-vulkan"
+    },
+    "windows-x64": {
+      "name": "realcugan-ncnn-vulkan-20220728-windows.zip",
+      "binary": "realcugan-ncnn-vulkan.exe"
+    }
+  },
+  "models_subdir_candidates": ["models-se", "models-pro", "models-nose"]
+}

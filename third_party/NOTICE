@@ -1,0 +1,34 @@
+PureComic third-party notices
+=============================
+
+This product bundles or optionally downloads components with their own licenses.
+
+Real-CUGAN (ncnn/Vulkan port)
+-----------------------------
+Project: realcugan-ncnn-vulkan
+Upstream: https://github.com/nihui/realcugan-ncnn-vulkan
+License: MIT (see upstream)
+
+Waifu2x (ncnn/Vulkan port)
+--------------------------
+Project: waifu2x-ncnn-vulkan
+Upstream: https://github.com/nihui/waifu2x-ncnn-vulkan
+License: MIT (see upstream repository)
+
+ncnn
+----
+Upstream: https://github.com/Tencent/ncnn
+License: BSD 3-Clause (see upstream)
+
+Models (cunet etc.)
+-------------------
+Model weights shipped or downloaded for Waifu2x follow their respective upstream
+model licenses. Verify before redistribution.
+
+Anime4K (MVP-B)
+---------------
+GLSL shaders: https://github.com/bloc97/Anime4K
+License: MIT
+
+Tauri / Rust / React ecosystem crates and npm packages retain their own licenses
+as declared in Cargo.lock / package-lock.

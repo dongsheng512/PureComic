@@ -1,0 +1,67 @@
+# Rust
+/target
+**/target/
+**/*.rs.bk
+# Keep workspace Cargo.lock for reproducible builds
+apps/desktop/src-tauri/Cargo.lock
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.local
+*.tsbuildinfo
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+
+# Generated Tauri files
+apps/desktop/src-tauri/gen/
+
+# Generated Tauri sidecar / resource copies (scripts/prepare-macos-bundle.sh)
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/resources/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# App runtime / workdirs
+.jobs/
+workdir/
+*.log
+prev-out/
+diag/
+
+# Release artifacts
+*.dmg
+*.app
+*.AppImage
+*.msi
+*.exe
+*.deb
+*.rpm
+
+# Engine binaries & caches (download via scripts/fetch-*.sh)
+third_party/.cache/
+third_party/waifu2x-ncnn-vulkan/bin/
+third_party/realcugan-ncnn-vulkan/bin/
+third_party/realcugan-ncnn-vulkan/models-*/
+third_party/models-cunet/**
+!third_party/models-cunet/.gitkeep
+!third_party/waifu2x-ncnn-vulkan/.gitkeep
+!third_party/realcugan-ncnn-vulkan/.gitkeep
+
+# Keep pin metadata & notices tracked
+!third_party/checksums.sha256
+!third_party/NOTICE
+!third_party/waifu2x.pin.json
+!third_party/realcugan.pin.json
+
+# Env / secrets
+.env
+.env.*
+!.env.example

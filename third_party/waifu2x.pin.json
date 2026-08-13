@@ -1,0 +1,28 @@
+{
+  "comment": "Pinned after HEAD probe (2026-08-12). 20210210-macos.zip returns HTTP 200. Newer tags may 404 or redirect-fail depending on network.",
+  "repo": "nihui/waifu2x-ncnn-vulkan",
+  "tag": "20210210",
+  "assets": {
+    "darwin-arm64": {
+      "name": "waifu2x-ncnn-vulkan-20210210-macos.zip",
+      "binary": "waifu2x-ncnn-vulkan",
+      "note": "Older macOS build; may run under Rosetta on Apple Silicon if arm64 native binary absent"
+    },
+    "darwin-x64": {
+      "name": "waifu2x-ncnn-vulkan-20210210-macos.zip",
+      "binary": "waifu2x-ncnn-vulkan"
+    },
+    "linux-x64": {
+      "name": "waifu2x-ncnn-vulkan-20210210-ubuntu.zip",
+      "binary": "waifu2x-ncnn-vulkan"
+    },
+    "windows-x64": {
+      "name": "waifu2x-ncnn-vulkan-20210210-windows.zip",
+      "binary": "waifu2x-ncnn-vulkan.exe"
+    }
+  },
+  "models_subdir_candidates": [
+    "models-cunet",
+    "models"
+  ]
+}

@@ -1,0 +1,459 @@
+use comic_core::config::AppConfig;
+use comic_core::job::CreateJobRequest;
+use comic_core::preview::EnhanceOptionsDto;
+use comic_core::Scheduler;
+use serde::Serialize;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+pub struct AppState {
+    pub scheduler: Arc<Scheduler>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgressPayload {
+    job_id: String,
+    stage: String,
+    pages_done: u32,
+    pages_total: u32,
+    current_page: Option<String>,
+    eta_sec: Option<u64>,
+    message: Option<String>,
+}
+
+#[tauri::command]
+async fn create_job(
+    state: State<'_, AppState>,
+    req: CreateJobRequest,
+) -> Result<serde_json::Value, String> {
+    let r = state
+        .scheduler
+        .create_job(req)
+        .await
+        .map_err(|e| e.message)?;
+    Ok(serde_json::json!({
+        "jobId": r.job_id,
+        "resumed": r.resumed,
+        "pagesDone": r.pages_done,
+        "pagesTotal": r.pages_total,
+        "nextPage": r.next_page,
+    }))
+}
+
+#[tauri::command]
+async fn probe_resume(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<comic_core::job::ResumeHint>, String> {
+    state
+        .scheduler
+        .probe_resume(&path)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    state
+        .scheduler
+        .cancel_job(&job_id)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn get_job(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<comic_core::job::JobStatus, String> {
+    state
+        .scheduler
+        .get_job(&job_id)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn list_jobs(
+    state: State<'_, AppState>,
+) -> Result<Vec<comic_core::job::JobStatus>, String> {
+    state.scheduler.list_jobs().await.map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn validate_source(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<comic_core::archive::ValidateResult, String> {
+    state
+        .scheduler
+        .validate_source_path(&path)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn estimate_disk_usage(
+    state: State<'_, AppState>,
+    path: String,
+    scale: u8,
+) -> Result<comic_core::estimate::DiskEstimate, String> {
+    state
+        .scheduler
+        .estimate(&path, scale)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn list_gpus(
+    state: State<'_, AppState>,
+) -> Result<Vec<comic_engines::GpuInfo>, String> {
+    state
+        .scheduler
+        .engine()
+        .list_gpus()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_engine_status(
+    state: State<'_, AppState>,
+) -> Result<comic_engines::EngineStatus, String> {
+    let mut st = state.scheduler.engine().status();
+    let cfg = state.scheduler.config();
+    let jobs = cfg.resolved_waifu2x_jobs();
+    let mode = if cfg.use_directory_enhance() {
+        "目录批处理"
+    } else {
+        "逐页并行"
+    };
+    st.detail = format!("{} · {} · 线程 -j {}", st.detail, mode, jobs);
+    Ok(st)
+}
+
+#[tauri::command]
+async fn list_engines(
+    state: State<'_, AppState>,
+) -> Result<Vec<comic_engines::EngineInfo>, String> {
+    let mut list = state.scheduler.catalog();
+    let cfg = state.scheduler.config();
+    let jobs = cfg.resolved_waifu2x_jobs();
+    let mode = if cfg.use_directory_enhance() {
+        "目录批处理"
+    } else {
+        "逐页并行"
+    };
+    for e in &mut list {
+        if !e.detail.contains("线程 -j") {
+            e.detail = format!("{} · {} · 线程 -j {}", e.detail, mode, jobs);
+        }
+    }
+    Ok(list)
+}
+
+#[tauri::command]
+async fn get_reader_state(
+    state: State<'_, AppState>,
+    job_id: Option<String>,
+    source: Option<String>,
+) -> Result<comic_core::reader::ReaderState, String> {
+    state
+        .scheduler
+        .get_reader_state(job_id.as_deref(), source.as_deref())
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn prepare_reader_page(
+    state: State<'_, AppState>,
+    job_id: Option<String>,
+    source: Option<String>,
+    page_index: u32,
+) -> Result<comic_core::reader::ReaderPageFile, String> {
+    state
+        .scheduler
+        .prepare_reader_page(job_id.as_deref(), source.as_deref(), page_index)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn prepare_reader_pages(
+    state: State<'_, AppState>,
+    job_id: Option<String>,
+    source: Option<String>,
+    page_indexes: Vec<u32>,
+) -> Result<Vec<comic_core::reader::ReaderPageFile>, String> {
+    state
+        .scheduler
+        .prepare_reader_pages(job_id.as_deref(), source.as_deref(), &page_indexes)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn list_library(
+    state: State<'_, AppState>,
+) -> Result<Vec<comic_core::library::LibraryEntry>, String> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.list_library())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn add_library_path(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<comic_core::library::LibraryEntry, String> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.add_library_path(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn remove_library_entry(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.remove_library_entry(&id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn preview_library_scan(
+    state: State<'_, AppState>,
+    root: String,
+) -> Result<comic_core::library::LibraryScanPreview, String> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.preview_library_scan(&root))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn import_library_paths(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<comic_core::library::LibraryScanResult, String> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.import_library_paths(&paths))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn touch_library(
+    state: State<'_, AppState>,
+    path: String,
+    page: Option<u32>,
+) -> Result<(), String> {
+    state
+        .scheduler
+        .touch_library(&path, page)
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn preview_page(
+    state: State<'_, AppState>,
+    source: String,
+    page_index: u32,
+    options: Option<EnhanceOptionsDto>,
+) -> Result<comic_core::preview::PreviewResult, String> {
+    state
+        .scheduler
+        .preview_page(&source, page_index, options)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn doctor(
+    state: State<'_, AppState>,
+) -> Result<comic_core::diagnostics::DoctorReport, String> {
+    state.scheduler.doctor().await.map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn export_diagnostics(
+    state: State<'_, AppState>,
+    out_dir: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let path = state
+        .scheduler
+        .export_diagnostics(out_dir.map(std::path::PathBuf::from))
+        .await
+        .map_err(|e| e.message)?;
+    Ok(serde_json::json!({ "zipPath": path.display().to_string() }))
+}
+
+#[tauri::command]
+async fn clear_finished_jobs(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let n = state
+        .scheduler
+        .clear_finished_jobs()
+        .await
+        .map_err(|e| e.message)?;
+    Ok(serde_json::json!({ "removed": n }))
+}
+
+#[tauri::command]
+async fn remove_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    state
+        .scheduler
+        .remove_job(&job_id)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn open_output_folder(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<(), String> {
+    let status = state
+        .scheduler
+        .get_job(&job_id)
+        .await
+        .map_err(|e| e.message)?;
+    let path = status
+        .output_path
+        .ok_or_else(|| "任务尚无输出路径".to_string())?;
+    let p = std::path::PathBuf::from(&path);
+    let folder = if p.is_dir() {
+        p
+    } else {
+        p.parent()
+            .map(|x| x.to_path_buf())
+            .ok_or_else(|| "无法解析输出目录".to_string())?
+    };
+    open::that(&folder).map_err(|e| format!("无法打开目录: {e}"))
+}
+
+/// Point config at sidecar + models inside the .app bundle (release) when present.
+fn apply_packaged_engine_paths(app: &AppHandle, cfg: &mut AppConfig) {
+    if cfg.waifu2x_bin.is_some() && cfg.models_dir.is_some() {
+        return;
+    }
+    let mut bins = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            bins.push(dir.join("waifu2x-ncnn-vulkan"));
+            bins.push(dir.join("PureComic-waifu2x-ncnn-vulkan"));
+            bins.push(dir.join("purecomic-waifu2x-ncnn-vulkan"));
+            bins.push(dir.join("comic-enhance-desktop-waifu2x-ncnn-vulkan"));
+            if let Some(name) = exe.file_name() {
+                bins.push(dir.join(format!(
+                    "{}-waifu2x-ncnn-vulkan",
+                    name.to_string_lossy()
+                )));
+            }
+        }
+    }
+    let mut models = Vec::new();
+    if let Ok(res) = app.path().resource_dir() {
+        models.push(res.join("models-cunet"));
+        models.push(res.join("resources/models-cunet"));
+        std::env::set_var("COMIC_THIRD_PARTY", &res);
+    }
+    if cfg.waifu2x_bin.is_none() {
+        if let Some(p) = bins.into_iter().find(|p| p.is_file()) {
+            cfg.waifu2x_bin = Some(p);
+        }
+    }
+    if cfg.models_dir.is_none() {
+        if let Some(p) = models.into_iter().find(|p| p.is_dir()) {
+            cfg.models_dir = Some(p);
+        }
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,comic_core=debug".into()),
+        )
+        .init();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            let mut cfg = AppConfig::from_env();
+            if let Ok(dir) = app.path().app_data_dir() {
+                cfg.work_root = dir.join("work");
+            }
+            apply_packaged_engine_paths(app.handle(), &mut cfg);
+            #[cfg(not(debug_assertions))]
+            {
+                cfg.allow_mock_fallback = false;
+            }
+            cfg.ensure_dirs().ok();
+
+            let scheduler = Arc::new(Scheduler::new(cfg).expect("scheduler"));
+            let handle: AppHandle = app.handle().clone();
+            let sched_cb = scheduler.clone();
+            tauri::async_runtime::block_on(async move {
+                sched_cb
+                    .set_progress_callback(Arc::new(move |ev| {
+                        let payload = ProgressPayload {
+                            job_id: ev.job_id,
+                            stage: ev.stage,
+                            pages_done: ev.pages_done,
+                            pages_total: ev.pages_total,
+                            current_page: ev.current_page,
+                            eta_sec: ev.eta_sec,
+                            message: ev.message,
+                        };
+                        let _ = handle.emit("job://progress", payload);
+                    }))
+                    .await;
+            });
+
+            app.manage(AppState { scheduler });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            create_job,
+            probe_resume,
+            cancel_job,
+            get_job,
+            list_jobs,
+            validate_source,
+            estimate_disk_usage,
+            list_gpus,
+            get_engine_status,
+            list_engines,
+            preview_page,
+            get_reader_state,
+            prepare_reader_page,
+            prepare_reader_pages,
+            list_library,
+            add_library_path,
+            remove_library_entry,
+            preview_library_scan,
+            import_library_paths,
+            touch_library,
+            doctor,
+            export_diagnostics,
+            open_output_folder,
+            clear_finished_jobs,
+            remove_job,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
