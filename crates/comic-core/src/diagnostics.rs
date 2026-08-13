@@ -107,7 +107,7 @@ pub async fn export_diagnostics_zip(
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!("comic-enhance-diag-{stamp}.zip"));
+    let path = dir.join(format!("purecomic-diag-{stamp}.zip"));
 
     let file = File::create(&path)?;
     let mut zip = ZipWriter::new(file);

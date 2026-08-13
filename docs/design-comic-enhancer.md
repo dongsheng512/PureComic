@@ -6,7 +6,7 @@
 | **产品名称** | PureComic（内部 crate：`comic-core` / `comic-engines` / `comic-cli`） |
 | **作者** | TBD（Tech Lead 待指定；建议引擎打包由一人专责） |
 | **日期** | 2026-08-12 |
-| **修订** | 2026-08-14 r3（仓库迁至 PureComic；产品名对齐） |
+| **修订** | 2026-08-14 r4（目录/CLI/工作目录路径对齐 PureComic） |
 | **状态** | Draft（实现已超 MVP-A，本文仍为设计基线） |
 | **受众** | 产品负责人 + 实现工程师 |
 | **工作区** | 仓库根目录 `PureComic/`（GitHub: `dongsheng512/PureComic`） |
@@ -297,12 +297,12 @@ sequenceDiagram
 ### 项目结构
 
 ```text
-comic/
+PureComic/
 ├── apps/desktop/                 # Tauri 2 + React + TS
 │   ├── src/                      # UI（i18n: zh-CN default）
 │   └── src-tauri/
 ├── crates/
-│   ├── comic-core/
+│   ├── comic-core/               # 历史 crate 名，保持不变
 │   ├── comic-engines/
 │   └── comic-cli/
 ├── third_party/
@@ -310,11 +310,10 @@ comic/
 │   ├── models-cunet/             # bundled default models
 │   ├── checksums.sha256          # pins
 │   └── NOTICE
-├── testdata/
-│   └── fixtures/
-│       └── ref_cbz_100/          # 官方性能 fixture
+├── scripts/                      # fetch / package
 ├── docs/
-│   ├── design.md
+│   ├── design-comic-enhancer.md
+│   ├── reader-schedule.md
 │   └── adr/                      # ADR-0001 … 映射 Key Decisions
 └── README.md
 ```
@@ -702,12 +701,12 @@ type ProgressEvent = {
 ### CLI
 
 ```bash
-comic-enhance run ./input.cbz -o ./out --preset balanced --engine waifu2x --scale 2
-comic-enhance validate ./input.cbz
-comic-enhance estimate ./input.cbz --scale 2
-comic-enhance preview ./input.cbz --page 3 --preset quality
-comic-enhance list-gpus
-comic-enhance doctor   # 引擎校验 + GPU
+purecomic run ./input.cbz -o ./out --preset balanced --engine waifu2x --scale 2
+purecomic validate ./input.cbz
+purecomic estimate ./input.cbz --scale 2
+purecomic preview ./input.cbz --page 3 --preset quality
+purecomic list-gpus
+purecomic doctor   # 引擎校验 + GPU
 ```
 
 ---
@@ -925,7 +924,7 @@ gantt
 
 ## Open Questions（仅非发版阻塞）
 
-1. **产品正式命名 / 品牌**（代号 `comic-enhance`）？
+1. ~~**产品正式命名 / 品牌**~~ → 已定为 **PureComic**（CLI：`purecomic`；内部 crate 仍为 `comic-*`）
 2. **是否提供捐赠地址 / 商店分发**（旁路，不影响 Apache-2.0 与捆绑策略）？
 3. **灰度导出是否强制回单通道**（MVP-A 允许 RGB JPEG）？
 4. **Phase 2 PDF 后端最终钉 pdfium 还是 mupdf**（实现前再开 ADR）？
@@ -1076,7 +1075,7 @@ gantt
 - **说明：** **非 Thin/Full MVP-B 门禁**。
 
 ### PR-14: CLI
-- **标题：** `feat(cli): comic-enhance CLI`
+- **标题：** `feat(cli): purecomic CLI`
 - **依赖：** PR-06
 - **说明：** 可与 UI 并行；Thin GA 可选但建议有 `doctor`/`run`。
 

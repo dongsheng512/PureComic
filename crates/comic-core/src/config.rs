@@ -53,7 +53,7 @@ fn default_true() -> bool {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let work_root = std::env::temp_dir().join("comic-enhance");
+        let work_root = std::env::temp_dir().join("PureComic");
         let cpus = num_cpus::get().max(1);
         Self {
             work_root,

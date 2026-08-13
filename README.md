@@ -29,7 +29,7 @@ PureComic/
 └── docs/                  # 设计与 ADR
 ```
 
-> 内部 crate 名仍为 `comic-core` / `comic-engines` / `comic-cli`（历史命名，运行正常）。产品名与桌面包为 **PureComic**。
+> 仓库目录名与产品名为 **PureComic**。内部 crate 仍为 `comic-core` / `comic-engines` / `comic-cli`（历史命名）；CLI 可执行文件为 **`purecomic`**。
 
 ## 前置条件
 
@@ -62,7 +62,7 @@ npm run tauri dev
 - **预览**：Before/After 单页对比（共享 GpuLock）
 - **诊断**：Doctor + 诊断包 zip
 - **书库 / 阅读**：本地书库与阅读器（见 [docs/reader-schedule.md](docs/reader-schedule.md)）
-- **CLI**：`run` / `validate` / `estimate` / `preview` / `doctor` / `export-diagnostics`
+- **CLI**（`purecomic`）：`run` / `validate` / `estimate` / `preview` / `doctor` / `export-diagnostics`
 
 ### 拉取引擎（不要提交二进制）
 

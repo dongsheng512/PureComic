@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "comic-enhance", version, about = "PureComic CLI")]
+#[command(name = "purecomic", version, about = "PureComic CLI")]
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,

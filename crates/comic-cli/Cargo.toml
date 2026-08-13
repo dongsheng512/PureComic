@@ -3,10 +3,10 @@ name = "comic-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI for comic-enhance"
+description = "CLI for PureComic"
 
 [[bin]]
-name = "comic-enhance"
+name = "purecomic"
 path = "src/main.rs"
 
 [dependencies]
