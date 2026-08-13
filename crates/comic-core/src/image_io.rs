@@ -17,8 +17,11 @@ pub fn is_image_path(path: &Path) -> bool {
 
 pub fn load_image(path: &Path) -> AppResult<DynamicImage> {
     image::open(path).map_err(|e| {
-        AppError::new(ErrorCode::DecodeFail, format!("无法解码: {}", path.display()))
-            .with_detail(e.to_string())
+        AppError::new(
+            ErrorCode::DecodeFail,
+            format!("无法解码: {}", path.display()),
+        )
+        .with_detail(e.to_string())
     })
 }
 
@@ -72,7 +75,8 @@ pub fn save_export(
         ImgFmt::Jpeg => {
             let rgb = img.to_rgb8();
             let mut file = std::fs::File::create(path)?;
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, jpeg_quality);
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, jpeg_quality);
             enc.encode(
                 rgb.as_raw(),
                 rgb.width(),
@@ -149,7 +153,8 @@ pub fn save_export_bytes(
         ImgFmt::Jpeg => {
             let rgb = img.to_rgb8();
             let mut buf = Vec::new();
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, jpeg_quality);
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, jpeg_quality);
             enc.encode(
                 rgb.as_raw(),
                 rgb.width(),
@@ -172,11 +177,7 @@ pub fn save_export_bytes(
 }
 
 /// True when we can zip/copy the engine output without re-encoding.
-pub fn export_can_passthrough(
-    format: ImageFormat,
-    src: &Path,
-    source_ext: Option<&str>,
-) -> bool {
+pub fn export_can_passthrough(format: ImageFormat, src: &Path, source_ext: Option<&str>) -> bool {
     let src_ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -228,10 +229,18 @@ mod tests {
         let dyn_img = DynamicImage::ImageRgb8(img);
         write_engine_png(&dyn_img, &png).unwrap();
         assert!(export_can_passthrough(ImageFormat::Png, &png, Some("png")));
-        assert!(!export_can_passthrough(ImageFormat::Jpeg, &png, Some("jpg")));
+        assert!(!export_can_passthrough(
+            ImageFormat::Jpeg,
+            &png,
+            Some("jpg")
+        ));
         let jpg_path = dir.path().join("a.jpg");
         std::fs::write(&jpg_path, [0xFF, 0xD8, 0xFF, 0xDB]).unwrap();
-        assert!(export_can_passthrough(ImageFormat::Jpeg, &jpg_path, Some("jpg")));
+        assert!(export_can_passthrough(
+            ImageFormat::Jpeg,
+            &jpg_path,
+            Some("jpg")
+        ));
         let jpg = save_export_bytes(&dyn_img, ImageFormat::Jpeg, 80, 90, Some("png")).unwrap();
         assert!(jpg.len() > 20);
         assert_eq!(&jpg[0..2], &[0xFF, 0xD8]);

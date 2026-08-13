@@ -75,9 +75,7 @@ async fn get_job(
 }
 
 #[tauri::command]
-async fn list_jobs(
-    state: State<'_, AppState>,
-) -> Result<Vec<comic_core::job::JobStatus>, String> {
+async fn list_jobs(state: State<'_, AppState>) -> Result<Vec<comic_core::job::JobStatus>, String> {
     state.scheduler.list_jobs().await.map_err(|e| e.message)
 }
 
@@ -107,9 +105,7 @@ async fn estimate_disk_usage(
 }
 
 #[tauri::command]
-async fn list_gpus(
-    state: State<'_, AppState>,
-) -> Result<Vec<comic_engines::GpuInfo>, String> {
+async fn list_gpus(state: State<'_, AppState>) -> Result<Vec<comic_engines::GpuInfo>, String> {
     state
         .scheduler
         .engine()
@@ -298,9 +294,7 @@ async fn export_diagnostics(
 }
 
 #[tauri::command]
-async fn clear_finished_jobs(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+async fn clear_finished_jobs(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let n = state
         .scheduler
         .clear_finished_jobs()
@@ -319,10 +313,7 @@ async fn remove_job(state: State<'_, AppState>, job_id: String) -> Result<(), St
 }
 
 #[tauri::command]
-async fn open_output_folder(
-    state: State<'_, AppState>,
-    job_id: String,
-) -> Result<(), String> {
+async fn open_output_folder(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
     let status = state
         .scheduler
         .get_job(&job_id)
@@ -355,10 +346,7 @@ fn apply_packaged_engine_paths(app: &AppHandle, cfg: &mut AppConfig) {
             bins.push(dir.join("purecomic-waifu2x-ncnn-vulkan"));
             bins.push(dir.join("comic-enhance-desktop-waifu2x-ncnn-vulkan"));
             if let Some(name) = exe.file_name() {
-                bins.push(dir.join(format!(
-                    "{}-waifu2x-ncnn-vulkan",
-                    name.to_string_lossy()
-                )));
+                bins.push(dir.join(format!("{}-waifu2x-ncnn-vulkan", name.to_string_lossy())));
             }
         }
     }

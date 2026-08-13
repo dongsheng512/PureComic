@@ -121,13 +121,10 @@ impl From<comic_engines::EngineError> for AppError {
                 "Waifu2x 引擎损坏或校验失败，请重新安装应用或运行 scripts/fetch-waifu2x.sh",
             ),
             EngineError::GpuUnavailable(s) => {
-                Self::new(ErrorCode::GpuUnavailable, format!("GPU 不可用: {s}"))
-                    .with_detail(s)
+                Self::new(ErrorCode::GpuUnavailable, format!("GPU 不可用: {s}")).with_detail(s)
             }
             EngineError::OutOfMemory => Self::new(ErrorCode::Oom, "显存/内存不足，可尝试减小分块"),
-            EngineError::Timeout(d) => {
-                Self::new(ErrorCode::Timeout, format!("处理超时 ({d:?})"))
-            }
+            EngineError::Timeout(d) => Self::new(ErrorCode::Timeout, format!("处理超时 ({d:?})")),
             EngineError::Cancelled => Self::cancelled(),
             EngineError::Process(s) => {
                 Self::new(ErrorCode::ProcessFail, "引擎进程失败").with_detail(s)

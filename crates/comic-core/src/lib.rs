@@ -22,7 +22,7 @@ pub mod unrar;
 pub use config::AppConfig;
 pub use error::{AppError, AppResult, ErrorCode};
 pub use job::{
-    CreateJobRequest, CreateJobResult, JobManifest, JobState, JobStatus, OutputOptions,
-    PageStatus, ResumeHint, SourceKind,
+    CreateJobRequest, CreateJobResult, JobManifest, JobState, JobStatus, OutputOptions, PageStatus,
+    ResumeHint, SourceKind,
 };
 pub use scheduler::Scheduler;

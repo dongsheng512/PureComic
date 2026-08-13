@@ -112,10 +112,7 @@ pub fn resolve_waifu2x_paths(
             return Some(Waifu2xPaths {
                 binary: b.to_path_buf(),
                 models_dir: m.to_path_buf(),
-                third_party: m
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_path_buf(),
+                third_party: m.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
             });
         }
     }
@@ -127,15 +124,13 @@ pub fn resolve_waifu2x_paths(
         if !tp.is_dir() {
             continue;
         }
-        let models = first_existing_dir(&[
-            tp.join("models-cunet"),
-            tp.join("resources/models-cunet"),
-        ])
-        .or_else(|| {
-            models_override
-                .filter(|m| m.is_dir())
-                .map(|m| m.to_path_buf())
-        });
+        let models =
+            first_existing_dir(&[tp.join("models-cunet"), tp.join("resources/models-cunet")])
+                .or_else(|| {
+                    models_override
+                        .filter(|m| m.is_dir())
+                        .map(|m| m.to_path_buf())
+                });
         let Some(models) = models else {
             continue;
         };

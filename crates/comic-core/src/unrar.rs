@@ -99,9 +99,7 @@ pub fn list_rar_images(
         let safe_str = safe.to_string_lossy().replace('\\', "/");
         check_entry_limits(cfg, i as u32, 0, 0, total_uncomp)?;
         total_uncomp = total_uncomp.saturating_add(1);
-        if safe_str.eq_ignore_ascii_case("ComicInfo.xml")
-            || safe_str.ends_with("/ComicInfo.xml")
-        {
+        if safe_str.eq_ignore_ascii_case("ComicInfo.xml") || safe_str.ends_with("/ComicInfo.xml") {
             has_comic_info = true;
             continue;
         }

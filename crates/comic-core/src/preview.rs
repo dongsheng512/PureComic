@@ -5,8 +5,8 @@ use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::job::EnhanceOptions;
 use crate::pipeline::GpuLock;
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use comic_engines::{EnhanceBatchRequest, UpscaleEngine};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -96,11 +96,8 @@ fn file_to_data_url_png(path: &Path) -> AppResult<(String, u32, u32)> {
         let mut cursor = std::io::Cursor::new(&mut buf);
         img.write_to(&mut cursor, image::ImageFormat::Png)
             .map_err(|e| {
-                AppError::new(
-                    crate::error::ErrorCode::DecodeFail,
-                    "预览编码失败",
-                )
-                .with_detail(e.to_string())
+                AppError::new(crate::error::ErrorCode::DecodeFail, "预览编码失败")
+                    .with_detail(e.to_string())
             })?;
     }
     let url = format!("data:image/png;base64,{}", B64.encode(&buf));
@@ -126,7 +123,10 @@ pub async fn preview_page(
     }
     let page_name = v.page_names[page_index as usize].clone();
 
-    let work = cfg.work_root.join("preview").join(Uuid::new_v4().to_string());
+    let work = cfg
+        .work_root
+        .join("preview")
+        .join(Uuid::new_v4().to_string());
     std::fs::create_dir_all(&work)?;
     let before_png = work.join("before.png");
     let after_png = work.join("after.png");

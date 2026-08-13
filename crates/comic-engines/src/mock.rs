@@ -1,8 +1,8 @@
 //! Mock engine: copies / nearest-neighbor upscales for CI and UI development.
 
 use crate::{
-    EnhanceBatchRequest, EnhanceBatchResult, EngineAvailability, EngineError, EngineKind,
-    EngineStatus, GpuInfo, ScaleFactor, UpscaleEngine,
+    EngineAvailability, EngineError, EngineKind, EngineStatus, EnhanceBatchRequest,
+    EnhanceBatchResult, GpuInfo, ScaleFactor, UpscaleEngine,
 };
 use async_trait::async_trait;
 use image::imageops::FilterType;

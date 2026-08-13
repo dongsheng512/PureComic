@@ -1,7 +1,7 @@
 //! Archive safety limits: zip bomb, path traversal, symlink rejection.
 
-use crate::error::{AppError, AppResult};
 use crate::config::AppConfig;
+use crate::error::{AppError, AppResult};
 use std::path::{Component, Path, PathBuf};
 
 pub fn sanitize_entry_path(name: &str) -> AppResult<PathBuf> {
@@ -17,14 +17,10 @@ pub fn sanitize_entry_path(name: &str) -> AppResult<PathBuf> {
             Component::Normal(s) => out.push(s),
             Component::CurDir => {}
             Component::ParentDir => {
-                return Err(AppError::path_traversal(format!(
-                    "拒绝父目录穿越: {name}"
-                )));
+                return Err(AppError::path_traversal(format!("拒绝父目录穿越: {name}")));
             }
             Component::RootDir | Component::Prefix(_) => {
-                return Err(AppError::path_traversal(format!(
-                    "拒绝非法路径: {name}"
-                )));
+                return Err(AppError::path_traversal(format!("拒绝非法路径: {name}")));
             }
         }
     }
@@ -44,10 +40,7 @@ pub fn check_entry_limits(
     if entry_index >= cfg.max_archive_entries {
         return Err(AppError::new(
             crate::error::ErrorCode::UnsupportedFormat,
-            format!(
-                "压缩包条目数超过上限 ({})",
-                cfg.max_archive_entries
-            ),
+            format!("压缩包条目数超过上限 ({})", cfg.max_archive_entries),
         ));
     }
     if uncompressed_size > cfg.max_page_bytes {

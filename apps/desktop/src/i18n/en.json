@@ -27,7 +27,7 @@
   "libraryAlready": "Already in library",
   "readerHint": "Open a job or comic file to read. Original pages are available immediately; enhanced pages replace them as they finish.",
   "readerEmpty": "No comic open",
-  "readerPickJob": "Choose a job…",
+  "readerPickJob": "Switch job…",
   "readerOpenFile": "Open file",
   "readerOpenFolder": "Open folder",
   "readerSingle": "Single",

@@ -429,72 +429,100 @@ export function ReaderView({
 
       {!barHidden && (
         <div
-          className={`shrink-0 border-b border-ink-200/80 bg-[#f0f2f7] py-2 pr-3 dark:border-white/10 dark:bg-ink-950 ${
-            immersive ? "pl-[88px]" : "pl-3"
+          className={`shrink-0 border-b border-ink-200/80 bg-ink-100 py-1 pr-2 dark:border-white/10 dark:bg-ink-950 ${
+            immersive ? "pl-[88px]" : "pl-2"
           }`}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="flex flex-wrap items-center gap-2">
-            <JobPicker
-              jobs={jobs}
-              value={state?.jobId ?? jobId ?? ""}
-              currentTitle={state?.title ?? null}
-              placeholder={i18n.readerPickJob}
-              onChange={(id) => {
-                setJobId(id || null);
-                sourceRef.current = "";
-                void refreshState(id || null, id ? null : source);
-              }}
-            />
-            <button type="button" className="btn-ghost !h-9 !px-3 text-xs" onClick={pickFile}>
-              {i18n.readerOpenFile}
-            </button>
-            <button type="button" className="btn-ghost !h-9 !px-3 text-xs" onClick={pickFolder}>
-              {i18n.readerOpenFolder}
-            </button>
-            <div className="mx-1 hidden h-5 w-px bg-ink-200 dark:bg-white/10 sm:block" />
-            <Segment
-              value={spread}
-              onChange={(v) => {
-                setSpread(v);
-                setPageIndex((i) => alignIndex(i, v, total));
-              }}
-              options={[
-                { id: "single", label: i18n.readerSingle },
-                { id: "double", label: i18n.readerDouble },
-              ]}
-            />
-            <Segment
-              value={direction}
-              onChange={setDirection}
-              options={[
-                { id: "ltr", label: i18n.readerLtr },
-                { id: "rtl", label: i18n.readerRtl },
-              ]}
-            />
-            <Segment
-              value={fit}
-              onChange={setFit}
-              options={[
-                { id: "screen", label: i18n.readerFitScreen },
-                { id: "smart", label: i18n.readerFitSmart },
-              ]}
-            />
-            <div className="ml-auto flex items-center gap-2">
+          <div className="flex min-h-8 items-center gap-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto whitespace-nowrap">
+              <JobPicker
+                jobs={jobs}
+                value={state?.jobId ?? jobId ?? ""}
+                currentTitle={state?.title ?? null}
+                placeholder={i18n.readerPickJob}
+                onChange={(id) => {
+                  setJobId(id || null);
+                  sourceRef.current = "";
+                  void refreshState(id || null, id ? null : source);
+                }}
+              />
+              <button type="button" className="btn-ghost !h-7 !px-2.5 !text-[11px]" onClick={pickFile}>
+                {i18n.readerOpenFile}
+              </button>
+              <button type="button" className="btn-ghost !h-7 !px-2.5 !text-[11px]" onClick={pickFolder}>
+                {i18n.readerOpenFolder}
+              </button>
+              <div className="mx-0.5 h-4 w-px shrink-0 bg-ink-200 dark:bg-white/10" />
+              <Segment
+                value={spread}
+                onChange={(v) => {
+                  setSpread(v);
+                  setPageIndex((i) => alignIndex(i, v, total));
+                }}
+                options={[
+                  { id: "single", label: i18n.readerSingle },
+                  { id: "double", label: i18n.readerDouble },
+                ]}
+              />
+              <Segment
+                value={direction}
+                onChange={setDirection}
+                options={[
+                  { id: "ltr", label: i18n.readerLtr },
+                  { id: "rtl", label: i18n.readerRtl },
+                ]}
+              />
+              <Segment
+                value={fit}
+                onChange={setFit}
+                options={[
+                  { id: "screen", label: i18n.readerFitScreen },
+                  { id: "smart", label: i18n.readerFitSmart },
+                ]}
+              />
+              {(pagesInView.length > 0 || busy || state?.jobState) && (
+                <>
+                  <div className="mx-0.5 h-4 w-px shrink-0 bg-ink-200 dark:bg-white/10" />
+                  {pagesInView.map((p) => (
+                    <span
+                      key={p.index}
+                      className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] leading-none ${
+                        p.kind === "enhanced"
+                          ? "border-success/35 bg-success/10 text-success dark:text-emerald-200/90"
+                          : "border-ink-200 bg-ink-50 text-ink-600 dark:border-white/10 dark:bg-white/5 dark:text-ink-300"
+                      }`}
+                    >
+                      {p.index + 1} {kindLabel(p.kind, i18n)}
+                    </span>
+                  ))}
+                  {state?.jobState && (
+                    <span
+                      className="shrink-0 text-[10px] text-ink-500 dark:text-ink-400"
+                      title={`${i18n.readerJob} · ${state.jobState} · ${state.pagesDone}/${state.pageCount}`}
+                    >
+                      {state.pagesDone}/{state.pageCount}
+                    </span>
+                  )}
+                  {busy && <span className="shrink-0 text-[10px] text-ink-500">{i18n.readerLoading}</span>}
+                </>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
               <button
                 type="button"
-                className="btn-ghost !h-9 !px-2.5 text-xs"
+                className="btn-ghost !h-7 !min-w-7 !px-1.5 !text-xs"
                 disabled={!state || pageIndex <= 0}
                 onClick={() => go(-1)}
               >
                 {direction === "rtl" ? "›" : "‹"}
               </button>
-              <span className="min-w-[6.5rem] text-center text-sm tabular-nums text-ink-700 dark:text-ink-200">
+              <span className="min-w-[5.5rem] text-center text-[12px] tabular-nums text-ink-700 dark:text-ink-200">
                 {pageLabel}
               </span>
               <button
                 type="button"
-                className="btn-ghost !h-9 !px-2.5 text-xs"
+                className="btn-ghost !h-7 !min-w-7 !px-1.5 !text-xs"
                 disabled={!state || pageIndex >= Math.max(0, total - (spread === "double" ? 2 : 1))}
                 onClick={() => go(1)}
               >
@@ -502,7 +530,7 @@ export function ReaderView({
               </button>
               <button
                 type="button"
-                className="btn-ghost !h-9 !px-3 text-xs"
+                className="btn-ghost !h-7 !px-2.5 !text-[11px]"
                 title={`${i18n.readerFullscreen} (F)`}
                 onClick={() => void toggleFullscreen()}
               >
@@ -510,36 +538,13 @@ export function ReaderView({
               </button>
               <button
                 type="button"
-                className="btn-ghost !h-9 !px-3 text-xs"
+                className="btn-ghost !h-7 !px-2.5 !text-[11px]"
                 title={`${i18n.readerHideBar} (H)`}
                 onClick={() => setBar(true)}
               >
                 {i18n.readerHideBar}
               </button>
             </div>
-          </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-500">
-            <span className="truncate font-medium text-ink-700 dark:text-ink-200">
-              {state?.title ?? i18n.readerEmpty}
-            </span>
-            {state?.jobState && (
-              <span>
-                {i18n.readerJob} · {state.jobState} · {state.pagesDone}/{state.pageCount}
-              </span>
-            )}
-            {pagesInView.map((p) => (
-              <span
-                key={p.index}
-                className={`rounded-md border px-1.5 py-0.5 ${
-                  p.kind === "enhanced"
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
-                    : "border-ink-200 bg-ink-100 text-ink-600 dark:border-white/10 dark:bg-white/5 dark:text-ink-300"
-                }`}
-              >
-                {p.index + 1} {kindLabel(p.kind, i18n)}
-              </span>
-            ))}
-            {busy && <span>{i18n.readerLoading}</span>}
           </div>
         </div>
       )}
@@ -686,14 +691,14 @@ function JobPicker({
         aria-expanded={open}
         title={label}
         onClick={() => setOpen((v) => !v)}
-        className={`btn-ghost !h-9 !px-3 text-xs max-w-[14rem] ${
-          open ? "!border-accent" : ""
+        className={`btn-soft !h-7 !px-2.5 !text-[11px] max-w-[12rem] ${
+          open ? "!ring-1 !ring-ink-950 dark:!ring-white" : ""
         }`}
       >
         <span className="truncate">{label}</span>
         <svg
           viewBox="0 0 20 20"
-          className={`h-3.5 w-3.5 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-accent" : ""}`}
+          className={`h-3 w-3 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-ink-950 dark:text-white" : ""}`}
           aria-hidden="true"
         >
           <path
@@ -720,7 +725,7 @@ function JobPicker({
                   aria-selected={active}
                   className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition ${
                     active
-                      ? "bg-accent/15 text-ink-950 dark:text-white"
+                      ? "bg-ink-200 text-ink-950 dark:bg-white/10 dark:text-white"
                       : "text-ink-700 hover:bg-ink-100 hover:text-ink-950 dark:text-ink-200 dark:hover:bg-white/10 dark:hover:text-white"
                   }`}
                   onClick={() => {
@@ -733,7 +738,7 @@ function JobPicker({
                     {stateLabel(j.state)}
                   </span>
                   {active && (
-                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-ink-950 dark:text-white" aria-hidden="true">
                       <path
                         fill="currentColor"
                         d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.2 7.2a1 1 0 0 1-1.4 0L3.3 9.1a1 1 0 1 1 1.4-1.4l4.1 4.08 6.5-6.48a1 1 0 0 1 1.4 0Z"
@@ -760,13 +765,13 @@ function Segment<T extends string>({
   options: { id: T; label: string }[];
 }) {
   return (
-    <div className="inline-flex rounded-xl border border-ink-200 bg-ink-100/80 p-0.5 dark:border-white/10 dark:bg-white/5">
+    <div className="inline-flex shrink-0 rounded-lg border border-ink-200 bg-ink-100/80 p-0.5 dark:border-white/10 dark:bg-white/5">
       {options.map((opt) => (
         <button
           key={opt.id}
           type="button"
           onClick={() => onChange(opt.id)}
-          className={`rounded-lg px-2.5 py-1 text-xs transition ${
+          className={`rounded-md px-2 py-0.5 text-[11px] leading-5 transition ${
             value === opt.id
               ? "bg-white text-ink-950 shadow-sm dark:bg-ink-800 dark:text-white"
               : "text-ink-600 hover:text-ink-950 dark:text-ink-300 dark:hover:text-white"

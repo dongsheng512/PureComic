@@ -75,8 +75,7 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -109,9 +108,7 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Estimate { input, scale } => {
-            let e = sched
-                .estimate(&input.display().to_string(), scale)
-                .await?;
+            let e = sched.estimate(&input.display().to_string(), scale).await?;
             println!("{}", serde_json::to_string_pretty(&e)?);
         }
         Commands::Preview {

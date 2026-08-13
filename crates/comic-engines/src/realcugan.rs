@@ -1,8 +1,8 @@
 //! realcugan-ncnn-vulkan sidecar (SE/PRO/NOSE packs).
 
 use crate::{
-    EnhanceBatchRequest, EnhanceBatchResult, EngineAvailability, EngineError, EngineKind,
-    EngineStatus, GpuInfo, UpscaleEngine,
+    EngineAvailability, EngineError, EngineKind, EngineStatus, EnhanceBatchRequest,
+    EnhanceBatchResult, GpuInfo, UpscaleEngine,
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -90,10 +90,14 @@ impl RealCuganEngine {
     }
 
     pub fn available_packs(&self) -> Vec<CuganModelPack> {
-        [CuganModelPack::Se, CuganModelPack::Pro, CuganModelPack::Nose]
-            .into_iter()
-            .filter(|p| self.pack_dir(*p).is_dir())
-            .collect()
+        [
+            CuganModelPack::Se,
+            CuganModelPack::Pro,
+            CuganModelPack::Nose,
+        ]
+        .into_iter()
+        .filter(|p| self.pack_dir(*p).is_dir())
+        .collect()
     }
 }
 
@@ -126,14 +130,12 @@ impl UpscaleEngine for RealCuganEngine {
             .join(",");
         let av = self.is_available();
         let (available, detail) = match av {
-            EngineAvailability::Ready => (
-                true,
-                format!("realcugan-ncnn-vulkan 就绪 · 模型 {packs}"),
-            ),
-            EngineAvailability::MissingBinary => (
-                false,
-                format!("未找到二进制: {}", self.binary.display()),
-            ),
+            EngineAvailability::Ready => {
+                (true, format!("realcugan-ncnn-vulkan 就绪 · 模型 {packs}"))
+            }
+            EngineAvailability::MissingBinary => {
+                (false, format!("未找到二进制: {}", self.binary.display()))
+            }
             EngineAvailability::ChecksumMismatch => (false, "二进制校验失败".into()),
             EngineAvailability::Unavailable(s) => (false, s),
         };

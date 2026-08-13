@@ -2,7 +2,7 @@
 //!
 //! Locking rule: never hold `manifest` write lock across long blocking work.
 
-use crate::archive::{self, extract_to_workdir, export_job_with_progress};
+use crate::archive::{self, export_job_with_progress, extract_to_workdir};
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::estimate::assert_disk_ok;
@@ -82,9 +82,9 @@ pub async fn run_job(
             recover_pages_from_indir(&mut m);
         }
         let ready = !m.pages.is_empty()
-            && m.pages.iter().all(|p| {
-                p.in_path.as_ref().map(|x| x.is_file()).unwrap_or(false)
-            });
+            && m.pages
+                .iter()
+                .all(|p| p.in_path.as_ref().map(|x| x.is_file()).unwrap_or(false));
         if ready {
             for page in &mut m.pages {
                 if page.out_path.as_ref().map(|p| p.is_file()).unwrap_or(false) {
@@ -330,11 +330,7 @@ pub async fn run_job(
         m.stats.pages_done = tick.pages_done;
         m.stats.pages_total = tick.pages_total.max(1);
         let kind = tick.current.as_deref().unwrap_or("pack");
-        let label = if kind == "encode" {
-            "编码"
-        } else {
-            "写入"
-        };
+        let label = if kind == "encode" { "编码" } else { "写入" };
         m.last_message = Some(format!(
             "打包{label} {}/{}",
             tick.pages_done, tick.pages_total
@@ -659,10 +655,7 @@ pub(crate) fn recover_pages_from_indir(m: &mut JobManifest) {
             .and_then(|s| s.to_str())
             .unwrap_or("page")
             .to_string();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
         let out = out_dir.join(format!("{stem}.{ext}"));
         pages.push(PageRecord {
             index: idx as u32,

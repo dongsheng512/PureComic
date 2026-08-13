@@ -53,17 +53,21 @@ function readTheme(): Theme {
   }
 }
 
+const THEME_BG = { light: "#f8fafc", dark: "#0a0a0a" } as const;
+
 function applyTheme(theme: Theme) {
+  const bg = THEME_BG[theme];
   document.documentElement.classList.toggle("dark", theme === "dark");
+  document.documentElement.style.backgroundColor = bg;
+  if (document.body) document.body.style.backgroundColor = bg;
   try {
     localStorage.setItem(THEME_KEY, theme);
   } catch {
     /* ignore */
   }
+  // 与 WKWebView 底层对齐，避免 macOS 圆角边缘露出黑边
   void import("@tauri-apps/api/window")
-    .then(({ getCurrentWindow }) =>
-      getCurrentWindow().setBackgroundColor(theme === "light" ? "#f0f2f7" : "#1c1e2e"),
-    )
+    .then(({ getCurrentWindow }) => getCurrentWindow().setBackgroundColor(bg))
     .catch(() => undefined);
 }
 
@@ -427,7 +431,7 @@ export default function App() {
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <header
-        className={`sticky top-0 z-10 shrink-0 border-b border-ink-200/80 bg-[#f0f2f7] dark:border-white/[0.06] dark:bg-ink-950 ${
+        className={`sticky top-0 z-10 shrink-0 border-b border-ink-300/70 bg-white/90 backdrop-blur-md dark:border-white/[0.06] dark:bg-black/80 ${
           hideAppChrome ? "hidden" : ""
         }`}
       >
@@ -438,19 +442,19 @@ export default function App() {
               {i18n.appName}
             </h1>
             <span
-              className="min-w-0 truncate rounded-full border border-emerald-600/20 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] text-emerald-800 dark:border-emerald-400/20 dark:text-emerald-200/90"
+              className="min-w-0 truncate rounded-full bg-ink-200 px-2.5 py-0.5 text-[11px] text-ink-600 dark:bg-white/10 dark:text-ink-300"
               title={readyModelHint}
             >
               {readyModelLabel}
             </span>
           </div>
-          <div className="flex items-center gap-2 shrink-0 pr-3">
+          <div className="flex items-center gap-1.5 shrink-0 pr-3">
             <button
               type="button"
               onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
               title={i18n.themeToggle}
               aria-label={i18n.themeToggle}
-              className="inline-flex h-[34px] items-center gap-1.5 rounded-xl border border-ink-200 bg-white px-2.5 text-sm text-ink-700 hover:bg-ink-100 dark:border-white/10 dark:bg-white/5 dark:text-ink-200 dark:hover:bg-white/10 dark:hover:text-white"
+              className="btn-soft !h-[34px] !px-2.5 !text-sm"
             >
               {theme === "dark" ? (
                 <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
@@ -469,41 +473,47 @@ export default function App() {
               )}
               <span className="hidden sm:inline">{theme === "dark" ? i18n.themeLight : i18n.themeDark}</span>
             </button>
-            <nav className="flex rounded-xl border border-ink-200 bg-ink-100/70 p-1 dark:border-white/10 dark:bg-white/5">
-              {tabs.map((x) => (
-                <button
-                  key={x.id}
-                  type="button"
-                  onClick={() => setTab(x.id)}
-                  className={`px-3 py-1.5 text-sm rounded-lg transition ${
-                    tab === x.id
-                      ? "bg-accent text-white shadow"
-                      : "text-ink-600 hover:text-ink-950 dark:text-ink-300 dark:hover:text-white"
-                  }`}
-                >
-                  {x.label}
-                </button>
-              ))}
+            <nav className="flex items-stretch gap-0.5 px-1">
+              {tabs.map((x) => {
+                const active = tab === x.id;
+                return (
+                  <button
+                    key={x.id}
+                    type="button"
+                    onClick={() => setTab(x.id)}
+                    className={`relative px-3 py-2 text-sm transition ${
+                      active
+                        ? "font-semibold text-ink-950 dark:text-white"
+                        : "font-normal text-ink-500 hover:text-ink-800 dark:text-ink-400 dark:hover:text-ink-200"
+                    }`}
+                  >
+                    {x.label}
+                    {active && (
+                      <span className="absolute inset-x-3 bottom-0.5 h-0.5 rounded-full bg-ink-950 dark:bg-white" />
+                    )}
+                  </button>
+                );
+              })}
             </nav>
             <button
               type="button"
               onClick={() => setQueueOpen(true)}
               title={i18n.showQueue}
-              className={`inline-flex items-center rounded-xl border px-3 py-1.5 text-sm transition ${
+              className={`btn-soft !h-[34px] !px-3 !text-sm ${
                 runningJobCount > 0
-                  ? "border-amber-400/40 bg-amber-500 text-ink-950 font-medium shadow"
+                  ? "!bg-amber-400/90 !text-ink-950 font-medium"
                   : queueOpen
-                    ? "border-accent/40 bg-accent text-white shadow"
-                    : "border-ink-200 bg-white text-ink-600 hover:bg-ink-100 hover:text-ink-950 dark:border-white/10 dark:bg-white/5 dark:text-ink-300 dark:hover:text-white dark:hover:bg-white/10"
+                    ? "!bg-ink-300 !text-ink-800 dark:!bg-white/15 dark:!text-ink-100"
+                    : ""
               }`}
             >
               {i18n.queue}
               {jobs.length > 0 && (
                 <span
-                  className={`ml-1.5 inline-flex min-w-[1.15rem] h-[1.15rem] items-center justify-center rounded-full px-1 text-[11px] font-semibold leading-none ${
+                  className={`ml-0.5 inline-flex min-w-[1.15rem] h-[1.15rem] items-center justify-center rounded-full px-1 text-[11px] font-semibold leading-none ${
                     runningJobCount > 0
-                      ? "bg-ink-950/20 text-ink-950"
-                      : "bg-ink-200 text-ink-800 dark:bg-white/15 dark:text-ink-100"
+                      ? "bg-ink-950/15 text-ink-950"
+                      : "bg-ink-300/80 text-ink-800 dark:bg-white/15 dark:text-ink-100"
                   }`}
                 >
                   {runningJobCount || jobs.length}
@@ -549,7 +559,7 @@ export default function App() {
         {tab === "library" && (
           <div className="flex min-h-0 flex-1 flex-col">
             {libraryNotice && (
-              <div className="mb-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-100">
+              <div className="mb-3 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:text-emerald-100">
                 {libraryNotice}
               </div>
             )}
@@ -619,7 +629,7 @@ export default function App() {
           <div className="grid lg:grid-cols-2 gap-5 items-stretch">
             <section
               className={`card p-5 h-full flex flex-col ${
-                dragOver ? "ring-2 ring-accent border-accent/40 bg-accent/5" : ""
+                dragOver ? "ring-2 ring-ink-950 border-ink-950 bg-ink-200/40 dark:ring-white dark:border-white" : ""
               }`}
             >
               <div className="flex items-center justify-between mb-3">
@@ -636,7 +646,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={pickSource}
-                className="w-full flex-1 min-h-[8rem] rounded-xl border border-dashed border-ink-300 bg-ink-100/60 px-5 py-10 text-center hover:border-accent/50 hover:bg-accent/5 transition grid place-items-center dark:border-white/15 dark:bg-ink-950/40"
+                className="w-full flex-1 min-h-[8rem] rounded-xl border border-dashed border-ink-300 bg-ink-100 px-5 py-10 text-center hover:border-ink-500 hover:bg-ink-200/50 transition grid place-items-center dark:border-white/15 dark:bg-white/[0.03]"
               >
                 <div>
                   <p className="text-sm text-ink-800 dark:text-ink-100">
@@ -644,7 +654,7 @@ export default function App() {
                     {i18n.dropCompact}
                   </p>
                   {source && (
-                    <p className="mt-2 text-xs text-accent break-all font-mono">{source}</p>
+                    <p className="mt-2 text-xs text-ink-600 break-all font-mono dark:text-ink-300">{source}</p>
                   )}
                 </div>
               </button>
@@ -662,7 +672,7 @@ export default function App() {
               {(validation || estimate || resumeHint) && (
                 <div className="mt-4 flex flex-wrap gap-2 text-xs">
                   {validation && (
-                    <span className="rounded-lg bg-emerald-500/15 border border-emerald-400/30 px-2.5 py-1 text-emerald-800 dark:text-emerald-100">
+                    <span className="rounded-lg bg-success/12 border border-success/30 px-2.5 py-1 text-success dark:text-emerald-100">
                       {i18n.validateOk} · {validation.pageCount} {i18n.pages}
                       {validation.hasComicInfo ? " · ComicInfo" : ""}
                     </span>
@@ -812,7 +822,7 @@ export default function App() {
               </div>
               {accel && (
                 <Field label={i18n.threads}>
-                  <p className="min-h-[2.5rem] text-xs font-mono leading-5 text-emerald-700 dark:text-emerald-200 break-all">
+                  <p className="min-h-[2.5rem] text-xs font-mono leading-5 text-success dark:text-emerald-200 break-all">
                     {accel}
                   </p>
                 </Field>
@@ -849,7 +859,7 @@ export default function App() {
               <div className="mt-4 flex gap-2">
                 <button
                   type="button"
-                  className="btn-primary flex-1 py-2.5 text-base"
+                  className="btn-accent flex-1 py-2.5 text-base"
                   disabled={!canStart}
                   onClick={start}
                 >
@@ -898,7 +908,7 @@ export default function App() {
               </button>
             </div>
             {diagPath && (
-              <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 px-4 py-3 text-sm text-emerald-800 dark:text-emerald-100 font-mono break-all">
+              <div className="rounded-xl bg-success/10 border border-success/25 px-4 py-3 text-sm text-success dark:text-emerald-100 font-mono break-all">
                 {diagPath}
               </div>
             )}
@@ -1064,10 +1074,10 @@ function Segmented<T extends string>({
           key={opt.id}
           type="button"
           onClick={() => onChange(opt.id)}
-          className={`rounded-xl px-3 py-2 text-sm border transition ${
+          className={`rounded-full px-3 py-2 text-sm border transition ${
             value === opt.id
-              ? "border-accent bg-accent/15 text-ink-950 dark:text-white"
-              : "border-ink-200 bg-ink-100/80 text-ink-700 hover:bg-ink-200/80 dark:border-white/10 dark:bg-white/5 dark:text-ink-200 dark:hover:bg-white/10"
+              ? "border-ink-400 bg-ink-300 text-ink-800 dark:border-white/20 dark:bg-white/15 dark:text-ink-100"
+              : "border-ink-300 bg-ink-200/80 text-ink-700 hover:bg-ink-300 dark:border-white/10 dark:bg-white/5 dark:text-ink-200 dark:hover:bg-white/10"
           }`}
         >
           {opt.label}
@@ -1117,16 +1127,16 @@ function SelectBox<T extends string>({
         onClick={() => {
           if (!single) setOpen((v) => !v);
         }}
-        className={`w-full h-10 flex items-center justify-between gap-2 rounded-xl border px-3 text-sm text-left transition ${
+        className={`w-full h-10 flex items-center justify-between gap-2 rounded-full border px-3 text-sm text-left transition ${
           open
-            ? "border-accent bg-white text-ink-950 dark:bg-ink-950 dark:text-white"
-            : "border-ink-200 bg-white text-ink-800 hover:border-ink-300 dark:border-white/10 dark:bg-ink-950/70 dark:text-ink-100 dark:hover:border-white/20 dark:hover:bg-ink-950"
+            ? "border-ink-950 bg-white text-ink-950 dark:border-white dark:bg-ink-900 dark:text-white"
+            : "border-ink-300 bg-white text-ink-800 hover:border-ink-500 dark:border-white/10 dark:bg-ink-900 dark:text-ink-100 dark:hover:border-white/20"
         } disabled:opacity-80 disabled:cursor-default`}
       >
         <span className="truncate">{selected?.label ?? "—"}</span>
         <svg
           viewBox="0 0 20 20"
-          className={`h-4 w-4 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-accent" : ""}`}
+          className={`h-4 w-4 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-ink-950 dark:text-white" : ""}`}
           aria-hidden="true"
         >
           <path
@@ -1150,7 +1160,7 @@ function SelectBox<T extends string>({
                   aria-selected={active}
                   className={`flex w-full items-center justify-between px-3 py-2 text-sm text-left transition ${
                     active
-                      ? "bg-accent/15 text-ink-950 dark:text-white"
+                      ? "bg-ink-200 text-ink-950 dark:bg-white/10 dark:text-white"
                       : "text-ink-700 hover:bg-ink-100 hover:text-ink-950 dark:text-ink-200 dark:hover:bg-white/10 dark:hover:text-white"
                   }`}
                   onClick={() => {
@@ -1160,7 +1170,7 @@ function SelectBox<T extends string>({
                 >
                   <span className="truncate">{opt.label}</span>
                   {active && (
-                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-ink-950 dark:text-white" aria-hidden="true">
                       <path
                         fill="currentColor"
                         d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.2 7.2a1 1 0 0 1-1.4 0L3.3 9.1a1 1 0 1 1 1.4-1.4l4.1 4.08 6.5-6.48a1 1 0 0 1 1.4 0Z"
@@ -1180,11 +1190,11 @@ function SelectBox<T extends string>({
 function stateBadgeClass(state: string): string {
   const s = normalizeJobState(state);
   if (s === "completed")
-    return "bg-emerald-500/20 border-emerald-400/40 text-emerald-800 dark:text-emerald-100";
+    return "bg-success/15 border-success/35 text-success dark:text-emerald-100";
   if (s === "failed") return "bg-rose-500/20 border-rose-400/40 text-rose-800 dark:text-rose-100";
   if (s === "cancelled" || s === "cancelling")
     return "bg-ink-200 border-ink-300 text-ink-700 dark:bg-ink-700/60 dark:border-white/15 dark:text-ink-200";
-  if (s === "running") return "bg-accent/25 border-accent/50 text-ink-950 dark:text-white";
+  if (s === "running") return "bg-accent/15 border-accent/40 text-accent dark:text-white";
   if (s === "extracting") return "bg-sky-500/20 border-sky-400/40 text-sky-800 dark:text-sky-100";
   if (s === "finalizing")
     return "bg-amber-500/20 border-amber-400/40 text-amber-900 dark:text-amber-100";
@@ -1308,7 +1318,7 @@ function JobQueue({
                     {id && (
                       <button
                         type="button"
-                        className="rounded-lg border border-accent/40 bg-accent/15 px-2.5 py-1 text-xs font-medium text-accent hover:bg-accent/25"
+                        className="rounded-full border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/15 dark:bg-white/10 dark:text-ink-100"
                         onClick={() => onRead(id)}
                       >
                         {i18n.readerRead}
@@ -1336,7 +1346,7 @@ function JobQueue({
                     {j.outputPath && (
                       <button
                         type="button"
-                        className="text-xs text-accent hover:text-ink-950 dark:hover:text-white"
+                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-ink-400 dark:hover:text-white"
                         onClick={() => id && onOpen(id)}
                       >
                         {i18n.openOut}
@@ -1350,7 +1360,7 @@ function JobQueue({
                       normalizeJobState(j.state) === "failed"
                         ? "bg-rose-400"
                         : normalizeJobState(j.state) === "completed"
-                          ? "bg-emerald-400"
+                          ? "bg-success"
                           : "bg-accent"
                     }`}
                     style={{ width: `${pct}%` }}
@@ -1361,11 +1371,11 @@ function JobQueue({
                   {j.stage ? ` · ${j.stage}` : ""}
                 </p>
                 {j.message && (
-                  <p className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-200/90">{j.message}</p>
+                  <p className="mt-0.5 text-xs text-success dark:text-emerald-200/90">{j.message}</p>
                 )}
                 {j.error && <p className="mt-1 text-xs text-rose-300">{j.error.message}</p>}
                 {j.outputPath && (
-                  <p className="mt-1 text-[11px] text-emerald-300/90 font-mono truncate">
+                  <p className="mt-1 text-[11px] text-success/90 dark:text-emerald-300/90 font-mono truncate">
                     {j.outputPath}
                   </p>
                 )}

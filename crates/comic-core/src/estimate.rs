@@ -32,20 +32,16 @@ pub fn estimate_disk_usage(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult
         let sample = match v.kind {
             crate::job::SourceKind::Folder => {
                 let p = path.join(name);
-                image_io::load_image(&p).ok().map(|img| {
-                    (img.width() as u64) * (img.height() as u64) * 4
-                })
+                image_io::load_image(&p)
+                    .ok()
+                    .map(|img| (img.width() as u64) * (img.height() as u64) * 4)
             }
             _ => None,
         };
         rgba_sum = rgba_sum.saturating_add(sample.unwrap_or(default_page));
     }
     let sampled = v.page_names.len().min(5) as u64;
-    let avg = if sampled > 0 {
-        rgba_sum / sampled
-    } else {
-        default_page
-    };
+    let avg = rgba_sum.checked_div(sampled).unwrap_or(default_page);
     let per_page = avg
         .saturating_mul(scale)
         .saturating_mul(scale)
@@ -100,9 +96,7 @@ pub fn assert_disk_ok(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult<Disk
     let est = estimate_disk_usage(path, scale, cfg)?;
     if !est.ok {
         return Err(AppError::disk(
-            est.message
-                .clone()
-                .unwrap_or_else(|| "磁盘空间不足".into()),
+            est.message.clone().unwrap_or_else(|| "磁盘空间不足".into()),
         ));
     }
     Ok(est)

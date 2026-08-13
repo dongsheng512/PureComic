@@ -2,8 +2,8 @@
 //! Prefer directory batch (`-i dir -o dir`); pipeline may use single-file for progress.
 
 use crate::{
-    verify_sha256, EnhanceBatchRequest, EnhanceBatchResult, EngineAvailability, EngineError,
-    EngineKind, EngineStatus, GpuInfo, UpscaleEngine,
+    verify_sha256, EngineAvailability, EngineError, EngineKind, EngineStatus, EnhanceBatchRequest,
+    EnhanceBatchResult, GpuInfo, UpscaleEngine,
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -72,13 +72,10 @@ impl UpscaleEngine for Waifu2xEngine {
         let av = self.is_available();
         let (available, detail) = match av {
             EngineAvailability::Ready => (true, "waifu2x-ncnn-vulkan 就绪".into()),
-            EngineAvailability::MissingBinary => (
-                false,
-                format!("未找到二进制: {}", self.binary.display()),
-            ),
-            EngineAvailability::ChecksumMismatch => {
-                (false, "二进制 SHA-256 校验失败".into())
+            EngineAvailability::MissingBinary => {
+                (false, format!("未找到二进制: {}", self.binary.display()))
             }
+            EngineAvailability::ChecksumMismatch => (false, "二进制 SHA-256 校验失败".into()),
             EngineAvailability::Unavailable(s) => (false, s),
         };
         EngineStatus {
@@ -336,8 +333,7 @@ mod kill_tests {
         let mut child = cmd.spawn().expect("spawn sleep");
         let pid = child.id().expect("pid");
         assert!(
-            std::path::Path::new(&format!("/proc/{pid}")).exists()
-                || libc_kill_ok(pid as i32, 0),
+            std::path::Path::new(&format!("/proc/{pid}")).exists() || libc_kill_ok(pid as i32, 0),
             "sleep should be running"
         );
         kill_child_tree(&mut child, Some(pid)).await;

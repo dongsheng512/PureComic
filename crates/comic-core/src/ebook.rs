@@ -19,9 +19,8 @@ use zip::ZipArchive;
 /// Ordered list of image entry paths inside an EPUB (zip-relative, forward slashes).
 pub fn list_epub_images(path: &Path, cfg: &AppConfig) -> AppResult<(Vec<String>, Vec<String>)> {
     let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::unsupported(format!("无法打开 EPUB（需为 ZIP 包）: {e}"))
-    })?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|e| AppError::unsupported(format!("无法打开 EPUB（需为 ZIP 包）: {e}")))?;
 
     let mut all_images: Vec<String> = Vec::new();
     let mut total_uncomp = 0u64;
@@ -29,9 +28,9 @@ pub fn list_epub_images(path: &Path, cfg: &AppConfig) -> AppResult<(Vec<String>,
     let mut warnings = Vec::new();
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
-            AppError::internal(format!("EPUB 条目: {e}"))
-        })?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(format!("EPUB 条目: {e}")))?;
         let name = entry.name().to_string();
         if name.ends_with('/') {
             continue;
@@ -92,9 +91,8 @@ pub fn list_epub_images(path: &Path, cfg: &AppConfig) -> AppResult<(Vec<String>,
 
 fn read_zip_entry_string(path: &Path, entry_name: &str) -> AppResult<String> {
     let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::internal(format!("EPUB zip: {e}"))
-    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| AppError::internal(format!("EPUB zip: {e}")))?;
     // try exact and common slash variants
     let candidates = [entry_name.to_string(), entry_name.replace('\\', "/")];
     for cand in &candidates {
@@ -107,9 +105,9 @@ fn read_zip_entry_string(path: &Path, entry_name: &str) -> AppResult<String> {
     // case-insensitive scan
     let want = entry_name.replace('\\', "/").to_ascii_lowercase();
     for i in 0..archive.len() {
-        let mut e = archive.by_index(i).map_err(|e| {
-            AppError::internal(e.to_string())
-        })?;
+        let mut e = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(e.to_string()))?;
         let n = e.name().replace('\\', "/");
         if n.to_ascii_lowercase() == want {
             let mut s = String::new();
@@ -123,9 +121,8 @@ fn read_zip_entry_string(path: &Path, entry_name: &str) -> AppResult<String> {
 fn order_epub_images_by_opf(path: &Path, all_images: &[String]) -> AppResult<Vec<String>> {
     // META-INF/container.xml → rootfile full-path
     let container = read_zip_entry_string(path, "META-INF/container.xml")?;
-    let rootfile = extract_attr_value(&container, "rootfile", "full-path").ok_or_else(|| {
-        AppError::unsupported("EPUB container.xml 无 rootfile")
-    })?;
+    let rootfile = extract_attr_value(&container, "rootfile", "full-path")
+        .ok_or_else(|| AppError::unsupported("EPUB container.xml 无 rootfile"))?;
     let rootfile = rootfile.replace('\\', "/");
     let opf_dir = Path::new(&rootfile)
         .parent()
@@ -220,9 +217,7 @@ fn join_epub_path(base: &str, href: &str) -> String {
 }
 
 fn normalize_zip_path(p: &str) -> String {
-    p.replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string()
+    p.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn extract_attr_value(xml: &str, tag: &str, attr: &str) -> Option<String> {
@@ -345,7 +340,8 @@ fn extract_img_srcs(html: &str) -> Vec<String> {
         };
         let end = start + end_rel;
         let slice = &html[start..end];
-        if let Some(src) = attr_from_tag(slice, "href").or_else(|| attr_from_tag(slice, "xlink:href"))
+        if let Some(src) =
+            attr_from_tag(slice, "href").or_else(|| attr_from_tag(slice, "xlink:href"))
         {
             out.push(src);
         }
@@ -355,33 +351,26 @@ fn extract_img_srcs(html: &str) -> Vec<String> {
 }
 
 /// Extract one EPUB image entry to `dest` (original bytes; no re-encode).
-pub fn extract_epub_page_raw(
-    source: &Path,
-    entry_name: &str,
-    dest: &Path,
-) -> AppResult<()> {
+pub fn extract_epub_page_raw(source: &Path, entry_name: &str, dest: &Path) -> AppResult<()> {
     let file = File::open(source)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::unsupported(format!("无法打开 EPUB: {e}"))
-    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开 EPUB: {e}")))?;
     let mut found = None;
     let want = entry_name.replace('\\', "/");
     for i in 0..archive.len() {
-        let e = archive.by_index(i).map_err(|e| {
-            AppError::internal(e.to_string())
-        })?;
+        let e = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(e.to_string()))?;
         let n = e.name().replace('\\', "/");
-        if n == want || n.to_ascii_lowercase() == want.to_ascii_lowercase() {
+        if n == want || n.eq_ignore_ascii_case(&want) {
             found = Some(i);
             break;
         }
     }
-    let idx = found.ok_or_else(|| {
-        AppError::not_found(format!("EPUB 中无页: {entry_name}"))
-    })?;
-    let mut entry = archive.by_index(idx).map_err(|e| {
-        AppError::internal(e.to_string())
-    })?;
+    let idx = found.ok_or_else(|| AppError::not_found(format!("EPUB 中无页: {entry_name}")))?;
+    let mut entry = archive
+        .by_index(idx)
+        .map_err(|e| AppError::internal(e.to_string()))?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -391,11 +380,7 @@ pub fn extract_epub_page_raw(
 }
 
 /// Extract one EPUB image entry to engine PNG (preview).
-pub fn extract_epub_page(
-    source: &Path,
-    entry_name: &str,
-    dest_png: &Path,
-) -> AppResult<()> {
+pub fn extract_epub_page(source: &Path, entry_name: &str, dest_png: &Path) -> AppResult<()> {
     let ext = Path::new(entry_name)
         .extension()
         .and_then(|e| e.to_str())
@@ -482,15 +467,18 @@ fn record_image<'a>(records: &'a [mobi::record::RawRecord<'a>], idx: usize) -> O
 }
 
 fn valid_exth_offset(v: u32) -> Option<u32> {
-    if v == u32::MAX { None } else { Some(v) }
+    if v == u32::MAX {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// Cover bytes: EXTH cover/thumb first, never "largest page".
 pub fn mobi_cover_bytes(path: &Path) -> AppResult<Vec<u8>> {
     let data = std::fs::read(path)?;
-    let book = mobi::Mobi::new(data).map_err(|e| {
-        AppError::unsupported(format!("无法解析 MOBI/AZW: {e}"))
-    })?;
+    let book = mobi::Mobi::new(data)
+        .map_err(|e| AppError::unsupported(format!("无法解析 MOBI/AZW: {e}")))?;
     let first_raw = book.metadata.mobi.first_image_index;
     if first_raw == u32::MAX {
         return Err(AppError::unsupported("该 MOBI 未声明图片记录"));
@@ -499,13 +487,15 @@ pub fn mobi_cover_bytes(path: &Path) -> AppResult<Vec<u8>> {
     let raw = book.raw_records();
     let recs = raw.records();
 
-    if let Some(off) = exth_u32(&book, mobi::headers::ExthRecord::CoverOffset).and_then(valid_exth_offset)
+    if let Some(off) =
+        exth_u32(&book, mobi::headers::ExthRecord::CoverOffset).and_then(valid_exth_offset)
     {
         if let Some(img) = record_image(recs, first.saturating_add(off as usize)) {
             return Ok(img.to_vec());
         }
     }
-    if let Some(off) = exth_u32(&book, mobi::headers::ExthRecord::ThumbOffset).and_then(valid_exth_offset)
+    if let Some(off) =
+        exth_u32(&book, mobi::headers::ExthRecord::ThumbOffset).and_then(valid_exth_offset)
     {
         if let Some(img) = record_image(recs, first.saturating_add(off as usize)) {
             return Ok(img.to_vec());
@@ -566,9 +556,9 @@ pub fn write_mobi_engine_input(bytes: &[u8], dest: &Path) -> AppResult<()> {
 
 pub fn extract_mobi_page_index(source: &Path, page_index: usize, dest_png: &Path) -> AppResult<()> {
     let (_names, blobs) = list_mobi_images(source)?;
-    let bytes = blobs.get(page_index).ok_or_else(|| {
-        AppError::invalid(format!("MOBI 页索引越界: {page_index}"))
-    })?;
+    let bytes = blobs
+        .get(page_index)
+        .ok_or_else(|| AppError::invalid(format!("MOBI 页索引越界: {page_index}")))?;
     extract_mobi_page_bytes(bytes, dest_png)
 }
 

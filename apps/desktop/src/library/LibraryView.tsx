@@ -78,20 +78,20 @@ export function LibraryView({
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="btn-primary !h-9 !px-3 text-xs" onClick={onAddFile}>
+        <button type="button" className="btn-primary !h-9 !px-3.5 text-xs" onClick={onAddFile}>
           {i18n.libraryAddFile}
         </button>
-        <button type="button" className="btn-ghost !h-9 !px-3 text-xs" onClick={onAddFolder}>
+        <button type="button" className="btn-soft !h-9 !px-3.5 text-xs" onClick={onAddFolder}>
           {i18n.libraryAddFolder}
         </button>
-        <button type="button" className="btn-ghost !h-9 !px-3 text-xs" disabled={scanning} onClick={onScan}>
+        <button type="button" className="btn-soft !h-9 !px-3.5 text-xs" disabled={scanning} onClick={onScan}>
           {scanning ? i18n.libraryScanning : i18n.libraryScan}
         </button>
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索书名或路径"
-          className="h-9 min-w-[12rem] flex-1 rounded-xl border border-ink-200 bg-white px-3 text-sm text-ink-800 dark:border-white/10 dark:bg-ink-950 dark:text-ink-100"
+          className="h-9 min-w-[12rem] flex-1 rounded-full border border-ink-300 bg-white px-3.5 text-sm text-ink-800 placeholder:text-ink-400 dark:border-white/10 dark:bg-white/5 dark:text-ink-100"
         />
       </div>
       <p className="text-xs text-ink-500">{i18n.libraryHint}</p>
@@ -102,15 +102,15 @@ export function LibraryView({
           onClick={onAddFile}
           className={`flex min-h-[18rem] flex-1 flex-col items-center justify-center rounded-2xl border border-dashed px-6 text-center transition ${
             dragOver
-              ? "border-accent bg-accent/10"
-              : "border-ink-300 bg-ink-50/80 hover:border-accent/50 dark:border-white/15 dark:bg-ink-950/40"
+              ? "border-ink-950 bg-ink-200/60 dark:border-white dark:bg-white/10"
+              : "border-ink-300 bg-ink-100 hover:border-ink-500 dark:border-white/15 dark:bg-white/[0.03]"
           }`}
         >
           <p className="text-sm font-medium text-ink-800 dark:text-ink-100">{i18n.libraryEmpty}</p>
           <p className="mt-2 max-w-md text-xs text-ink-500">{i18n.libraryHint}</p>
         </button>
       ) : (
-        <ul className="grid grid-cols-2 gap-3 overflow-auto pb-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+        <ul className="grid grid-cols-3 gap-3 overflow-auto pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
           {filtered.map((e) => {
             const cover = coverUrl(e.coverPath);
             const pref = loadReaderPref(e.path);
@@ -128,20 +128,20 @@ export function LibraryView({
                   >
                     <div className="relative aspect-[2/3] bg-ink-200 dark:bg-ink-950">
                       {cover ? (
-                        <img src={cover} alt="" className="h-full w-full object-cover" />
+                        <img src={cover} alt="" decoding="async" className="h-full w-full object-cover" />
                       ) : (
-                        <div className="grid h-full place-items-center text-xs text-ink-400">
+                        <div className="grid h-full place-items-center text-[10px] text-ink-400">
                           {kindLabel(e.kind)}
                         </div>
                       )}
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-white/45 px-2.5 py-1.5 backdrop-blur-md backdrop-saturate-150 dark:bg-black/45">
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-white/75 px-1.5 py-1 backdrop-blur-sm dark:bg-black/55">
                         <p
-                          className="truncate text-[13px] font-medium leading-tight text-ink-950 dark:text-white"
+                          className="truncate text-[11px] font-medium leading-tight text-ink-950 dark:text-white"
                           title={e.path}
                         >
                           {e.title}
                         </p>
-                        <p className="truncate text-[10px] leading-tight text-ink-700/85 dark:text-white/75">
+                        <p className="truncate text-[9px] leading-tight text-ink-600 dark:text-white/75">
                           {kindLabel(e.kind)}
                           {e.pageCount > 0 ? ` · ${e.pageCount} ${i18n.libraryPages}` : ""}
                           {page > 0 ? ` · ${page + 1}` : ""}
@@ -150,10 +150,10 @@ export function LibraryView({
                       </div>
                     </div>
                   </button>
-                  <div className="absolute inset-x-0 top-0 flex justify-end gap-2 p-2 opacity-0 transition group-hover:opacity-100">
+                  <div className="absolute inset-x-0 top-0 flex justify-end gap-1 p-1.5 opacity-0 transition group-hover:opacity-100">
                     <button
                       type="button"
-                      className="rounded-xl bg-white/60 px-3 py-1.5 text-sm font-medium text-ink-900 backdrop-blur-md hover:bg-white/85 dark:bg-black/50 dark:text-white dark:hover:bg-black/70"
+                      className="btn-accent !rounded-full !px-2.5 !py-1 !text-[11px] shadow-md shadow-accent/30"
                       disabled={e.missing}
                       onClick={() => onEnhance(e)}
                     >
@@ -162,7 +162,7 @@ export function LibraryView({
                     <button
                       type="button"
                       title={i18n.libraryRemoveHint}
-                      className="rounded-xl bg-white/60 px-3 py-1.5 text-sm font-medium text-ink-900 backdrop-blur-md hover:bg-rose-500/85 hover:text-white dark:bg-black/50 dark:text-white"
+                      className="rounded-full bg-white/90 px-2.5 py-1 text-[11px] font-medium text-ink-700 backdrop-blur-md hover:bg-rose-600 hover:text-white dark:bg-black/60 dark:text-white"
                       onClick={() => onRemove(e)}
                     >
                       {i18n.libraryRemove}

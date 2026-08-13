@@ -27,7 +27,7 @@
   "libraryAlready": "已在书库",
   "readerHint": "打开任务或漫画文件即可阅读。原图可先翻页，增强完成的页会自动换成增强图。",
   "readerEmpty": "尚未打开漫画",
-  "readerPickJob": "选择任务…",
+  "readerPickJob": "切换任务…",
   "readerOpenFile": "打开文件",
   "readerOpenFolder": "打开文件夹",
   "readerSingle": "单页",

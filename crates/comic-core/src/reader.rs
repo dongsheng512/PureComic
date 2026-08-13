@@ -68,7 +68,10 @@ fn enhanced_path(page: &PageRecord) -> Option<PathBuf> {
         return page.out_path.clone();
     }
     let base = page.out_path.as_ref().or(page.in_path.as_ref())?;
-    let guessed = base.parent().and_then(|p| p.parent()).map(|p| p.join("out"));
+    let guessed = base
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("out"));
     let out_dir = page
         .out_path
         .as_ref()
@@ -435,7 +438,8 @@ mod tests {
         {
             let f = std::fs::File::create(&cbz).unwrap();
             let mut w = ZipWriter::new(f);
-            w.start_file("001.jpg", SimpleFileOptions::default()).unwrap();
+            w.start_file("001.jpg", SimpleFileOptions::default())
+                .unwrap();
             w.write_all(b"FAKEJPEG-BYTES").unwrap();
             w.finish().unwrap();
         }

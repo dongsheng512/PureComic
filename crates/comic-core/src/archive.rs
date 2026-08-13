@@ -4,9 +4,7 @@
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::image_io::{self, is_image_path};
-use crate::job::{
-    ImageFormat, JobManifest, OutputContainer, PageRecord, PageStatus, SourceKind,
-};
+use crate::job::{ImageFormat, JobManifest, OutputContainer, PageRecord, PageStatus, SourceKind};
 use crate::natural_sort::natural_cmp;
 use crate::security::{check_entry_limits, sanitize_entry_path};
 use std::fs::File;
@@ -69,9 +67,7 @@ fn validate_mobi(path: &Path) -> AppResult<ValidateResult> {
         kind: SourceKind::Mobi,
         page_count: page_names.len() as u32,
         has_comic_info: false,
-        warnings: vec![
-            "MOBI/AZW 导出将为 CBZ/文件夹（不回写 Kindle 格式）".into(),
-        ],
+        warnings: vec!["MOBI/AZW 导出将为 CBZ/文件夹（不回写 Kindle 格式）".into()],
         page_names,
     })
 }
@@ -112,18 +108,17 @@ fn collect_folder_images(root: &Path) -> AppResult<Vec<String>> {
 
 fn validate_zip(path: &Path, cfg: &AppConfig) -> AppResult<ValidateResult> {
     let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::unsupported(format!("无法打开 ZIP/CBZ: {e}"))
-    })?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|e| AppError::unsupported(format!("无法打开 ZIP/CBZ: {e}")))?;
     let mut page_names = Vec::new();
     let mut has_comic_info = false;
     let mut total_uncomp = 0u64;
     let mut warnings = Vec::new();
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
-            AppError::internal(format!("读取 zip 条目失败: {e}"))
-        })?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(format!("读取 zip 条目失败: {e}")))?;
         let name = entry.name().to_string();
         if name.ends_with('/') {
             continue;
@@ -136,9 +131,7 @@ fn validate_zip(path: &Path, cfg: &AppConfig) -> AppResult<ValidateResult> {
         check_entry_limits(cfg, i as u32, comp, uncomp, total_uncomp)?;
         total_uncomp = total_uncomp.saturating_add(uncomp);
 
-        if safe_str.eq_ignore_ascii_case("ComicInfo.xml")
-            || safe_str.ends_with("/ComicInfo.xml")
-        {
+        if safe_str.eq_ignore_ascii_case("ComicInfo.xml") || safe_str.ends_with("/ComicInfo.xml") {
             has_comic_info = true;
             continue;
         }
@@ -172,9 +165,8 @@ pub fn extract_zip_entry_raw(source: &Path, name: &str, dest: &Path) -> AppResul
         std::fs::create_dir_all(parent)?;
     }
     let file = File::open(source)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::unsupported(format!("无法打开压缩包: {e}"))
-    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开压缩包: {e}")))?;
     let want = name.replace('\\', "/");
     if archive.by_name(&want).is_ok() {
         let mut entry = archive
@@ -186,9 +178,9 @@ pub fn extract_zip_entry_raw(source: &Path, name: &str, dest: &Path) -> AppResul
     }
     let mut found = None;
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
-            AppError::internal(format!("zip 条目: {e}"))
-        })?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
         let ename = entry.name().replace('\\', "/");
         if ename == want {
             found = Some(i);
@@ -299,14 +291,13 @@ pub fn extract_page_to_png(
 
 fn extract_zip_entry_to_png(source: &Path, name: &str, dest_png: &Path) -> AppResult<()> {
     let file = File::open(source)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::unsupported(format!("无法打开压缩包: {e}"))
-    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开压缩包: {e}")))?;
     let mut found = None;
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
-            AppError::internal(format!("zip 条目: {e}"))
-        })?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
         let ename = entry.name().to_string();
         if ename.ends_with('/') {
             continue;
@@ -318,12 +309,10 @@ fn extract_zip_entry_to_png(source: &Path, name: &str, dest_png: &Path) -> AppRe
             break;
         }
     }
-    let idx = found.ok_or_else(|| {
-        AppError::not_found(format!("压缩包中找不到页: {name}"))
-    })?;
-    let mut entry = archive.by_index(idx).map_err(|e| {
-        AppError::internal(format!("读取页失败: {e}"))
-    })?;
+    let idx = found.ok_or_else(|| AppError::not_found(format!("压缩包中找不到页: {name}")))?;
+    let mut entry = archive
+        .by_index(idx)
+        .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
     let ext = Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -350,18 +339,18 @@ pub type ExtractProgressCb<'a> = dyn FnMut(u32, u32, Option<&str>) + Send + 'a;
 pub fn extract_to_workdir(
     manifest: &mut JobManifest,
     cfg: &AppConfig,
-    mut on_progress: Option<&mut ExtractProgressCb<'_>>,
+    on_progress: Option<&mut ExtractProgressCb<'_>>,
 ) -> AppResult<()> {
     std::fs::create_dir_all(manifest.in_dir())?;
     std::fs::create_dir_all(manifest.out_dir())?;
     std::fs::create_dir_all(manifest.meta_dir())?;
 
     match manifest.source.kind {
-        SourceKind::Folder => extract_folder(manifest, on_progress.as_deref_mut())?,
-        SourceKind::Zip | SourceKind::Cbz => extract_zip(manifest, cfg, on_progress.as_deref_mut())?,
-        SourceKind::Epub => extract_epub(manifest, cfg, on_progress.as_deref_mut())?,
-        SourceKind::Mobi => extract_mobi(manifest, on_progress.as_deref_mut())?,
-        SourceKind::Cbr => extract_cbr(manifest, cfg, on_progress.as_deref_mut())?,
+        SourceKind::Folder => extract_folder(manifest, on_progress)?,
+        SourceKind::Zip | SourceKind::Cbz => extract_zip(manifest, cfg, on_progress)?,
+        SourceKind::Epub => extract_epub(manifest, cfg, on_progress)?,
+        SourceKind::Mobi => extract_mobi(manifest, on_progress)?,
+        SourceKind::Cbr => extract_cbr(manifest, cfg, on_progress)?,
         other => {
             return Err(AppError::unsupported(format!("无法解压: {other:?}")));
         }
@@ -441,7 +430,13 @@ fn extract_mobi(
 
     let (names, blobs) = crate::ebook::list_mobi_images(&manifest.source.path)?;
     let total = names.len() as u32;
-    report_extract(on_progress.as_deref_mut(), 0, total, Some("解析 MOBI…"), manifest);
+    report_extract(
+        on_progress.as_deref_mut(),
+        0,
+        total,
+        Some("解析 MOBI…"),
+        manifest,
+    );
 
     let in_dir = manifest.in_dir();
     let out_dir = manifest.out_dir();
@@ -467,20 +462,16 @@ fn extract_mobi(
 
     let mut pages = Vec::with_capacity(results.len());
     for (i, r) in results.into_iter().enumerate() {
-        match r {
-            Ok(p) => {
-                pages.push(p);
-                manifest.pages = pages.clone();
-                report_extract(
-                    on_progress.as_deref_mut(),
-                    (i + 1) as u32,
-                    total,
-                    Some(&names[i]),
-                    manifest,
-                );
-            }
-            Err(e) => return Err(e),
-        }
+        let p = r?;
+        pages.push(p);
+        manifest.pages = pages.clone();
+        report_extract(
+            on_progress.as_deref_mut(),
+            (i + 1) as u32,
+            total,
+            Some(&names[i]),
+            manifest,
+        );
     }
     manifest.pages = pages;
     Ok(())
@@ -493,8 +484,7 @@ fn extract_cbr(
 ) -> AppResult<()> {
     use rayon::prelude::*;
 
-    let (names, has_ci, _warnings) =
-        crate::unrar::list_rar_images(cfg, &manifest.source.path)?;
+    let (names, has_ci, _warnings) = crate::unrar::list_rar_images(cfg, &manifest.source.path)?;
     let raw_dir = manifest.workdir.join("rar_raw");
     crate::unrar::extract_rar_archive(cfg, &manifest.source.path, &raw_dir)?;
 
@@ -526,7 +516,13 @@ fn extract_cbr(
     }
 
     let total = names.len() as u32;
-    report_extract(on_progress.as_deref_mut(), 0, total, Some("解压 CBR…"), manifest);
+    report_extract(
+        on_progress.as_deref_mut(),
+        0,
+        total,
+        Some("解压 CBR…"),
+        manifest,
+    );
     let in_dir = manifest.in_dir();
     let out_dir = manifest.out_dir();
     let raw = raw_dir.clone();
@@ -659,18 +655,17 @@ fn extract_zip(
     mut on_progress: Option<&mut ExtractProgressCb<'_>>,
 ) -> AppResult<()> {
     let file = File::open(&manifest.source.path)?;
-    let mut archive = ZipArchive::new(file).map_err(|e| {
-        AppError::unsupported(format!("无法打开压缩包: {e}"))
-    })?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开压缩包: {e}")))?;
 
     // First pass: comic info + ordered image names
     let mut image_entries: Vec<(usize, String)> = Vec::new();
     let mut total_uncomp = 0u64;
 
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
-            AppError::internal(format!("zip 条目: {e}"))
-        })?;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
         let name = entry.name().to_string();
         if name.ends_with('/') {
             continue;
@@ -686,9 +681,7 @@ fn extract_zip(
         )?;
         total_uncomp = total_uncomp.saturating_add(entry.size());
 
-        if safe_str.eq_ignore_ascii_case("ComicInfo.xml")
-            || safe_str.ends_with("/ComicInfo.xml")
-        {
+        if safe_str.eq_ignore_ascii_case("ComicInfo.xml") || safe_str.ends_with("/ComicInfo.xml") {
             drop(entry);
             let mut e = archive.by_index(i).unwrap();
             let dest = manifest.meta_dir().join("ComicInfo.xml");
@@ -716,9 +709,9 @@ fn extract_zip(
     // without a PNG re-encode — that was the extract bottleneck.
     let mut pages = Vec::with_capacity(image_entries.len());
     for (idx, (zip_idx, name)) in image_entries.iter().enumerate() {
-        let mut entry = archive.by_index(*zip_idx).map_err(|e| {
-            AppError::internal(format!("读取页失败: {e}"))
-        })?;
+        let mut entry = archive
+            .by_index(*zip_idx)
+            .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
         let orig_ext = Path::new(name)
             .extension()
             .and_then(|e| e.to_str())
@@ -818,7 +811,7 @@ pub fn export_job(manifest: &JobManifest) -> AppResult<PathBuf> {
 
 pub fn export_job_with_progress(
     manifest: &JobManifest,
-    mut on_progress: Option<&mut ExportProgressCb<'_>>,
+    on_progress: Option<&mut ExportProgressCb<'_>>,
 ) -> AppResult<PathBuf> {
     std::fs::create_dir_all(&manifest.output.dir)?;
     let out_path = expected_output_path(manifest);
@@ -830,22 +823,17 @@ pub fn export_job_with_progress(
             if out_path.is_dir() {
                 return Ok(out_path);
             }
-            export_folder(manifest, &out_path, on_progress.as_deref_mut())?;
+            export_folder(manifest, &out_path, on_progress)?;
         }
         OutputContainer::Cbz | OutputContainer::Zip => {
-            if out_path.is_file()
-                && out_path
-                    .metadata()
-                    .map(|m| m.len() > 1024)
-                    .unwrap_or(false)
-            {
+            if out_path.is_file() && out_path.metadata().map(|m| m.len() > 1024).unwrap_or(false) {
                 return Ok(out_path);
             }
             // Remove incomplete partial from crashed prior attempt
             if out_path.is_file() {
                 let _ = std::fs::remove_file(&out_path);
             }
-            export_zip(manifest, &out_path, on_progress.as_deref_mut())?;
+            export_zip(manifest, &out_path, on_progress)?;
         }
     }
     Ok(out_path)
@@ -885,9 +873,7 @@ fn export_folder(
                 .out_path
                 .as_ref()
                 .ok_or_else(|| AppError::internal("缺少输出路径"))?;
-            let orig_ext = Path::new(&page.name)
-                .extension()
-                .and_then(|e| e.to_str());
+            let orig_ext = Path::new(&page.name).extension().and_then(|e| e.to_str());
             let out_name = export_page_filename(page, &manifest.output.image_format);
             let dest = dir.join(&out_name);
             encode_or_copy_page(manifest, page, src, orig_ext, &dest)?;
@@ -981,9 +967,7 @@ fn export_zip(
                 .out_path
                 .as_ref()
                 .ok_or_else(|| AppError::internal("缺少输出路径"))?;
-            let orig_ext = Path::new(&page.name)
-                .extension()
-                .and_then(|e| e.to_str());
+            let orig_ext = Path::new(&page.name).extension().and_then(|e| e.to_str());
             let out_name = export_page_filename(page, &manifest.output.image_format);
             let data = encode_or_copy_bytes(manifest, src, orig_ext)?;
             let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1055,9 +1039,7 @@ mod tests {
 
     fn write_tiny_png(path: &Path) {
         let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(8, 8, Rgb([1, 2, 3]));
-        image::DynamicImage::ImageRgb8(img)
-            .save(path)
-            .unwrap();
+        image::DynamicImage::ImageRgb8(img).save(path).unwrap();
     }
 
     #[test]
@@ -1129,6 +1111,9 @@ mod tests {
         cfg.unrar_bin = Some(PathBuf::from("/no/such/unrar-binary"));
         let err = validate_source(&cbr, &cfg).unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::UnrarMissing);
-        assert!(err.detail.unwrap_or_default().contains("brew install unrar"));
+        assert!(err
+            .detail
+            .unwrap_or_default()
+            .contains("brew install unrar"));
     }
 }

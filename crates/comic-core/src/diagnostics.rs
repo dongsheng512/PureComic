@@ -43,17 +43,15 @@ pub async fn collect_doctor(
     engine: Arc<dyn UpscaleEngine>,
 ) -> AppResult<DoctorReport> {
     let gpus = engine.list_gpus().await.unwrap_or_default();
-    let free = fs2::available_space(&cfg.work_root).ok().or_else(|| {
-        fs2::available_space(std::env::temp_dir()).ok()
-    });
+    let free = fs2::available_space(&cfg.work_root)
+        .ok()
+        .or_else(|| fs2::available_space(std::env::temp_dir()).ok());
     let mut jobs_on_disk = 0u32;
     if let Ok(rd) = std::fs::read_dir(cfg.jobs_dir()) {
         jobs_on_disk = rd.filter_map(|e| e.ok()).count() as u32;
     }
-    let resolved = comic_engines::resolve_waifu2x_paths(
-        cfg.waifu2x_bin.as_deref(),
-        cfg.models_dir.as_deref(),
-    );
+    let resolved =
+        comic_engines::resolve_waifu2x_paths(cfg.waifu2x_bin.as_deref(), cfg.models_dir.as_deref());
     Ok(DoctorReport {
         app_version: env!("CARGO_PKG_VERSION").into(),
         engine: engine.status(),

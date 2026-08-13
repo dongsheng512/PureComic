@@ -13,7 +13,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const LIBRARY_VERSION: u32 = 1;
-const COVER_MAX_SIDE: u32 = 360;
+/// Longest side of cached cover JPEG. Sized for retina grids (~2× display width).
+const COVER_MAX_SIDE: u32 = 720;
+const COVER_JPEG_QUALITY: u8 = 90;
+/// Bump when cover encode params change so old blurry thumbs regenerate.
+const COVER_CACHE_TAG: &str = "v3";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,7 +125,11 @@ impl LibraryStore {
             e.missing = !PathBuf::from(&e.path).exists();
         }
         let mut out = self.entries.clone();
-        out.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at).then(b.added_at.cmp(&a.added_at)));
+        out.sort_by(|a, b| {
+            b.last_opened_at
+                .cmp(&a.last_opened_at)
+                .then(b.added_at.cmp(&a.added_at))
+        });
         out
     }
 
@@ -156,7 +164,11 @@ impl LibraryStore {
             return Err(AppError::invalid("忽略隐藏文件"));
         }
         let id = source_cache_key(&path);
-        if let Some(existing) = self.entries.iter_mut().find(|e| e.id == id || paths_eq(&e.path, &path)) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id || paths_eq(&e.path, &path))
+        {
             existing.missing = !path.exists();
             existing.last_opened_at = Some(Utc::now());
             let snap = existing.clone();
@@ -219,7 +231,11 @@ impl LibraryStore {
     pub fn touch(&mut self, path: &Path, page: Option<u32>) -> AppResult<()> {
         let path = canonicalize_or_abs(path);
         let id = source_cache_key(&path);
-        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id || paths_eq(&e.path, &path)) {
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id || paths_eq(&e.path, &path))
+        {
             e.last_opened_at = Some(Utc::now());
             if let Some(p) = page {
                 e.last_read_page = p;
@@ -229,10 +245,20 @@ impl LibraryStore {
         Ok(())
     }
 
-    pub fn attach_job(&mut self, path: &Path, job_id: &str, state: &str, output: Option<&str>) -> AppResult<()> {
+    pub fn attach_job(
+        &mut self,
+        path: &Path,
+        job_id: &str,
+        state: &str,
+        output: Option<&str>,
+    ) -> AppResult<()> {
         let path = canonicalize_or_abs(path);
         let id = source_cache_key(&path);
-        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id || paths_eq(&e.path, &path)) {
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id || paths_eq(&e.path, &path))
+        {
             e.job_id = Some(job_id.to_string());
             e.enhance_state = state.to_string();
             if let Some(o) = output {
@@ -271,7 +297,11 @@ impl LibraryStore {
         })
     }
 
-    pub fn import_paths(&mut self, paths: &[PathBuf], cfg: &AppConfig) -> AppResult<LibraryScanResult> {
+    pub fn import_paths(
+        &mut self,
+        paths: &[PathBuf],
+        cfg: &AppConfig,
+    ) -> AppResult<LibraryScanResult> {
         let mut added = 0u32;
         let mut existed = 0u32;
         let mut skipped = 0u32;
@@ -283,7 +313,11 @@ impl LibraryStore {
                 continue;
             }
             let id = source_cache_key(&canonicalize_or_abs(p));
-            if self.entries.iter().any(|e| e.id == id || paths_eq(&e.path, p)) {
+            if self
+                .entries
+                .iter()
+                .any(|e| e.id == id || paths_eq(&e.path, p))
+            {
                 existed += 1;
                 continue;
             }
@@ -301,7 +335,8 @@ impl LibraryStore {
                 }
             }
         }
-        let message = format!("已导入 {added} 本（已在书库 {existed}，跳过 {skipped}，失败 {failed}）");
+        let message =
+            format!("已导入 {added} 本（已在书库 {existed}，跳过 {skipped}，失败 {failed}）");
         Ok(LibraryScanResult {
             added,
             existed,
@@ -333,7 +368,7 @@ fn canonicalize_or_abs(path: &Path) -> PathBuf {
 }
 
 fn paths_eq(a: &str, b: &Path) -> bool {
-    PathBuf::from(a) == b || canonicalize_or_abs(Path::new(a)) == canonicalize_or_abs(b)
+    Path::new(a) == b || canonicalize_or_abs(Path::new(a)) == canonicalize_or_abs(b)
 }
 
 fn is_hidden(path: &Path) -> bool {
@@ -423,11 +458,7 @@ pub fn discover_comics(root: &Path) -> Vec<PathBuf> {
 }
 
 fn cover_dest(cover_dir: &Path, entry: &LibraryEntry) -> PathBuf {
-    if entry.kind == "mobi" {
-        cover_dir.join(format!("{}.v2.jpg", entry.id))
-    } else {
-        cover_dir.join(format!("{}.jpg", entry.id))
-    }
+    cover_dir.join(format!("{}.{}.jpg", entry.id, COVER_CACHE_TAG))
 }
 
 fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
@@ -451,11 +482,8 @@ fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppR
 
 fn write_cover_from_bytes(bytes: &[u8], dest: &Path) -> AppResult<()> {
     let img = image::load_from_memory(bytes).map_err(|e| {
-        AppError::new(
-            crate::error::ErrorCode::DecodeFail,
-            "封面解码失败",
-        )
-        .with_detail(e.to_string())
+        AppError::new(crate::error::ErrorCode::DecodeFail, "封面解码失败")
+            .with_detail(e.to_string())
     })?;
     encode_cover_jpeg(&img, dest)
 }
@@ -469,7 +497,7 @@ fn write_placeholder_cover(title: &str, dest: &Path) -> AppResult<()> {
     let r = 40 + (h & 0x5f) as u8;
     let g = 45 + ((h >> 8) & 0x4f) as u8;
     let b = 70 + ((h >> 16) & 0x5f) as u8;
-    let img = image::ImageBuffer::from_pixel(240, 360, image::Rgb([r, g, b]));
+    let img = image::ImageBuffer::from_pixel(480, 720, image::Rgb([r, g, b]));
     encode_cover_jpeg(&image::DynamicImage::ImageRgb8(img), dest)
 }
 
@@ -494,13 +522,18 @@ fn write_cover_jpeg(src: &Path, dest: &Path) -> AppResult<()> {
 }
 
 fn encode_cover_jpeg(img: &image::DynamicImage, dest: &Path) -> AppResult<()> {
-    let thumb = img.thumbnail(COVER_MAX_SIDE, COVER_MAX_SIDE);
+    // Lanczos3 keeps line art / text sharper than the default triangle filter.
+    let thumb = img.resize(
+        COVER_MAX_SIDE,
+        COVER_MAX_SIDE,
+        image::imageops::FilterType::Lanczos3,
+    );
     let rgb = thumb.to_rgb8();
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut file = File::create(dest)?;
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 80);
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, COVER_JPEG_QUALITY);
     enc.encode(
         rgb.as_raw(),
         rgb.width(),
@@ -508,7 +541,8 @@ fn encode_cover_jpeg(img: &image::DynamicImage, dest: &Path) -> AppResult<()> {
         image::ExtendedColorType::Rgb8,
     )
     .map_err(|e| {
-        AppError::new(crate::error::ErrorCode::DecodeFail, "封面编码失败").with_detail(e.to_string())
+        AppError::new(crate::error::ErrorCode::DecodeFail, "封面编码失败")
+            .with_detail(e.to_string())
     })?;
     let _ = file.flush();
     Ok(())

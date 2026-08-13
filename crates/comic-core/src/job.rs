@@ -278,7 +278,12 @@ pub struct JobManifest {
 }
 
 impl JobManifest {
-    pub fn new(source: PathBuf, options: EnhanceOptions, output: OutputOptions, workdir: PathBuf) -> Self {
+    pub fn new(
+        source: PathBuf,
+        options: EnhanceOptions,
+        output: OutputOptions,
+        workdir: PathBuf,
+    ) -> Self {
         let kind = SourceKind::detect(&source);
         let job_id = Uuid::new_v4().to_string();
         Self {
@@ -323,9 +328,8 @@ impl JobManifest {
 
     pub fn load(job_dir: &Path) -> AppResult<Self> {
         let path = Self::manifest_path(job_dir);
-        let data = std::fs::read_to_string(&path).map_err(|_| {
-            AppError::not_found(format!("找不到 manifest: {}", path.display()))
-        })?;
+        let data = std::fs::read_to_string(&path)
+            .map_err(|_| AppError::not_found(format!("找不到 manifest: {}", path.display())))?;
         let m: Self = serde_json::from_str(&data)?;
         Ok(m)
     }
@@ -360,10 +364,7 @@ impl JobManifest {
             job_id: self.job_id.clone(),
             state: self.state,
             source: self.source.path.display().to_string(),
-            output_path: self
-                .output_path
-                .as_ref()
-                .map(|p| p.display().to_string()),
+            output_path: self.output_path.as_ref().map(|p| p.display().to_string()),
             pages_done: self.stats.pages_done,
             pages_total: self.stats.pages_total,
             stage: match self.state {
@@ -386,9 +387,8 @@ fn output_artifact_ready(m: &JobManifest) -> Option<std::path::PathBuf> {
     let path = crate::archive::expected_output_path(m);
     let ready = match m.output.container {
         OutputContainer::Folder => path.is_dir(),
-        OutputContainer::Cbz | OutputContainer::Zip => path
-            .is_file()
-            .then(|| {
+        OutputContainer::Cbz | OutputContainer::Zip => {
+            if path.is_file() {
                 path.metadata()
                     .map(|x| {
                         if x.len() <= 1024 {
@@ -402,8 +402,10 @@ fn output_artifact_ready(m: &JobManifest) -> Option<std::path::PathBuf> {
                             .unwrap_or(true)
                     })
                     .unwrap_or(false)
-            })
-            .unwrap_or(false),
+            } else {
+                false
+            }
+        }
     };
     if ready {
         return Some(path);
@@ -432,10 +434,17 @@ pub fn heal_if_output_ready(m: &mut JobManifest) -> bool {
     let packing = matches!(m.state, JobState::Finalizing | JobState::Cancelling);
     let all_done = m.stats.pages_total > 0
         && (m.stats.pages_done >= m.stats.pages_total
-            || m.pages.iter().filter(|p| p.status == PageStatus::Done).count() as u32
+            || m.pages
+                .iter()
+                .filter(|p| p.status == PageStatus::Done)
+                .count() as u32
                 >= m.stats.pages_total);
     if !packing && !all_done && !m.pages.is_empty() {
-        let done = m.pages.iter().filter(|p| p.status == PageStatus::Done).count();
+        let done = m
+            .pages
+            .iter()
+            .filter(|p| p.status == PageStatus::Done)
+            .count();
         if done == 0 || done < m.pages.len() {
             return false;
         }

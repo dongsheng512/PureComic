@@ -6,8 +6,12 @@
     <title>PureComic</title>
     <script>
       try {
-        if (localStorage.getItem("comic.theme") === "light") {
+        var light = localStorage.getItem("comic.theme") === "light";
+        if (light) {
           document.documentElement.classList.remove("dark");
+          document.documentElement.style.backgroundColor = "#f8fafc";
+        } else {
+          document.documentElement.style.backgroundColor = "#0a0a0a";
         }
       } catch (_) {}
     </script>

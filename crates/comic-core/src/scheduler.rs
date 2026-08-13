@@ -2,13 +2,11 @@
 
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
-use crate::job::{
-    CreateJobRequest, CreateJobResult, JobManifest, JobState, JobStatus, ResumeHint,
-};
+use crate::job::{CreateJobRequest, CreateJobResult, JobManifest, JobState, JobStatus, ResumeHint};
 use crate::pipeline::{self, new_gpu_lock, GpuLock, ProgressCallback};
 use comic_engines::{EngineHub, EngineInfo, EngineKind, MockEngine, UpscaleEngine};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -163,8 +161,7 @@ impl Scheduler {
         }
 
         tokio::spawn(async move {
-            let res =
-                pipeline::run_job(manifest_arc, engine, cfg, gpu, cancel, on_progress).await;
+            let res = pipeline::run_job(manifest_arc, engine, cfg, gpu, cancel, on_progress).await;
             if let Err(e) = res {
                 warn!(job = %job_id_spawn, error = %e, "job ended with error");
             } else {
@@ -239,11 +236,9 @@ impl Scheduler {
             return Ok(());
         }
         m.state = JobState::Cancelled;
-        m.error = Some(
-            AppError::cancelled().with_detail(
-                "任务进程已不在内存中（应用可能已重启）。已标记为取消，无法再中止已退出的引擎。",
-            ),
-        );
+        m.error = Some(AppError::cancelled().with_detail(
+            "任务进程已不在内存中（应用可能已重启）。已标记为取消，无法再中止已退出的引擎。",
+        ));
         m.stats.finished_at = Some(chrono::Utc::now());
         m.save()?;
         info!(job = %job_id, "orphan job marked cancelled on disk");
@@ -284,9 +279,7 @@ impl Scheduler {
                     continue;
                 }
                 if let Ok(mut m) = JobManifest::load(&e.path()) {
-                    if crate::job::heal_if_output_ready(&mut m) {
-                        let _ = m.save();
-                    } else if heal_orphan_active_job(&mut m) {
+                    if crate::job::heal_if_output_ready(&mut m) || heal_orphan_active_job(&mut m) {
                         let _ = m.save();
                     }
                     out.push(m.to_status());
@@ -425,16 +418,9 @@ impl Scheduler {
         crate::diagnostics::collect_doctor(&self.cfg, self.engine()).await
     }
 
-    pub async fn export_diagnostics(
-        &self,
-        out_dir: Option<PathBuf>,
-    ) -> AppResult<PathBuf> {
-        crate::diagnostics::export_diagnostics_zip(
-            &self.cfg,
-            self.engine(),
-            out_dir.as_deref(),
-        )
-        .await
+    pub async fn export_diagnostics(&self, out_dir: Option<PathBuf>) -> AppResult<PathBuf> {
+        crate::diagnostics::export_diagnostics_zip(&self.cfg, self.engine(), out_dir.as_deref())
+            .await
     }
 
     pub async fn get_reader_state(
@@ -545,7 +531,7 @@ impl Scheduler {
         let jobs = self.list_jobs().await.ok()?;
         let src = PathBuf::from(source);
         jobs.into_iter()
-            .find(|j| PathBuf::from(&j.source) == src || j.source == source)
+            .find(|j| Path::new(&j.source) == src.as_path() || j.source == source)
             .map(|j| j.job_id)
     }
 
@@ -578,7 +564,10 @@ impl Scheduler {
         }
     }
 
-    pub fn preview_library_scan(&self, root: &str) -> AppResult<crate::library::LibraryScanPreview> {
+    pub fn preview_library_scan(
+        &self,
+        root: &str,
+    ) -> AppResult<crate::library::LibraryScanPreview> {
         let lib = self
             .library
             .lock()
@@ -586,7 +575,10 @@ impl Scheduler {
         lib.preview_scan(PathBuf::from(root).as_path())
     }
 
-    pub fn import_library_paths(&self, paths: &[String]) -> AppResult<crate::library::LibraryScanResult> {
+    pub fn import_library_paths(
+        &self,
+        paths: &[String],
+    ) -> AppResult<crate::library::LibraryScanResult> {
         let mut lib = self
             .library
             .lock()
@@ -617,9 +609,7 @@ impl Scheduler {
             comic_engines::EngineAvailability::MissingBinary => Err(AppError::new(
                 crate::error::ErrorCode::BinaryIntegrity,
                 match kind {
-                    EngineKind::RealCugan => {
-                        "未找到 Real-CUGAN，请运行 scripts/fetch-realcugan.sh"
-                    }
+                    EngineKind::RealCugan => "未找到 Real-CUGAN，请运行 scripts/fetch-realcugan.sh",
                     _ => "未找到 Waifu2x 引擎，请重新安装应用或运行 scripts/fetch-waifu2x.sh",
                 },
             )),

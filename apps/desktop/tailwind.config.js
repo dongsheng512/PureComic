@@ -5,23 +5,30 @@ export default {
   theme: {
     extend: {
       colors: {
+        // 黑白基底 · 冷浅灰（干净、无杂色）
         ink: {
-          50: "#f6f7fb",
-          100: "#eceef6",
-          200: "#d5d9eb",
-          300: "#b0b8d6",
-          400: "#8590ba",
-          500: "#6672a3",
-          600: "#515a88",
-          700: "#43496e",
-          800: "#3a3f5c",
-          900: "#33364e",
-          950: "#1c1e2e",
+          50: "#ffffff",
+          100: "#f8fafc",
+          200: "#f1f5f9",
+          300: "#e2e8f0",
+          400: "#94a3b8",
+          500: "#64748b",
+          600: "#475569",
+          700: "#334155",
+          800: "#1e293b",
+          900: "#0f172a",
+          950: "#000000",
         },
+        // 唯一高亮 · AI / 增强动作（全站仅此用途）
         accent: {
-          DEFAULT: "#7c5cff",
-          dim: "#5b3fd4",
-          soft: "#efeaff",
+          DEFAULT: "#5b5ce2",
+          dim: "#4546c7",
+          soft: "#eef0ff",
+        },
+        // 完成态语义（非营销高亮）
+        success: {
+          DEFAULT: "#0f766e",
+          soft: "#ecfdf8",
         },
       },
       fontFamily: {
@@ -37,7 +44,11 @@ export default {
         ],
       },
       boxShadow: {
-        panel: "0 10px 40px -12px rgba(28, 30, 46, 0.35)",
+        panel: "0 8px 24px -12px rgba(15, 23, 42, 0.12)",
+      },
+      borderRadius: {
+        xl: "0.75rem",
+        "2xl": "0.9rem",
       },
     },
   },
