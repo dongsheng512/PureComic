@@ -35,6 +35,24 @@ Download **realcugan-ncnn-vulkan** + `models-se` / `models-pro` / `models-nose`.
 
 Pin: `third_party/realcugan.pin.json`
 
+## `fetch-waifu2x-coreml.sh`
+
+Download **waifu2x-ios** Core ML 2× anime models (`noise0`–`noise3`) into `third_party/waifu2x-coreml/`. Used by the reader on macOS.
+
+```bash
+./scripts/fetch-waifu2x-coreml.sh
+```
+
+## `fetch-realesrgan-coreml.sh`
+
+Download **Real-ESRGAN Anime 4×** Core ML (`RealESRGAN_x4plus_anime_6B`) into `third_party/realesrgan-coreml/`. Used by the reader on macOS.
+
+```bash
+./scripts/fetch-realesrgan-coreml.sh
+```
+
+`.mlmodel` / `.mlmodelc` 不入库。
+
 ## `verify-waifu2x.sh`
 
 SHA-256 check of files listed in `checksums.sha256`.

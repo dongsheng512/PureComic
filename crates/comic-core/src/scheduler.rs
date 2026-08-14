@@ -403,6 +403,8 @@ impl Scheduler {
             .unwrap_or("realcugan")
         {
             "waifu2x" | "auto" => EngineKind::Waifu2x,
+            "waifu2x-coreml" | "coreml" => EngineKind::Waifu2xCoreMl,
+            "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => EngineKind::RealEsrganCoreMl,
             _ => EngineKind::RealCugan,
         };
         let engine = self.pick_engine(kind)?;
@@ -467,13 +469,14 @@ impl Scheduler {
         options: Option<crate::preview::EnhanceOptionsDto>,
     ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
         let src = self.resolve_reader_source(job_id, source).await?;
+        // 阅读器只跑 Core ML：Vulkan waifu2x / Real-CUGAN 留给整本增强。
         let kind = match options
             .as_ref()
             .and_then(|o| o.engine.as_deref())
-            .unwrap_or("realcugan")
+            .unwrap_or("waifu2x-coreml")
         {
-            "waifu2x" | "auto" => EngineKind::Waifu2x,
-            _ => EngineKind::RealCugan,
+            "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => EngineKind::RealEsrganCoreMl,
+            _ => EngineKind::Waifu2xCoreMl,
         };
         self.ensure_engine_ready(kind)?;
         let engine = self.pick_engine(kind)?;
@@ -711,6 +714,12 @@ impl Scheduler {
                 crate::error::ErrorCode::BinaryIntegrity,
                 match kind {
                     EngineKind::RealCugan => "未找到 Real-CUGAN，请运行 scripts/fetch-realcugan.sh",
+                    EngineKind::Waifu2xCoreMl => {
+                        "未找到 Waifu2x Core ML 模型，请运行 scripts/fetch-waifu2x-coreml.sh"
+                    }
+                    EngineKind::RealEsrganCoreMl => {
+                        "未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh"
+                    }
                     _ => "未找到 Waifu2x 引擎，请重新安装应用或运行 scripts/fetch-waifu2x.sh",
                 },
             )),

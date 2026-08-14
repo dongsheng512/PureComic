@@ -619,6 +619,10 @@ impl CreateJobRequest {
                     ));
                 }
                 "waifu2x" | "auto" | "" => EngineKind::Waifu2x,
+                "waifu2x-coreml" | "coreml" => EngineKind::Waifu2xCoreMl,
+                "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => {
+                    EngineKind::RealEsrganCoreMl
+                }
                 "realcugan" | "cugan" => EngineKind::RealCugan,
                 other => {
                     return Err(AppError::invalid(format!("未知引擎: {other}")));

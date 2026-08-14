@@ -147,6 +147,100 @@ pub fn resolve_waifu2x_paths(
     None
 }
 
+fn waifu2x_coreml_roots() -> Vec<PathBuf> {
+    let mut dirs = third_party_candidates();
+    dirs.insert(0, PathBuf::from("third_party"));
+    let mut roots = Vec::new();
+    for tp in dirs {
+        roots.push(tp.join("waifu2x-coreml"));
+        roots.push(tp.join("resources/waifu2x-coreml"));
+        roots.push(tp);
+    }
+    roots
+}
+
+fn coreml_names_for_noise(noise: i8) -> [&'static str; 2] {
+    match noise {
+        3 => [
+            "up_anime_noise3_scale2x_model.mlmodelc",
+            "up_anime_noise3_scale2x_model.mlmodel",
+        ],
+        2 => [
+            "up_anime_noise2_scale2x_model.mlmodelc",
+            "up_anime_noise2_scale2x_model.mlmodel",
+        ],
+        1 => [
+            "up_anime_noise1_scale2x_model.mlmodelc",
+            "up_anime_noise1_scale2x_model.mlmodel",
+        ],
+        _ => [
+            "up_anime_noise0_scale2x_model.mlmodelc",
+            "up_anime_noise0_scale2x_model.mlmodel",
+        ],
+    }
+}
+
+fn find_coreml_named(names: &[&str]) -> Option<PathBuf> {
+    for root in waifu2x_coreml_roots() {
+        for name in names {
+            let p = root.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Prefer the requested denoise level, then fall back 2 → 1 → 0 → 3.
+pub fn resolve_waifu2x_coreml_model_for_noise(noise: i8) -> Option<PathBuf> {
+    let want = if (-1..=3).contains(&noise) {
+        noise.max(0)
+    } else {
+        2
+    };
+    let mut order = vec![want, 2, 1, 0, 3];
+    order.dedup();
+    for n in order {
+        if let Some(p) = find_coreml_named(&coreml_names_for_noise(n)) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Any installed Core ML waifu2x model (prefers noise2).
+pub fn resolve_waifu2x_coreml_model() -> Option<PathBuf> {
+    resolve_waifu2x_coreml_model_for_noise(2)
+}
+
+/// Real-ESRGAN Anime 4× Core ML (`RealESRGAN_x4plus_anime_6B`).
+pub fn resolve_realesrgan_coreml_model() -> Option<PathBuf> {
+    const NAMES: &[&str] = &[
+        "RealESRGAN_x4plus_anime_6B.mlmodelc",
+        "RealESRGAN_x4plus_anime_6B.mlmodel",
+        "realesrgan_anime4x.mlmodelc",
+        "realesrgan_anime4x.mlmodel",
+    ];
+    let mut dirs = third_party_candidates();
+    dirs.insert(0, PathBuf::from("third_party"));
+    for tp in dirs {
+        for root in [
+            tp.join("realesrgan-coreml"),
+            tp.join("resources/realesrgan-coreml"),
+            tp.clone(),
+        ] {
+            for name in NAMES {
+                let p = root.join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn first_existing_dir(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|p| p.is_dir()).cloned()
 }

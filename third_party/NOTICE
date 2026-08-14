@@ -25,6 +25,21 @@ Models (cunet etc.)
 Model weights shipped or downloaded for Waifu2x follow their respective upstream
 model licenses. Verify before redistribution.
 
+Waifu2x Core ML (reader)
+------------------------
+Converted models from waifu2x-ios / waifu2x-caffe.
+Upstream: https://github.com/imxieyi/waifu2x-ios
+Original: https://github.com/nagadomi/waifu2x
+Download: scripts/fetch-waifu2x-coreml.sh
+
+Real-ESRGAN Anime 4× Core ML (reader)
+-------------------------------------
+Core ML conversion of RealESRGAN_x4plus_anime_6B (xinntao/Real-ESRGAN).
+Packaged conversion commonly circulated via john-rocky/CoreML-Models.
+Upstream: https://github.com/xinntao/Real-ESRGAN
+License: BSD 3-Clause (see upstream)
+Download: scripts/fetch-realesrgan-coreml.sh
+
 Anime4K (MVP-B)
 ---------------
 GLSL shaders: https://github.com/bloc97/Anime4K

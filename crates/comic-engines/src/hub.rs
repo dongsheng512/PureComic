@@ -1,8 +1,9 @@
 //! Multi-engine catalog: pick per job without restarting the app.
 
 use crate::{
-    resolve_realcugan_paths, resolve_waifu2x_paths, EngineAvailability, EngineKind, EngineStatus,
-    MockEngine, RealCuganEngine, UpscaleEngine, Waifu2xEngine,
+    resolve_realcugan_paths, resolve_realesrgan_coreml_model, resolve_waifu2x_coreml_model,
+    resolve_waifu2x_paths, EngineAvailability, EngineKind, EngineStatus, MockEngine,
+    RealCuganEngine, RealEsrganCoreMlEngine, UpscaleEngine, Waifu2xCoreMlEngine, Waifu2xEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -29,6 +30,8 @@ pub struct EngineModelInfo {
 pub struct EngineHub {
     mock: Arc<MockEngine>,
     waifu2x: Option<Arc<Waifu2xEngine>>,
+    waifu2x_coreml: Option<Arc<Waifu2xCoreMlEngine>>,
+    realesrgan_coreml: Option<Arc<RealEsrganCoreMlEngine>>,
     realcugan: Option<Arc<RealCuganEngine>>,
     allow_mock: bool,
 }
@@ -44,6 +47,8 @@ impl EngineHub {
             return Self {
                 mock: Arc::new(MockEngine::default()),
                 waifu2x: None,
+                waifu2x_coreml: None,
+                realesrgan_coreml: None,
                 realcugan: None,
                 allow_mock: true,
             };
@@ -55,6 +60,10 @@ impl EngineHub {
                 _ => None,
             }
         });
+        let waifu2x_coreml =
+            resolve_waifu2x_coreml_model().map(|p| Arc::new(Waifu2xCoreMlEngine::new(p)));
+        let realesrgan_coreml =
+            resolve_realesrgan_coreml_model().map(|p| Arc::new(RealEsrganCoreMlEngine::new(p)));
         let realcugan = resolve_realcugan_paths().and_then(|p| {
             let eng = RealCuganEngine::new(p.binary, p.models_root);
             match eng.is_available() {
@@ -65,13 +74,17 @@ impl EngineHub {
         Self {
             mock: Arc::new(MockEngine::default()),
             waifu2x,
+            waifu2x_coreml,
+            realesrgan_coreml,
             realcugan,
             allow_mock,
         }
     }
 
     pub fn default_kind(&self) -> EngineKind {
-        if self.realcugan.is_some() {
+        if self.waifu2x_coreml.is_some() {
+            EngineKind::Waifu2xCoreMl
+        } else if self.realcugan.is_some() {
             EngineKind::RealCugan
         } else if self.waifu2x.is_some() {
             EngineKind::Waifu2x
@@ -82,6 +95,15 @@ impl EngineHub {
 
     pub fn pick(&self, kind: EngineKind) -> Result<Arc<dyn UpscaleEngine>, String> {
         match kind {
+            EngineKind::Waifu2xCoreMl => {
+                if let Some(e) = &self.waifu2x_coreml {
+                    return Ok(e.clone());
+                }
+                if self.allow_mock {
+                    return Ok(self.mock.clone());
+                }
+                Err("未找到 Waifu2x Core ML 模型，请运行 scripts/fetch-waifu2x-coreml.sh".into())
+            }
             EngineKind::Waifu2x => {
                 if let Some(e) = &self.waifu2x {
                     return Ok(e.clone());
@@ -90,6 +112,15 @@ impl EngineHub {
                     return Ok(self.mock.clone());
                 }
                 Err("Waifu2x 引擎不可用".into())
+            }
+            EngineKind::RealEsrganCoreMl => {
+                if let Some(e) = &self.realesrgan_coreml {
+                    return Ok(e.clone());
+                }
+                if self.allow_mock {
+                    return Ok(self.mock.clone());
+                }
+                Err("未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh".into())
             }
             EngineKind::RealCugan => {
                 if let Some(e) = &self.realcugan {
@@ -111,6 +142,8 @@ impl EngineHub {
             Err(s) => EngineStatus {
                 id: match kind {
                     EngineKind::Waifu2x => "waifu2x".into(),
+                    EngineKind::Waifu2xCoreMl => "waifu2x-coreml".into(),
+                    EngineKind::RealEsrganCoreMl => "realesrgan-coreml".into(),
                     EngineKind::RealCugan => "realcugan".into(),
                     #[cfg(feature = "anime4k")]
                     EngineKind::Anime4K2x => "anime4k".into(),
@@ -124,6 +157,40 @@ impl EngineHub {
 
     pub fn catalog(&self) -> Vec<EngineInfo> {
         let mut out = Vec::new();
+        let cm_ok = self.waifu2x_coreml.is_some();
+        out.push(EngineInfo {
+            id: "waifu2x-coreml".into(),
+            label: "Waifu2x Core ML（阅读加速 / ANE）".into(),
+            available: cm_ok,
+            detail: self.status_for(EngineKind::Waifu2xCoreMl).detail,
+            scales: vec![2],
+            models: vec![
+                EngineModelInfo {
+                    id: "n0".into(),
+                    label: "轻度去噪".into(),
+                },
+                EngineModelInfo {
+                    id: "n2".into(),
+                    label: "标准去噪（推荐）".into(),
+                },
+                EngineModelInfo {
+                    id: "n3".into(),
+                    label: "强力去噪".into(),
+                },
+            ],
+        });
+        let esr_ok = self.realesrgan_coreml.is_some();
+        out.push(EngineInfo {
+            id: "realesrgan-coreml".into(),
+            label: "Real-ESRGAN Anime 4×（更锐 / Core ML）".into(),
+            available: esr_ok,
+            detail: self.status_for(EngineKind::RealEsrganCoreMl).detail,
+            scales: vec![4],
+            models: vec![EngineModelInfo {
+                id: "anime-6b".into(),
+                label: "Anime 6B · 4×".into(),
+            }],
+        });
         let w_ok = self.waifu2x.is_some() || self.allow_mock;
         out.push(EngineInfo {
             id: "waifu2x".into(),
@@ -171,6 +238,9 @@ impl EngineHub {
     }
 
     pub fn any_real(&self) -> bool {
-        self.waifu2x.is_some() || self.realcugan.is_some()
+        self.waifu2x.is_some()
+            || self.waifu2x_coreml.is_some()
+            || self.realesrgan_coreml.is_some()
+            || self.realcugan.is_some()
     }
 }

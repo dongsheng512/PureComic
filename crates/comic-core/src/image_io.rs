@@ -15,8 +15,54 @@ pub fn is_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Decode by magic bytes, not the file extension. Comic archives often store
+/// PNG/WebP payloads under a `.jpg` name; trusting the suffix then fails.
 pub fn load_image(path: &Path) -> AppResult<DynamicImage> {
-    image::open(path).map_err(|e| {
+    image::ImageReader::open(path)
+        .map_err(|e| {
+            AppError::new(
+                ErrorCode::DecodeFail,
+                format!("无法解码: {}", path.display()),
+            )
+            .with_detail(e.to_string())
+        })?
+        .with_guessed_format()
+        .map_err(|e| {
+            AppError::new(
+                ErrorCode::DecodeFail,
+                format!("无法解码: {}", path.display()),
+            )
+            .with_detail(e.to_string())
+        })?
+        .decode()
+        .map_err(|e| {
+            AppError::new(
+                ErrorCode::DecodeFail,
+                format!("无法解码: {}", path.display()),
+            )
+            .with_detail(e.to_string())
+        })
+}
+
+/// Header-only size when possible (also sniffs magic, ignores a lying extension).
+pub fn image_dimensions(path: &Path) -> AppResult<(u32, u32)> {
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| {
+            AppError::new(
+                ErrorCode::DecodeFail,
+                format!("无法解码: {}", path.display()),
+            )
+            .with_detail(e.to_string())
+        })?
+        .with_guessed_format()
+        .map_err(|e| {
+            AppError::new(
+                ErrorCode::DecodeFail,
+                format!("无法解码: {}", path.display()),
+            )
+            .with_detail(e.to_string())
+        })?;
+    reader.into_dimensions().map_err(|e| {
         AppError::new(
             ErrorCode::DecodeFail,
             format!("无法解码: {}", path.display()),
@@ -219,6 +265,22 @@ mod tests {
         write_engine_png(&dyn_img, &path).unwrap();
         let loaded = load_image(&path).unwrap();
         assert_eq!(loaded.width(), 4);
+    }
+
+    #[test]
+    fn load_png_bytes_named_jpg() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("real.png");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(6, 4, Rgb([9, 8, 7]));
+        DynamicImage::ImageRgb8(img)
+            .save_with_format(&png, ImgFmt::Png)
+            .unwrap();
+        let lying = dir.path().join("cover.jpg");
+        std::fs::copy(&png, &lying).unwrap();
+        let loaded = load_image(&lying).unwrap();
+        assert_eq!((loaded.width(), loaded.height()), (6, 4));
+        let (w, h) = image_dimensions(&lying).unwrap();
+        assert_eq!((w, h), (6, 4));
     }
 
     #[test]

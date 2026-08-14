@@ -37,27 +37,36 @@ pub struct EnhanceCacheClearResult {
 pub fn cache_signature(options: Option<&EnhanceOptionsDto>) -> AppResult<String> {
     let opts = options_from_dto(options.cloned())?;
     let engine = match &options.and_then(|o| o.engine.as_deref()) {
-        Some("waifu2x") => "waifu2x",
-        _ => "realcugan",
-    };
-    let model = if engine == "realcugan" {
-        if opts.cugan_model.is_empty() {
-            "se"
-        } else {
-            opts.cugan_model.as_str()
+        Some("realesrgan-coreml") | Some("esrgan-coreml") | Some("esrgan-anime") => {
+            "realesrgan-coreml"
         }
+        _ => "waifu2x-coreml",
+    };
+    let model = if engine == "realesrgan-coreml" {
+        "anime-6b-4x-v2"
     } else {
-        "cunet"
+        "anime-2x-v4"
     };
     let tta = if opts.tta { "t" } else { "" };
+    let cap = reader_input_cap(engine);
     Ok(format!(
-        "{engine}-{model}-sa-n{}{tta}-c{MAX_INPUT_SIDE}-t{READER_TILE}-j",
+        "{engine}-{model}-sa-n{}{tta}-c{cap}-t{READER_TILE}-j",
         opts.noise
     ))
 }
 
-/// Reader only needs screen-sized output; smaller input = faster inference.
-pub const MAX_INPUT_SIDE: u32 = 1440;
+/// Do not shrink typical scans before Waifu2x; 2× of 2560 still fits the cache.
+pub const MAX_INPUT_SIDE: u32 = 2560;
+/// 4× Real-ESRGAN: keep enough source pixels so balloon text stays readable.
+/// 512 crushed 1920px pages and the net painted mushy glyphs.
+pub const ESRGAN_INPUT_SIDE: u32 = 1024;
+
+pub fn reader_input_cap(engine: &str) -> u32 {
+    match engine {
+        "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => ESRGAN_INPUT_SIDE,
+        _ => MAX_INPUT_SIDE,
+    }
+}
 /// Explicit tile is faster than auto-0 on typical Apple / discrete GPUs.
 const READER_TILE: u32 = 512;
 
@@ -206,7 +215,7 @@ pub fn lookup_pages(
         .unwrap_or_default();
     for &i in page_indexes {
         let path = cache_file(cfg, source, i, &sig);
-        if path.is_file() {
+        if cache_ready(&path) {
             touch_mtime(&path);
             let name = names
                 .get(i as usize)
@@ -229,11 +238,14 @@ fn reader_engine_params(opts: &crate::job::EnhanceOptions) -> comic_engines::Enh
     params.output_format = Some("jpg".into());
     params.tile_size = Some(READER_TILE);
     params.jobs = Some("2:2:2".into());
+    if params.engine == comic_engines::EngineKind::RealEsrganCoreMl {
+        params.scale = comic_engines::ScaleFactor::X4;
+    }
     params
 }
 
 fn image_max_side(path: &Path) -> AppResult<u32> {
-    if let Ok((w, h)) = image::image_dimensions(path) {
+    if let Ok((w, h)) = crate::image_io::image_dimensions(path) {
         return Ok(w.max(h));
     }
     let img = crate::image_io::load_image(path)?;
@@ -252,7 +264,18 @@ fn pick_reader_scale(
     }
 }
 
+fn cache_ready(path: &Path) -> bool {
+    path.is_file() && path.metadata().map(|m| m.len() > 128).unwrap_or(false)
+}
+
 fn passthrough_ext(path: &Path) -> Option<&'static str> {
+    if let Ok(reader) = image::ImageReader::open(path).and_then(|r| r.with_guessed_format()) {
+        return match reader.format() {
+            Some(image::ImageFormat::Jpeg) => Some("jpg"),
+            Some(image::ImageFormat::Png) => Some("png"),
+            _ => None,
+        };
+    }
     match path
         .extension()
         .and_then(|e| e.to_str())
@@ -265,31 +288,17 @@ fn passthrough_ext(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn write_engine_input(original: &Path, dest: &Path) -> AppResult<()> {
+fn write_engine_input(original: &Path, dest: &Path, cap: u32) -> AppResult<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let img = crate::image_io::prepare_for_engine(crate::image_io::load_image(original)?);
-    let img = if img.width().max(img.height()) > MAX_INPUT_SIDE {
-        img.resize(
-            MAX_INPUT_SIDE,
-            MAX_INPUT_SIDE,
-            image::imageops::FilterType::Triangle,
-        )
+    let img = if img.width().max(img.height()) > cap {
+        img.resize(cap, cap, image::imageops::FilterType::Lanczos3)
     } else {
         img
     };
-    let rgb = img.to_rgb8();
-    let mut file = std::fs::File::create(dest)?;
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 92);
-    enc.encode(
-        rgb.as_raw(),
-        rgb.width(),
-        rgb.height(),
-        image::ExtendedColorType::Rgb8,
-    )
-    .map_err(|e| AppError::internal("准备推理输入失败").with_detail(e.to_string()))?;
-    Ok(())
+    crate::image_io::write_engine_png(&img, dest)
 }
 
 fn link_or_copy(src: &Path, dest: &Path) -> AppResult<()> {
@@ -299,9 +308,7 @@ fn link_or_copy(src: &Path, dest: &Path) -> AppResult<()> {
     if dest.exists() {
         let _ = std::fs::remove_file(dest);
     }
-    std::fs::hard_link(src, dest).or_else(|_| {
-        std::fs::copy(src, dest).map(|_| ())
-    })?;
+    std::fs::hard_link(src, dest).or_else(|_| std::fs::copy(src, dest).map(|_| ()))?;
     Ok(())
 }
 
@@ -311,10 +318,11 @@ fn prepare_reader_input(
     scratch: &Path,
     stem: &str,
     requested: comic_engines::ScaleFactor,
+    cap: u32,
 ) -> AppResult<(PathBuf, bool, comic_engines::ScaleFactor)> {
     let max_side = image_max_side(original)?;
     let scale = pick_reader_scale(max_side, requested);
-    if max_side <= MAX_INPUT_SIDE {
+    if max_side <= cap {
         if passthrough_ext(original).is_some() {
             return Ok((original.to_path_buf(), false, scale));
         }
@@ -323,8 +331,8 @@ fn prepare_reader_input(
         crate::image_io::write_engine_png(&img, &dest)?;
         return Ok((dest, true, scale));
     }
-    let dest = scratch.join(format!("{stem}-in.jpg"));
-    write_engine_input(original, &dest)?;
+    let dest = scratch.join(format!("{stem}-in.png"));
+    write_engine_input(original, &dest, cap)?;
     Ok((dest, true, scale))
 }
 
@@ -360,15 +368,23 @@ async fn enhance_one_page(
     cancel: CancellationToken,
     cfg: &AppConfig,
 ) -> AppResult<()> {
-    if dest.is_file() {
+    if cache_ready(dest) {
         return Ok(());
+    }
+    if dest.is_file() {
+        let _ = std::fs::remove_file(dest);
     }
     let scratch = cfg.reader_enhance_dir().join(".scratch");
     std::fs::create_dir_all(&scratch)?;
     let id = Uuid::new_v4();
     let id_s = id.to_string();
+    let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl {
+        ESRGAN_INPUT_SIDE
+    } else {
+        MAX_INPUT_SIDE
+    };
     let (prepared, owned_in, scale) =
-        prepare_reader_input(original, &scratch, &id_s, params.scale)?;
+        prepare_reader_input(original, &scratch, &id_s, params.scale, cap)?;
     let mut params = params;
     params.scale = scale;
     let tmp = scratch.join(format!("{id}-out.jpg"));
@@ -380,7 +396,7 @@ async fn enhance_one_page(
         let _ = std::fs::remove_file(&tmp);
     };
 
-    if dest.is_file() {
+    if cache_ready(dest) {
         cleanup();
         return Ok(());
     }
@@ -390,7 +406,7 @@ async fn enhance_one_page(
     }
 
     let _guard = gpu.lock().await;
-    if dest.is_file() {
+    if cache_ready(dest) {
         drop(_guard);
         cleanup();
         return Ok(());
@@ -429,6 +445,10 @@ async fn enhance_one_page(
         return Err(AppError::internal("增强输出未生成"));
     }
     install_cache(&tmp, dest)?;
+    if !cache_ready(dest) {
+        let _ = std::fs::remove_file(dest);
+        return Err(AppError::internal("增强结果无效"));
+    }
     evict_cache(cfg, MAX_CACHE_BYTES, MAX_CACHE_FILES)?;
     Ok(())
 }
@@ -449,7 +469,13 @@ pub async fn enhance_pages(
     if cancel.is_cancelled() {
         return Err(AppError::cancelled());
     }
-    let opts = options_from_dto(options.clone())?;
+    let mut opts = options_from_dto(options.clone())?;
+    opts.engine = match options.as_ref().and_then(|o| o.engine.as_deref()) {
+        Some("realesrgan-coreml") | Some("esrgan-coreml") | Some("esrgan-anime") => {
+            comic_engines::EngineKind::RealEsrganCoreMl
+        }
+        _ => comic_engines::EngineKind::Waifu2xCoreMl,
+    };
     let params = reader_engine_params(&opts);
     let sig = cache_signature(options.as_ref())?;
     let names = crate::reader::listed_pages(source, cfg)
@@ -464,7 +490,7 @@ pub async fn enhance_pages(
             .get(i as usize)
             .cloned()
             .unwrap_or_else(|| format!("page-{i}"));
-        if dest.is_file() {
+        if cache_ready(&dest) {
             touch_mtime(&dest);
             out.push(ReaderPageFile {
                 index: i,
@@ -506,13 +532,17 @@ pub async fn enhance_pages(
         .reader_enhance_dir()
         .join(".batch")
         .join(Uuid::new_v4().to_string());
-    let mut groups: std::collections::BTreeMap<
-        u8,
-        Vec<(u32, String, PathBuf)>,
-    > = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<u8, Vec<(u32, String, PathBuf)>> =
+        std::collections::BTreeMap::new();
     for (i, name, original, dest) in missing {
         let stem = format!("{i:04}");
-        match prepare_reader_input(&original, &batch_root.join("prep"), &stem, params.scale) {
+        let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl {
+            ESRGAN_INPUT_SIDE
+        } else {
+            MAX_INPUT_SIDE
+        };
+        match prepare_reader_input(&original, &batch_root.join("prep"), &stem, params.scale, cap)
+        {
             Ok((prepared, owned, scale)) => {
                 let batch_in = batch_root.join(format!("in-s{}", scale.as_u8()));
                 let ext = passthrough_ext(&prepared).unwrap_or("jpg");
@@ -521,18 +551,23 @@ pub async fn enhance_pages(
                     if let Some(parent) = staged.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    std::fs::rename(&prepared, &staged).or_else(|_| {
-                        std::fs::copy(&prepared, &staged).map(|_| {
-                            let _ = std::fs::remove_file(&prepared);
+                    std::fs::rename(&prepared, &staged)
+                        .or_else(|_| {
+                            std::fs::copy(&prepared, &staged).map(|_| {
+                                let _ = std::fs::remove_file(&prepared);
+                            })
                         })
-                    }).map_err(AppError::from)
+                        .map_err(AppError::from)
                 } else {
                     link_or_copy(&prepared, &staged)
                 } {
                     let _ = std::fs::remove_dir_all(&batch_root);
                     return Err(e);
                 }
-                groups.entry(scale.as_u8()).or_default().push((i, name, dest));
+                groups
+                    .entry(scale.as_u8())
+                    .or_default()
+                    .push((i, name, dest));
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&batch_root);
@@ -591,13 +626,15 @@ pub async fn enhance_pages(
         for (i, name, dest) in pages {
             let stem = format!("{i:04}");
             if let Some(found) = harvest_output(&batch_out, &stem) {
-                if install_cache(&found, &dest).is_ok() {
+                if install_cache(&found, &dest).is_ok() && cache_ready(&dest) {
                     out.push(ReaderPageFile {
                         index: i,
                         name,
                         kind: "enhanced".into(),
                         path: dest.display().to_string(),
                     });
+                } else {
+                    let _ = std::fs::remove_file(&dest);
                 }
             }
         }
@@ -637,16 +674,22 @@ mod tests {
     }
 
     #[test]
-    fn signature_defaults_to_realcugan() {
+    fn signature_defaults_to_waifu2x_coreml() {
         let a = cache_signature(None).unwrap();
-        assert!(a.starts_with("realcugan-se-sa-"), "{a}");
+        assert!(a.starts_with("waifu2x-coreml-"), "{a}");
         let b = cache_signature(Some(&EnhanceOptionsDto {
-            engine: Some("waifu2x".into()),
+            engine: Some("realesrgan-coreml".into()),
             ..Default::default()
         }))
         .unwrap();
-        assert!(b.starts_with("waifu2x-cunet-"), "{b}");
+        assert!(b.starts_with("realesrgan-coreml-"), "{b}");
         assert_ne!(a, b);
+        let remapped = cache_signature(Some(&EnhanceOptionsDto {
+            engine: Some("realcugan".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(remapped.starts_with("waifu2x-coreml-"), "{remapped}");
     }
 
     #[test]

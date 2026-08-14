@@ -55,24 +55,51 @@ export function saveReaderPref(source: string, pref: ReaderPref) {
   }
 }
 
-const ENGINE_KEY = "comic.engine";
-const CUGAN_KEY = "comic.cuganModel";
+const READER_ENGINE_KEY = "comic.reader.engine";
 
-export function loadEnhanceEngine(): { engineId: string; cuganModel: string } {
+const READER_ENGINES = ["waifu2x-coreml", "realesrgan-coreml"] as const;
+export type ReaderEngineId = (typeof READER_ENGINES)[number];
+
+export function isReaderEngine(id: string): id is ReaderEngineId {
+  return id === "waifu2x-coreml" || id === "realesrgan-coreml";
+}
+
+export function loadReaderEngine(): ReaderEngineId {
   try {
-    return {
-      engineId: localStorage.getItem(ENGINE_KEY) || "realcugan",
-      cuganModel: localStorage.getItem(CUGAN_KEY) || "nose",
-    };
+    const saved = localStorage.getItem(READER_ENGINE_KEY);
+    if (saved && isReaderEngine(saved)) return saved;
+    // 旧版和整本增强共用 comic.engine，仅当它是 Core ML 时迁移
+    const legacy = localStorage.getItem("comic.engine");
+    if (legacy && isReaderEngine(legacy)) return legacy;
   } catch {
-    return { engineId: "realcugan", cuganModel: "nose" };
+    /* ignore */
+  }
+  return "waifu2x-coreml";
+}
+
+export function saveReaderEngine(engineId: ReaderEngineId) {
+  try {
+    localStorage.setItem(READER_ENGINE_KEY, engineId);
+  } catch {
+    /* ignore */
   }
 }
 
-export function saveEnhanceEngine(engineId: string, cuganModel: string) {
+const NOISE_KEY = "comic.enhanceNoise";
+
+export function loadEnhanceNoise(): 0 | 1 | 2 | 3 {
   try {
-    localStorage.setItem(ENGINE_KEY, engineId);
-    localStorage.setItem(CUGAN_KEY, cuganModel);
+    const n = Number(localStorage.getItem(NOISE_KEY));
+    if (n === 0 || n === 1 || n === 2 || n === 3) return n;
+  } catch {
+    /* ignore */
+  }
+  return 3;
+}
+
+export function saveEnhanceNoise(noise: 0 | 1 | 2 | 3) {
+  try {
+    localStorage.setItem(NOISE_KEY, String(noise));
   } catch {
     /* ignore */
   }

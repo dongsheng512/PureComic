@@ -458,25 +458,26 @@ html.dark .btn-card-remove:hover {
 
 .reader-ai-split {
   @apply relative z-50 inline-flex h-8 shrink-0 items-center overflow-visible rounded-full
-    border border-accent/40 bg-accent text-white shadow-sm
-    dark:border-accent/50 dark:bg-accent;
+    border border-ink-200/80 bg-ink-200/40 text-ink-800
+    dark:border-white/[0.10] dark:bg-white/[0.06] dark:text-fg;
 }
 
 .reader-ai-split.is-open {
-  @apply ring-2 ring-accent/35;
+  @apply ring-2 ring-ink-300/50 dark:ring-white/15;
 }
 
 .reader-ai-split .reader-ai-btn {
-  @apply rounded-l-full rounded-r-none bg-transparent text-white;
+  @apply rounded-l-full rounded-r-none bg-transparent text-ink-800 dark:text-fg;
 }
 
 .reader-ai-split .reader-ai-caret {
-  @apply h-8 w-7 shrink-0 rounded-l-none rounded-r-full border-l border-white/35
-    text-white hover:bg-white/15 dark:text-white dark:hover:bg-white/15;
+  @apply h-8 w-7 shrink-0 rounded-l-none rounded-r-full border-l border-ink-300/70
+    text-ink-700 hover:bg-ink-200/80 dark:border-white/15 dark:text-fg-muted
+    dark:hover:bg-white/[0.08] dark:hover:text-fg;
 }
 
 .reader-ai-split .reader-ai-caret.is-active {
-  @apply bg-white/20 text-white dark:bg-white/20 dark:text-white;
+  @apply bg-ink-200/90 text-ink-900 dark:bg-white/15 dark:text-fg;
 }
 
 .reader-ai-pop {
@@ -487,31 +488,50 @@ html.dark .btn-card-remove:hover {
 
 .reader-ai-btn {
   @apply inline-flex h-8 shrink-0 items-center gap-1.5 px-3 text-[12px] font-semibold
-    tracking-wide text-white transition;
+    tracking-wide transition;
 }
 
 .reader-ai-btn:hover:not(:disabled) {
-  @apply bg-accent-dim text-white;
+  @apply bg-ink-200/80 text-ink-900 dark:bg-white/[0.08] dark:text-fg;
 }
 
 .reader-ai-btn:disabled {
   @apply pointer-events-none opacity-55;
 }
 
+/* 当前页已出优化图：只描绿色边，底色仍跟工具栏一致 */
 .reader-ai-split:has(.reader-ai-btn.is-on) {
-  @apply border-emerald-400/50 bg-emerald-500 dark:bg-emerald-500;
+  @apply border-emerald-500 bg-ink-200/40 text-ink-800
+    dark:border-emerald-400 dark:bg-white/[0.06] dark:text-fg;
+}
+
+.reader-ai-split:has(.reader-ai-btn.is-on) .reader-ai-btn {
+  @apply text-ink-800 dark:text-fg;
+}
+
+.reader-ai-split:has(.reader-ai-btn.is-on) .reader-ai-btn:hover:not(:disabled) {
+  @apply bg-ink-200/80 text-ink-900 dark:bg-white/[0.08] dark:text-fg;
+}
+
+.reader-ai-split:has(.reader-ai-btn.is-on) .reader-ai-caret {
+  @apply border-ink-300/70 text-ink-700 hover:bg-ink-200/80
+    dark:border-white/15 dark:text-fg-muted dark:hover:bg-white/[0.08] dark:hover:text-fg;
+}
+
+.reader-ai-split:has(.reader-ai-btn.is-on) .reader-ai-caret.is-active {
+  @apply bg-ink-200/90 text-ink-900 dark:bg-white/15 dark:text-fg;
+}
+
+.reader-ai-split:has(.reader-ai-btn.is-on).is-open {
+  @apply ring-2 ring-emerald-400/40;
 }
 
 .reader-ai-btn.is-on {
-  @apply bg-transparent text-white;
-}
-
-.reader-ai-btn.is-on:hover:not(:disabled) {
-  @apply bg-emerald-600 text-white;
+  @apply bg-transparent text-ink-800 dark:text-fg;
 }
 
 .reader-ai-btn.is-busy {
-  @apply cursor-wait bg-accent-dim/80 text-white;
+  @apply cursor-wait;
 }
 
 .reader-ai-spin {

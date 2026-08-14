@@ -643,6 +643,7 @@ name = "comic-engines"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cc",
  "hex",
  "image",
  "libc",

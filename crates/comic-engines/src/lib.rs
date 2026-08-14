@@ -5,15 +5,20 @@ mod mock;
 pub mod paths;
 mod realcugan;
 mod waifu2x;
+mod realesrgan_coreml;
+mod waifu2x_coreml;
 
 pub use hub::{EngineHub, EngineInfo};
 pub use mock::MockEngine;
 pub use paths::{
-    host_target_triple, resolve_realcugan_paths, resolve_waifu2x_paths, RealCuganPaths,
-    Waifu2xPaths,
+    host_target_triple, resolve_realcugan_paths, resolve_realesrgan_coreml_model,
+    resolve_waifu2x_coreml_model, resolve_waifu2x_coreml_model_for_noise, resolve_waifu2x_paths,
+    RealCuganPaths, Waifu2xPaths,
 };
+pub use realesrgan_coreml::RealEsrganCoreMlEngine;
 pub use realcugan::{CuganModelPack, RealCuganEngine};
 pub use waifu2x::Waifu2xEngine;
+pub use waifu2x_coreml::Waifu2xCoreMlEngine;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -26,6 +31,8 @@ use tokio_util::sync::CancellationToken;
 #[serde(rename_all = "snake_case")]
 pub enum EngineKind {
     Waifu2x,
+    Waifu2xCoreMl,
+    RealEsrganCoreMl,
     RealCugan,
     #[cfg(feature = "anime4k")]
     Anime4K2x,

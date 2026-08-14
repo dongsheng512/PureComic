@@ -6,4 +6,4 @@
 | [reader-schedule.md](reader-schedule.md) | 阅读器与本地书库功能排期 |
 | [adr/0001-tech-stack.md](adr/0001-tech-stack.md) | ADR：Tauri 2 + Rust + React + Tailwind |
 
-构建与引擎拉取见仓库根目录 [README.md](../README.md) 与 [scripts/README.md](../scripts/README.md)。
+构建、阅读器 Core ML 与整本 Vulkan 引擎拉取见仓库根目录 [README.md](../README.md) 与 [scripts/README.md](../scripts/README.md)。

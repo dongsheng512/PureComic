@@ -23,9 +23,12 @@ import type {
 } from "../types";
 import { startWindowDrag } from "../windowDrag";
 import {
-  loadEnhanceEngine,
+  isReaderEngine,
+  loadEnhanceNoise,
+  loadReaderEngine,
   loadReaderPref,
-  saveEnhanceEngine,
+  saveEnhanceNoise,
+  saveReaderEngine,
   saveReaderPref,
   type FitMode,
   type ReadDirection,
@@ -112,8 +115,8 @@ export function ReaderView({
   const [enhanceOn, setEnhanceOn] = useState(false);
   const [enhanceBusy, setEnhanceBusy] = useState(false);
   const [aiPages, setAiPages] = useState<Record<number, LoadedPage>>({});
-  const [engineId, setEngineId] = useState(() => loadEnhanceEngine().engineId);
-  const [cuganModel, setCuganModel] = useState(() => loadEnhanceEngine().cuganModel);
+  const [engineId, setEngineId] = useState(loadReaderEngine);
+  const [noiseLevel, setNoiseLevel] = useState<0 | 1 | 2 | 3>(loadEnhanceNoise);
   const [catalog, setCatalog] = useState<EngineInfo[]>([]);
   const [cacheStats, setCacheStats] = useState<EnhanceCacheStats | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -281,15 +284,30 @@ export function ReaderView({
   const prefetchIndexes = useMemo(() => {
     if (!state) return visibleIndexes;
     const extra: number[] = [];
-    const last = visibleIndexes[visibleIndexes.length - 1] ?? 0;
+    const origin =
+      direction === "rtl"
+        ? (visibleIndexes[0] ?? 0)
+        : (visibleIndexes[visibleIndexes.length - 1] ?? 0);
+    const step = direction === "rtl" ? -1 : 1;
     for (let d = 1; d <= 4; d++) {
-      const n = last + d;
-      if (n < state.pageCount) extra.push(n);
+      const n = origin + step * d;
+      if (n < 0 || n >= state.pageCount) break;
+      if (!visibleIndexes.includes(n)) extra.push(n);
     }
-    const prev = (visibleIndexes[0] ?? 0) - 1;
-    if (prev >= 0) extra.push(prev);
+    const back =
+      direction === "rtl"
+        ? (visibleIndexes[visibleIndexes.length - 1] ?? 0) + 1
+        : (visibleIndexes[0] ?? 0) - 1;
+    if (
+      back >= 0 &&
+      back < state.pageCount &&
+      !visibleIndexes.includes(back) &&
+      !extra.includes(back)
+    ) {
+      extra.push(back);
+    }
     return [...visibleIndexes, ...extra];
-  }, [state, visibleIndexes]);
+  }, [state, visibleIndexes, direction]);
 
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
@@ -297,13 +315,12 @@ export function ReaderView({
   const enhanceOpts = useMemo<ReaderEnhanceOptions>(
     () => ({
       engine: engineId,
-      cuganModel: engineId === "realcugan" ? cuganModel : undefined,
-      preset: "fast",
-      scale: 2,
-      noiseLevel: 0,
+      preset: "quality",
+      scale: engineId === "realesrgan-coreml" ? 4 : 2,
+      noiseLevel: engineId === "waifu2x-coreml" ? noiseLevel : 0,
       tta: false,
     }),
-    [engineId, cuganModel],
+    [engineId, noiseLevel],
   );
 
   const aiPagesRef = useRef(aiPages);
@@ -334,23 +351,17 @@ export function ReaderView({
     listEngines()
       .then((c) => {
         if (cancelled) return;
-        setCatalog(c);
-        const saved = loadEnhanceEngine();
+        const reader = c.filter((e) => isReaderEngine(e.id));
+        setCatalog(reader);
+        const saved = loadReaderEngine();
         const pick =
-          c.find((e) => e.id === saved.engineId && e.available) ??
-          c.find((e) => e.id === "realcugan" && e.available) ??
-          c.find((e) => e.available) ??
-          c[0];
-        if (!pick) return;
-        const model =
-          saved.cuganModel && pick.models.some((m) => m.id === saved.cuganModel)
-            ? saved.cuganModel
-            : pick.models.find((m) => m.id === "nose")?.id ??
-              pick.models[0]?.id ??
-              "nose";
+          reader.find((e) => e.id === saved && e.available) ??
+          reader.find((e) => e.id === "waifu2x-coreml" && e.available) ??
+          reader.find((e) => e.available) ??
+          reader[0];
+        if (!pick || !isReaderEngine(pick.id)) return;
         setEngineId(pick.id);
-        setCuganModel(model);
-        saveEnhanceEngine(pick.id, model);
+        saveReaderEngine(pick.id);
       })
       .catch(() => undefined);
     return () => {
@@ -384,23 +395,27 @@ export function ReaderView({
         ? (visibleIndexes[0] ?? 0)
         : (visibleIndexes[visibleIndexes.length - 1] ?? 0);
     const step = direction === "rtl" ? -1 : 1;
-    // 最小预热：阅读方向上后 2 页，再补 1 页回翻
-    for (let n = 1; n <= 2; n++) {
+    // 单页：前方 2 + 回翻 1。双页按整屏走：前方 4（两屏）+ 回翻 2（上一屏）
+    const aheadCount = visibleIndexes.length >= 2 ? 4 : 2;
+    const behindCount = visibleIndexes.length >= 2 ? 2 : 1;
+    for (let n = 1; n <= aheadCount; n++) {
       const idx = origin + step * n;
       if (idx < 0 || idx >= total) break;
       if (!visibleIndexes.includes(idx)) ahead.push(idx);
     }
-    const behind =
-      direction === "rtl"
-        ? (visibleIndexes[visibleIndexes.length - 1] ?? 0) + 1
-        : (visibleIndexes[0] ?? 0) - 1;
-    if (
-      behind >= 0 &&
-      behind < total &&
-      !visibleIndexes.includes(behind) &&
-      !ahead.includes(behind)
-    ) {
-      ahead.push(behind);
+    for (let n = 1; n <= behindCount; n++) {
+      const idx =
+        direction === "rtl"
+          ? (visibleIndexes[visibleIndexes.length - 1] ?? 0) + n
+          : (visibleIndexes[0] ?? 0) - n;
+      if (
+        idx >= 0 &&
+        idx < total &&
+        !visibleIndexes.includes(idx) &&
+        !ahead.includes(idx)
+      ) {
+        ahead.push(idx);
+      }
     }
 
     const visCached = visibleIndexes.every((i) => Boolean(aiPagesRef.current[i]));
@@ -496,7 +511,7 @@ export function ReaderView({
     visibleIndexes.join(","),
     direction,
     engineId,
-    cuganModel,
+    noiseLevel,
     state?.source,
     state?.jobId,
     state?.pageCount,
@@ -703,17 +718,27 @@ export function ReaderView({
   const pageEnhancing = enhanceBusy && !showingAi;
   const displayPages = direction === "rtl" ? [...pagesInView].reverse() : pagesInView;
 
-  const persistEngine = (id: string, model: string) => {
+  const persistEngine = (id: string) => {
+    if (!isReaderEngine(id) || id === engineId) return;
     enhanceEpochRef.current += 1;
     void cancelReaderEnhance();
     setEngineId(id);
-    setCuganModel(model);
-    saveEnhanceEngine(id, model);
+    saveReaderEngine(id);
+    setAiPages({});
+  };
+
+  const persistNoise = (n: 0 | 1 | 2 | 3) => {
+    if (n === noiseLevel) return;
+    enhanceEpochRef.current += 1;
+    void cancelReaderEnhance();
+    setNoiseLevel(n);
+    saveEnhanceNoise(n);
     setAiPages({});
   };
 
   const toggleAi = () => {
     if (enhanceOn) {
+      enhanceEpochRef.current += 1;
       setEnhanceOn(false);
       setEnhanceBusy(false);
       void cancelReaderEnhance();
@@ -1065,19 +1090,19 @@ export function ReaderView({
                       ? catalog
                       : [
                           {
-                            id: "realcugan",
-                            label: i18n.engineCugan,
+                            id: "waifu2x-coreml",
+                            label: "Waifu2x Core ML",
                             available: true,
                             detail: "",
-                            scales: [],
+                            scales: [2],
                             models: [],
                           },
                           {
-                            id: "waifu2x",
-                            label: i18n.engineWaifu2x,
+                            id: "realesrgan-coreml",
+                            label: "Real-ESRGAN Anime 4×",
                             available: true,
                             detail: "",
-                            scales: [],
+                            scales: [4],
                             models: [],
                           },
                         ]
@@ -1091,57 +1116,46 @@ export function ReaderView({
                             ? "bg-ink-100 font-medium text-ink-900 dark:bg-surface-high dark:text-fg"
                             : "text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
                         } disabled:opacity-40`}
-                        onClick={() => {
-                          const mid =
-                            eng.id === "realcugan"
-                              ? eng.models.some((m) => m.id === cuganModel)
-                                ? cuganModel
-                                : (eng.models.find((m) => m.id === "nose")?.id ??
-                                  eng.models[0]?.id ??
-                                  "nose")
-                              : "cunet";
-                          persistEngine(eng.id, mid);
-                        }}
+                        onClick={() => persistEngine(eng.id)}
                       >
                         <span className="w-3 shrink-0 text-accent">
                           {engineId === eng.id ? <IconCheck /> : null}
                         </span>
                         <span className="min-w-0 flex-1 truncate">
-                          {eng.id === "realcugan"
-                            ? "Real-CUGAN"
-                            : eng.id === "waifu2x"
-                              ? "Waifu2x"
-                              : eng.label}
+                          {eng.id === "realesrgan-coreml"
+                            ? "Real-ESRGAN Anime 4×"
+                            : "Waifu2x Core ML"}
                         </span>
                       </button>
                     ))}
-                    {engineId === "realcugan" && (
+                    {engineId === "waifu2x-coreml" && (
                       <>
                         <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
                         <p className="px-3 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
-                          {i18n.cuganPack}
+                          去噪强度
                         </p>
                         {(
-                          catalog.find((e) => e.id === "realcugan")?.models ?? [
-                            { id: "se", label: "SE（推荐 / 护网点）" },
-                            { id: "pro", label: "PRO（更高质量）" },
-                            { id: "nose", label: "NOSE（更快）" },
-                          ]
-                        ).map((m) => (
+                          [
+                            [0, "轻度"],
+                            [1, "标准"],
+                            [2, "加强"],
+                            [3, "最强"],
+                          ] as const
+                        ).map(([n, label]) => (
                           <button
-                            key={m.id}
+                            key={n}
                             type="button"
                             className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs ${
-                              cuganModel === m.id
+                              noiseLevel === n
                                 ? "bg-ink-100 font-medium text-ink-900 dark:bg-surface-high dark:text-fg"
                                 : "text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
                             }`}
-                            onClick={() => persistEngine("realcugan", m.id)}
+                            onClick={() => persistNoise(n)}
                           >
                             <span className="w-3 shrink-0 text-accent">
-                              {cuganModel === m.id ? <IconCheck /> : null}
+                              {noiseLevel === n ? <IconCheck /> : null}
                             </span>
-                            <span className="min-w-0 flex-1 truncate">{m.label}</span>
+                            <span className="min-w-0 flex-1 truncate">{label}</span>
                           </button>
                         ))}
                       </>

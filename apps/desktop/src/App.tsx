@@ -370,15 +370,20 @@ export default function App() {
     listEngines()
       .then((c) => {
         setCatalog(c);
-        const saved = localStorage.getItem("comic.engine");
+        const savedRaw = localStorage.getItem("comic.engine");
+        const saved =
+          savedRaw === "realcugan" || savedRaw === "waifu2x" ? savedRaw : null;
         const savedModel = localStorage.getItem("comic.cuganModel");
+        const batch = c.filter(
+          (e) => e.id === "realcugan" || e.id === "waifu2x",
+        );
         const pick =
-          c.find((e) => e.id === saved && e.available) ??
-          c.find((e) => e.id === "realcugan" && e.available) ??
-          c.find((e) => e.available) ??
-          c[0];
+          batch.find((e) => e.id === saved && e.available) ??
+          batch.find((e) => e.id === "realcugan" && e.available) ??
+          batch.find((e) => e.available) ??
+          batch[0];
         if (pick) {
-          if (!saved) {
+          if (saved !== pick.id) {
             try {
               localStorage.setItem("comic.engine", pick.id);
             } catch {
@@ -578,7 +583,9 @@ export default function App() {
     { id: "doctor", label: i18n.tabDoctor },
   ];
   const runningJobCount = jobs.filter((j) => canShowCancel(j.state)).length;
-  const readyModels = catalog.filter((e) => e.available && e.id !== "mock");
+  const readyModels = catalog.filter(
+    (e) => e.available && (e.id === "realcugan" || e.id === "waifu2x"),
+  );
   const readyModelLabel =
     readyModels.length > 0
       ? readyModels
@@ -1032,8 +1039,11 @@ export default function App() {
                       }
                     }}
                     options={(catalog.length
-                      ? catalog
-                      : [{ id: "waifu2x", label: i18n.engineWaifu2x, available: true }]
+                      ? catalog.filter((e) => e.id === "realcugan" || e.id === "waifu2x")
+                      : [
+                          { id: "realcugan", label: i18n.engineCugan, available: true },
+                          { id: "waifu2x", label: i18n.engineWaifu2x, available: true },
+                        ]
                     ).map((e) => ({
                       id: e.id,
                       label: e.available ? e.label : `${e.label}（未安装）`,

@@ -47,6 +47,10 @@ diag/
 
 # Engine binaries & caches (download via scripts/fetch-*.sh)
 third_party/.cache/
+third_party/waifu2x-coreml/*.mlmodel
+third_party/waifu2x-coreml/*.mlmodelc/
+third_party/realesrgan-coreml/*.mlmodel
+third_party/realesrgan-coreml/*.mlmodelc/
 third_party/waifu2x-ncnn-vulkan/bin/
 third_party/realcugan-ncnn-vulkan/bin/
 third_party/realcugan-ncnn-vulkan/models-*/
@@ -54,6 +58,8 @@ third_party/models-cunet/**
 !third_party/models-cunet/.gitkeep
 !third_party/waifu2x-ncnn-vulkan/.gitkeep
 !third_party/realcugan-ncnn-vulkan/.gitkeep
+!third_party/waifu2x-coreml/.gitkeep
+!third_party/realesrgan-coreml/.gitkeep
 
 # Keep pin metadata & notices tracked
 !third_party/checksums.sha256
