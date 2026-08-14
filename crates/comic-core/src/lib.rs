@@ -15,6 +15,7 @@ pub mod natural_sort;
 pub mod pipeline;
 pub mod preview;
 pub mod reader;
+pub mod reader_enhance;
 pub mod scheduler;
 pub mod security;
 pub mod unrar;

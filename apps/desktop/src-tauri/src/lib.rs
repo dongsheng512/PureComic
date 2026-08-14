@@ -1,13 +1,45 @@
+mod open_paths;
+
 use comic_core::config::AppConfig;
 use comic_core::job::CreateJobRequest;
 use comic_core::preview::EnhanceOptionsDto;
 use comic_core::Scheduler;
+use open_paths::{extract_open_paths, normalize_open_path};
 use serde::Serialize;
-use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 pub struct AppState {
     pub scheduler: Arc<Scheduler>,
+    /// 启动时由外部文件关联传入、待前端领取的路径
+    pub pending_open: Mutex<Vec<String>>,
+}
+
+fn push_pending_open(state: &AppState, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Ok(mut g) = state.pending_open.lock() {
+        for p in paths {
+            if !g.iter().any(|x| x == &p) {
+                g.push(p);
+            }
+        }
+    }
+}
+
+fn emit_open_paths(app: &AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        push_pending_open(state.inner(), paths.clone());
+    }
+    let _ = app.emit("app://open-paths", &paths);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_focus();
+        let _ = w.unminimize();
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -183,12 +215,73 @@ async fn prepare_reader_pages(
     job_id: Option<String>,
     source: Option<String>,
     page_indexes: Vec<u32>,
+    prefer_original: Option<bool>,
 ) -> Result<Vec<comic_core::reader::ReaderPageFile>, String> {
     state
         .scheduler
-        .prepare_reader_pages(job_id.as_deref(), source.as_deref(), &page_indexes)
+        .prepare_reader_pages(
+            job_id.as_deref(),
+            source.as_deref(),
+            &page_indexes,
+            prefer_original.unwrap_or(false),
+        )
         .await
         .map_err(|e| e.message)
+}
+
+#[tauri::command]
+async fn enhance_reader_pages(
+    state: State<'_, AppState>,
+    source: Option<String>,
+    job_id: Option<String>,
+    page_indexes: Vec<u32>,
+    options: Option<EnhanceOptionsDto>,
+) -> Result<Vec<comic_core::reader::ReaderPageFile>, String> {
+    state
+        .scheduler
+        .enhance_reader_pages(source.as_deref(), job_id.as_deref(), &page_indexes, options)
+        .await
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn lookup_reader_enhance_pages(
+    state: State<'_, AppState>,
+    source: Option<String>,
+    job_id: Option<String>,
+    page_indexes: Vec<u32>,
+    options: Option<EnhanceOptionsDto>,
+) -> Result<Vec<comic_core::reader::ReaderPageFile>, String> {
+    let src = source.filter(|s| !s.is_empty());
+    if src.is_none() && job_id.as_ref().is_some_and(|s| !s.is_empty()) {
+        return Err("lookup 需要 source 路径".into());
+    }
+    state
+        .scheduler
+        .lookup_reader_enhance_pages(src.as_deref(), job_id.as_deref(), &page_indexes, options)
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn reader_enhance_cache_stats(
+    state: State<'_, AppState>,
+) -> comic_core::reader_enhance::EnhanceCacheStats {
+    state.scheduler.reader_enhance_cache_stats()
+}
+
+#[tauri::command]
+fn clear_reader_enhance_cache(
+    state: State<'_, AppState>,
+) -> Result<comic_core::reader_enhance::EnhanceCacheClearResult, String> {
+    state
+        .scheduler
+        .clear_reader_enhance_cache()
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn cancel_reader_enhance(state: State<'_, AppState>) {
+    state.scheduler.cancel_reader_enhance();
 }
 
 #[tauri::command]
@@ -200,6 +293,22 @@ async fn list_library(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.message)
+}
+
+/// 领取启动时 / 外部打开时缓存的路径（一次性清空）。
+#[tauri::command]
+fn take_pending_open_paths(state: State<'_, AppState>) -> Vec<String> {
+    state
+        .pending_open
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
+}
+
+/// 校验外部路径是否允许作为临时阅读源（扩展名 + 存在性）。
+#[tauri::command]
+fn validate_external_open_path(path: String) -> Result<String, String> {
+    normalize_open_path(&path).ok_or_else(|| "不支持的文件类型，或路径不存在".into())
 }
 
 #[tauri::command]
@@ -377,13 +486,24 @@ pub fn run() {
         )
         .init();
 
+    let startup_paths = extract_open_paths(&std::env::args().collect::<Vec<_>>());
+
     tauri::Builder::default()
+        // 单实例必须尽量靠前：二次启动把路径转发给已运行实例
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let paths = extract_open_paths(&argv);
+            emit_open_paths(app, paths);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .setup(|app| {
+        .setup(move |app| {
             let mut cfg = AppConfig::from_env();
             if let Ok(dir) = app.path().app_data_dir() {
                 cfg.work_root = dir.join("work");
+                // 书库封面在 work/library/covers，显式放行 asset 协议（含空格路径）
+                let scope = app.asset_protocol_scope();
+                let _ = scope.allow_directory(&dir, true);
+                let _ = scope.allow_directory(&dir.join("work"), true);
             }
             apply_packaged_engine_paths(app.handle(), &mut cfg);
             #[cfg(not(debug_assertions))]
@@ -412,7 +532,17 @@ pub fn run() {
                     .await;
             });
 
-            app.manage(AppState { scheduler });
+            let pending = Mutex::new(startup_paths);
+            app.manage(AppState {
+                scheduler,
+                pending_open: pending,
+            });
+            if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon-1024.png"))
+            {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_icon(icon);
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -430,6 +560,11 @@ pub fn run() {
             get_reader_state,
             prepare_reader_page,
             prepare_reader_pages,
+            enhance_reader_pages,
+            lookup_reader_enhance_pages,
+            reader_enhance_cache_stats,
+            clear_reader_enhance_cache,
+            cancel_reader_enhance,
             list_library,
             add_library_path,
             remove_library_entry,
@@ -441,7 +576,27 @@ pub fn run() {
             open_output_folder,
             clear_finished_jobs,
             remove_job,
+            take_pending_open_paths,
+            validate_external_open_path,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // macOS：Finder 双击/打开方式
+            if let RunEvent::Opened { urls } = event {
+                let paths: Vec<String> = urls
+                    .into_iter()
+                    .filter_map(|u| {
+                        if u.scheme() == "file" {
+                            u.to_file_path()
+                                .ok()
+                                .and_then(|p| normalize_open_path(&p.to_string_lossy()))
+                        } else {
+                            normalize_open_path(u.as_str())
+                        }
+                    })
+                    .collect();
+                emit_open_paths(app_handle, paths);
+            }
+        });
 }

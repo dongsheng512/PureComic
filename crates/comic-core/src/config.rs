@@ -61,7 +61,8 @@ impl Default for AppConfig {
             max_archive_entries: 10_000,
             max_page_bytes: 256 * 1024 * 1024,
             max_extract_bytes: 8 * 1024 * 1024 * 1024,
-            max_compression_ratio: 100.0,
+            // 线稿/大留白漫画页 deflate 后常见 50–200×；100 会误伤《卢浮宫守望者》等
+            max_compression_ratio: 500.0,
             page_timeout_secs: 180,
             max_image_side: 16_384,
             use_mock_engine: false,
@@ -91,9 +92,15 @@ impl AppConfig {
         self.work_root.join("library").join("covers")
     }
 
+    /// On-demand reader AI enhance cache (bounded, LRU).
+    pub fn reader_enhance_dir(&self) -> PathBuf {
+        self.work_root.join("reader-enhance")
+    }
+
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.jobs_dir())?;
-        std::fs::create_dir_all(self.library_covers_dir())
+        std::fs::create_dir_all(self.library_covers_dir())?;
+        std::fs::create_dir_all(self.reader_enhance_dir())
     }
 
     /// Apply env overrides:

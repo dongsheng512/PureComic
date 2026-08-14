@@ -71,12 +71,12 @@ impl EngineHub {
     }
 
     pub fn default_kind(&self) -> EngineKind {
-        if self.waifu2x.is_some() {
-            EngineKind::Waifu2x
-        } else if self.realcugan.is_some() {
+        if self.realcugan.is_some() {
             EngineKind::RealCugan
-        } else {
+        } else if self.waifu2x.is_some() {
             EngineKind::Waifu2x
+        } else {
+            EngineKind::RealCugan
         }
     }
 

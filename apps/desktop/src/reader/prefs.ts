@@ -54,3 +54,26 @@ export function saveReaderPref(source: string, pref: ReaderPref) {
     /* ignore quota */
   }
 }
+
+const ENGINE_KEY = "comic.engine";
+const CUGAN_KEY = "comic.cuganModel";
+
+export function loadEnhanceEngine(): { engineId: string; cuganModel: string } {
+  try {
+    return {
+      engineId: localStorage.getItem(ENGINE_KEY) || "realcugan",
+      cuganModel: localStorage.getItem(CUGAN_KEY) || "nose",
+    };
+  } catch {
+    return { engineId: "realcugan", cuganModel: "nose" };
+  }
+}
+
+export function saveEnhanceEngine(engineId: string, cuganModel: string) {
+  try {
+    localStorage.setItem(ENGINE_KEY, engineId);
+    localStorage.setItem(CUGAN_KEY, cuganModel);
+  } catch {
+    /* ignore */
+  }
+}

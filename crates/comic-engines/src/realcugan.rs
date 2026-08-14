@@ -198,8 +198,17 @@ impl UpscaleEngine for RealCuganEngine {
             )));
         }
 
-        let scale = params.scale.as_u8().clamp(1, 4).to_string();
-        let noise = params.noise_level.clamp(-1, 3).to_string();
+        // Packs only ship up2x / up3x / up4x. Scale 1 would look for missing weights.
+        let mut scale = params.scale.as_u8().clamp(2, 4);
+        let mut noise = params.noise_level.clamp(-1, 3);
+        if pack == CuganModelPack::Nose {
+            scale = 2;
+            noise = 0;
+        } else if pack == CuganModelPack::Pro && noise > 0 && noise < 3 {
+            noise = 3;
+        }
+        let scale = scale.to_string();
+        let noise = noise.to_string();
         let tile = params
             .tile_size
             .map(|t| t.to_string())

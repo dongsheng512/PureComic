@@ -14,6 +14,9 @@ import type {
   LibraryScanPreview,
   LibraryScanResult,
   PreviewResult,
+  ReaderEnhanceOptions,
+  EnhanceCacheClearResult,
+  EnhanceCacheStats,
   ReaderPageFile,
   ReaderState,
   ValidateResult,
@@ -90,13 +93,69 @@ export async function prepareReaderPages(opts: {
   jobId?: string | null;
   source?: string | null;
   pageIndexes: number[];
+  preferOriginal?: boolean;
 }): Promise<ReaderPageFile[]> {
   if (opts.pageIndexes.length === 0) return [];
   return invoke("prepare_reader_pages", {
     jobId: opts.jobId ?? null,
     source: opts.source ?? null,
     pageIndexes: opts.pageIndexes,
+    preferOriginal: opts.preferOriginal ?? false,
   });
+}
+
+function enhanceOptsPayload(options?: ReaderEnhanceOptions) {
+  if (!options) return null;
+  return {
+    preset: options.preset,
+    scale: options.scale,
+    noiseLevel: options.noiseLevel,
+    tta: options.tta,
+    engine: options.engine,
+    cuganModel: options.cuganModel,
+  };
+}
+
+export async function enhanceReaderPages(opts: {
+  source?: string | null;
+  jobId?: string | null;
+  pageIndexes: number[];
+  options?: ReaderEnhanceOptions;
+}): Promise<ReaderPageFile[]> {
+  if (opts.pageIndexes.length === 0) return [];
+  return invoke("enhance_reader_pages", {
+    source: opts.source ?? null,
+    jobId: opts.jobId ?? null,
+    pageIndexes: opts.pageIndexes,
+    options: enhanceOptsPayload(opts.options),
+  });
+}
+
+export async function lookupReaderEnhancePages(opts: {
+  source?: string | null;
+  jobId?: string | null;
+  pageIndexes: number[];
+  options?: ReaderEnhanceOptions;
+}): Promise<ReaderPageFile[]> {
+  if (opts.pageIndexes.length === 0) return [];
+  return invoke("lookup_reader_enhance_pages", {
+    source: opts.source ?? null,
+    jobId: opts.jobId ?? null,
+    pageIndexes: opts.pageIndexes,
+    options: enhanceOptsPayload(opts.options),
+  });
+}
+
+export async function readerEnhanceCacheStats(): Promise<EnhanceCacheStats> {
+  return invoke("reader_enhance_cache_stats");
+}
+
+export async function clearReaderEnhanceCache(): Promise<EnhanceCacheClearResult> {
+  return invoke("clear_reader_enhance_cache");
+}
+
+export async function cancelReaderEnhance(): Promise<void> {
+  return invoke("cancel_reader_enhance");
 }
 
 export async function listLibrary(): Promise<LibraryEntry[]> {
@@ -105,6 +164,16 @@ export async function listLibrary(): Promise<LibraryEntry[]> {
 
 export async function addLibraryPath(path: string): Promise<LibraryEntry> {
   return invoke("add_library_path", { path });
+}
+
+/** 领取启动时外部打开的路径（一次性） */
+export async function takePendingOpenPaths(): Promise<string[]> {
+  return invoke("take_pending_open_paths");
+}
+
+/** 校验外部打开路径是否允许临时阅读 */
+export async function validateExternalOpenPath(path: string): Promise<string> {
+  return invoke("validate_external_open_path", { path });
 }
 
 export async function removeLibraryEntry(id: string): Promise<void> {

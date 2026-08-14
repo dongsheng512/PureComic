@@ -124,11 +124,21 @@ fn validate_zip(path: &Path, cfg: &AppConfig) -> AppResult<ValidateResult> {
             continue;
         }
         // symlink / unix mode check — zip crate may not always flag; reject absolute etc.
-        let safe = sanitize_entry_path(&name)?;
+        let safe = match sanitize_entry_path(&name) {
+            Ok(p) => p,
+            Err(_) => {
+                warnings.push(format!("跳过非法路径条目: {name}"));
+                continue;
+            }
+        };
         let safe_str = safe.to_string_lossy().replace('\\', "/");
         let uncomp = entry.size();
         let comp = entry.compressed_size();
-        check_entry_limits(cfg, i as u32, comp, uncomp, total_uncomp)?;
+        // 单条失败不整包拒绝（线稿高压缩比页常见）；仍累计体积用于总量上限
+        if let Err(e) = check_entry_limits(cfg, i as u32, comp, uncomp, total_uncomp) {
+            warnings.push(format!("跳过条目 {safe_str}: {}", e.message));
+            continue;
+        }
         total_uncomp = total_uncomp.saturating_add(uncomp);
 
         if safe_str.eq_ignore_ascii_case("ComicInfo.xml") || safe_str.ends_with("/ComicInfo.xml") {

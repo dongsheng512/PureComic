@@ -164,13 +164,25 @@ impl LibraryStore {
             return Err(AppError::invalid("忽略隐藏文件"));
         }
         let id = source_cache_key(&path);
-        if let Some(existing) = self
+        if let Some(pos) = self
             .entries
-            .iter_mut()
-            .find(|e| e.id == id || paths_eq(&e.path, &path))
+            .iter()
+            .position(|e| e.id == id || paths_eq(&e.path, &path))
         {
+            let existing = &mut self.entries[pos];
             existing.missing = !path.exists();
             existing.last_opened_at = Some(Utc::now());
+            existing.path = path.display().to_string();
+            // 重新导入时补全页数 / 封面（首次因校验失败可能是 0 / 空）
+            if existing.page_count == 0 || !cover_file_ok(existing.cover_path.as_deref()) {
+                if let Ok(v) = archive::validate_source(&path, cfg) {
+                    existing.page_count = v.page_count;
+                    existing.kind = kind_str(v.kind);
+                }
+                if let Ok(cover) = ensure_cover(existing, &self.cover_dir, cfg) {
+                    existing.cover_path = Some(cover.display().to_string());
+                }
+            }
             let snap = existing.clone();
             self.save()?;
             return Ok(snap);
@@ -205,8 +217,15 @@ impl LibraryStore {
             output_path: None,
             missing: !path.exists(),
         };
-        if let Ok(cover) = ensure_cover(&entry, &self.cover_dir, cfg) {
-            entry.cover_path = Some(cover.display().to_string());
+        match ensure_cover(&entry, &self.cover_dir, cfg) {
+            Ok(cover) => entry.cover_path = Some(cover.display().to_string()),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e.message,
+                    path = %path.display(),
+                    "cover generation failed"
+                );
+            }
         }
         self.entries.push(entry.clone());
         self.save()?;
@@ -461,23 +480,65 @@ fn cover_dest(cover_dir: &Path, entry: &LibraryEntry) -> PathBuf {
     cover_dir.join(format!("{}.{}.jpg", entry.id, COVER_CACHE_TAG))
 }
 
+fn cover_file_ok(path: Option<&str>) -> bool {
+    path.map(|p| {
+        let p = Path::new(p);
+        p.is_file() && p.metadata().map(|m| m.len() > 32).unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
 fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
     std::fs::create_dir_all(cover_dir)?;
     let dest = cover_dest(cover_dir, entry);
     if dest.is_file() && dest.metadata().map(|m| m.len() > 32).unwrap_or(false) {
         return Ok(dest);
     }
+    // 旧版缓存或损坏文件：删掉重做
+    if dest.exists() {
+        let _ = std::fs::remove_file(&dest);
+    }
     let src = PathBuf::from(&entry.path);
     let kind = SourceKind::detect(&src);
     let extracted = if matches!(kind, SourceKind::Mobi) {
         crate::ebook::mobi_cover_bytes(&src).and_then(|bytes| write_cover_from_bytes(&bytes, &dest))
     } else {
-        extract_first_page(&src, cfg).and_then(|(_, page)| write_cover_jpeg(&page, &dest))
+        // 前几页尝试：首页可能是空白/版权页或抽取失败
+        try_cover_from_pages(&src, cfg, &dest)
     };
-    if extracted.is_err() {
+    if let Err(e) = extracted {
+        tracing::warn!(
+            error = %e.message,
+            path = %src.display(),
+            "cover extract failed, using placeholder"
+        );
         write_placeholder_cover(&entry.title, &dest)?;
     }
     Ok(dest)
+}
+
+/// 依次尝试第 0..N 页作为封面，直到成功解码并写出 JPEG。
+fn try_cover_from_pages(source: &Path, cfg: &AppConfig, dest: &Path) -> AppResult<()> {
+    let max_try = 8u32;
+    let mut last_err = AppError::unsupported("无法抽取封面页");
+    for idx in 0..max_try {
+        match crate::reader::resolve_source_page(source, idx, cfg) {
+            Ok(page) => match write_cover_jpeg(Path::new(&page.path), dest) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = e;
+                    // 失败的缓存文件清掉，避免下次短路
+                    let _ = std::fs::remove_file(dest);
+                }
+            },
+            Err(e) => last_err = e,
+        }
+    }
+    // 回退旧逻辑：仅第一页路径
+    match extract_first_page(source, cfg).and_then(|(_, page)| write_cover_jpeg(&page, dest)) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(last_err),
+    }
 }
 
 fn write_cover_from_bytes(bytes: &[u8], dest: &Path) -> AppResult<()> {

@@ -7,12 +7,53 @@ use crate::job::EnhanceOptions;
 use crate::pipeline::GpuLock;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use comic_engines::{EnhanceBatchRequest, UpscaleEngine};
+use comic_engines::{EnhanceBatchRequest, EnhanceParams, UpscaleEngine};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Single-image upscale: `input` path → `output` path. Shares the global GPU lock.
+pub async fn enhance_single_file(
+    engine: Arc<dyn UpscaleEngine>,
+    gpu: GpuLock,
+    input: PathBuf,
+    output: PathBuf,
+    params: EnhanceParams,
+    cancel: CancellationToken,
+) -> AppResult<()> {
+    if !input.is_file() {
+        return Err(AppError::invalid(format!(
+            "输入图不存在: {}",
+            input.display()
+        )));
+    }
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if cancel.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+    let _guard = gpu.lock().await;
+    if cancel.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+    engine
+        .enhance_batch(
+            EnhanceBatchRequest::SingleFile {
+                input,
+                output: output.clone(),
+                params,
+            },
+            cancel,
+        )
+        .await?;
+    if !output.is_file() {
+        return Err(AppError::internal("增强输出未生成"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +92,7 @@ pub struct PreviewResult {
     pub engine: String,
 }
 
-fn options_from_dto(dto: Option<EnhanceOptionsDto>) -> AppResult<EnhanceOptions> {
+pub(crate) fn options_from_dto(dto: Option<EnhanceOptionsDto>) -> AppResult<EnhanceOptions> {
     use comic_engines::{QualityPreset, ScaleFactor};
     let dto = dto.unwrap_or_default();
     let preset = match dto.preset.as_deref().unwrap_or("balanced") {
@@ -75,12 +116,10 @@ fn options_from_dto(dto: Option<EnhanceOptionsDto>) -> AppResult<EnhanceOptions>
     if let Some(g) = dto.gpu_id {
         o.gpu_id = Some(g);
     }
-    if let Some(eng) = dto.engine.as_deref() {
-        o.engine = match eng {
-            "realcugan" | "cugan" => comic_engines::EngineKind::RealCugan,
-            _ => comic_engines::EngineKind::Waifu2x,
-        };
-    }
+    o.engine = match dto.engine.as_deref() {
+        Some("waifu2x") | Some("auto") => comic_engines::EngineKind::Waifu2x,
+        _ => comic_engines::EngineKind::RealCugan,
+    };
     if let Some(cm) = dto.cugan_model {
         o.cugan_model = cm;
     }
@@ -133,25 +172,15 @@ pub async fn preview_page(
 
     extract_page_to_png(source, page_index, &before_png, cfg)?;
 
-    // Thumbnail intermediate for huge pages (display + faster mock); max side 2048 for engine input optional
-    // Keep full page for fidelity within max_image_side.
-
-    let cancel = CancellationToken::new();
-    let _guard = gpu.lock().await;
-    engine
-        .enhance_batch(
-            EnhanceBatchRequest::SingleFile {
-                input: before_png.clone(),
-                output: after_png.clone(),
-                params: opts.to_engine_params(),
-            },
-            cancel,
-        )
-        .await?;
-
-    if !after_png.is_file() {
-        return Err(AppError::internal("预览输出未生成"));
-    }
+    enhance_single_file(
+        engine.clone(),
+        gpu,
+        before_png.clone(),
+        after_png.clone(),
+        opts.to_engine_params(),
+        CancellationToken::new(),
+    )
+    .await?;
 
     let (before_data_url, width_before, height_before) = file_to_data_url_png(&before_png)?;
     let (after_data_url, width_after, height_after) = file_to_data_url_png(&after_png)?;

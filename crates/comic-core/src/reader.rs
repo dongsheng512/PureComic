@@ -241,7 +241,7 @@ fn extract_cache_path(cfg: &AppConfig, source: &Path, page_index: u32, ext: &str
         .join(format!("{page_index:04}.{ext}"))
 }
 
-fn extract_original(
+pub(crate) fn extract_original(
     source: &Path,
     page_index: u32,
     cfg: &AppConfig,
@@ -318,6 +318,25 @@ pub fn resolve_source_page(
         kind: "original".into(),
         path: path.display().to_string(),
     })
+}
+
+/// Always extract / return the original page (ignore job enhanced outputs).
+pub fn resolve_original_pages(
+    source: &Path,
+    indexes: &[u32],
+    cfg: &AppConfig,
+) -> AppResult<Vec<ReaderPageFile>> {
+    let mut out = Vec::with_capacity(indexes.len());
+    for &i in indexes {
+        let (name, path) = extract_original(source, i, cfg)?;
+        out.push(ReaderPageFile {
+            index: i,
+            name,
+            kind: "original".into(),
+            path: path.display().to_string(),
+        });
+    }
+    Ok(out)
 }
 
 pub fn resolve_pages(

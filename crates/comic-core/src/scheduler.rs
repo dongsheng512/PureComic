@@ -25,6 +25,7 @@ pub struct Scheduler {
     jobs: Arc<RwLock<HashMap<String, LiveJob>>>,
     on_progress: Arc<RwLock<Option<ProgressCallback>>>,
     library: StdMutex<crate::library::LibraryStore>,
+    reader_enhance_cancels: StdMutex<Vec<CancellationToken>>,
 }
 
 impl Scheduler {
@@ -45,6 +46,7 @@ impl Scheduler {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             on_progress: Arc::new(RwLock::new(None)),
             library,
+            reader_enhance_cancels: StdMutex::new(Vec::new()),
         })
     }
 
@@ -65,6 +67,7 @@ impl Scheduler {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             on_progress: Arc::new(RwLock::new(None)),
             library,
+            reader_enhance_cancels: StdMutex::new(Vec::new()),
         })
     }
 
@@ -397,10 +400,10 @@ impl Scheduler {
         let kind = match options
             .as_ref()
             .and_then(|o| o.engine.as_deref())
-            .unwrap_or("waifu2x")
+            .unwrap_or("realcugan")
         {
-            "realcugan" | "cugan" => EngineKind::RealCugan,
-            _ => EngineKind::Waifu2x,
+            "waifu2x" | "auto" => EngineKind::Waifu2x,
+            _ => EngineKind::RealCugan,
         };
         let engine = self.pick_engine(kind)?;
         crate::preview::preview_page(
@@ -456,6 +459,95 @@ impl Scheduler {
         crate::reader::state_from_source(PathBuf::from(source).as_path(), &self.cfg)
     }
 
+    pub async fn enhance_reader_pages(
+        &self,
+        source: Option<&str>,
+        job_id: Option<&str>,
+        page_indexes: &[u32],
+        options: Option<crate::preview::EnhanceOptionsDto>,
+    ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
+        let src = self.resolve_reader_source(job_id, source).await?;
+        let kind = match options
+            .as_ref()
+            .and_then(|o| o.engine.as_deref())
+            .unwrap_or("realcugan")
+        {
+            "waifu2x" | "auto" => EngineKind::Waifu2x,
+            _ => EngineKind::RealCugan,
+        };
+        self.ensure_engine_ready(kind)?;
+        let engine = self.pick_engine(kind)?;
+        let cancel = CancellationToken::new();
+        {
+            let mut slots = self
+                .reader_enhance_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slots.retain(|t| !t.is_cancelled());
+            slots.push(cancel.clone());
+        }
+        crate::reader_enhance::enhance_pages(
+            src.as_path(),
+            page_indexes,
+            options,
+            engine,
+            self.gpu.clone(),
+            &self.cfg,
+            cancel,
+        )
+        .await
+    }
+
+    pub fn cancel_reader_enhance(&self) {
+        let mut slots = self
+            .reader_enhance_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for t in slots.drain(..) {
+            t.cancel();
+        }
+    }
+
+    pub fn lookup_reader_enhance_pages(
+        &self,
+        source: Option<&str>,
+        _job_id: Option<&str>,
+        page_indexes: &[u32],
+        options: Option<crate::preview::EnhanceOptionsDto>,
+    ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
+        let src = if let Some(s) = source.filter(|s| !s.is_empty()) {
+            PathBuf::from(s)
+        } else {
+            return Err(AppError::invalid("需要 source"));
+        };
+        crate::reader_enhance::lookup_pages(src.as_path(), page_indexes, options, &self.cfg)
+    }
+
+    pub fn reader_enhance_cache_stats(&self) -> crate::reader_enhance::EnhanceCacheStats {
+        crate::reader_enhance::cache_stats(&self.cfg)
+    }
+
+    pub fn clear_reader_enhance_cache(
+        &self,
+    ) -> AppResult<crate::reader_enhance::EnhanceCacheClearResult> {
+        crate::reader_enhance::clear_cache(&self.cfg)
+    }
+
+    async fn resolve_reader_source(
+        &self,
+        job_id: Option<&str>,
+        source: Option<&str>,
+    ) -> AppResult<PathBuf> {
+        if let Some(s) = source.filter(|s| !s.is_empty()) {
+            return Ok(PathBuf::from(s));
+        }
+        if let Some(id) = job_id.filter(|s| !s.is_empty()) {
+            let m = self.load_manifest_clone(id).await?;
+            return Ok(m.source.path);
+        }
+        Err(AppError::invalid("需要 jobId 或 source"))
+    }
+
     pub async fn prepare_reader_page(
         &self,
         job_id: Option<&str>,
@@ -463,7 +555,7 @@ impl Scheduler {
         page_index: u32,
     ) -> AppResult<crate::reader::ReaderPageFile> {
         let mut pages = self
-            .prepare_reader_pages(job_id, source, &[page_index])
+            .prepare_reader_pages(job_id, source, &[page_index], false)
             .await?;
         pages
             .pop()
@@ -475,9 +567,18 @@ impl Scheduler {
         job_id: Option<&str>,
         source: Option<&str>,
         page_indexes: &[u32],
+        prefer_original: bool,
     ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
         let cfg = self.cfg.clone();
         let indexes = page_indexes.to_vec();
+        if prefer_original {
+            let src = self.resolve_reader_source(job_id, source).await?;
+            return tokio::task::spawn_blocking(move || {
+                crate::reader::resolve_original_pages(src.as_path(), &indexes, &cfg)
+            })
+            .await
+            .map_err(|e| AppError::internal(format!("reader join: {e}")))?;
+        }
         if let Some(id) = job_id.filter(|s| !s.is_empty()) {
             let m = self.load_manifest_clone(id).await?;
             return tokio::task::spawn_blocking(move || {

@@ -158,6 +158,27 @@ export type ReaderPageFile = {
   path: string;
 };
 
+export type EnhanceCacheStats = {
+  bytes: number;
+  files: number;
+  maxBytes: number;
+  maxFiles: number;
+};
+
+export type EnhanceCacheClearResult = {
+  removed: number;
+  bytesFreed: number;
+};
+
+export type ReaderEnhanceOptions = {
+  preset?: string;
+  scale?: number;
+  noiseLevel?: number;
+  tta?: boolean;
+  engine?: string;
+  cuganModel?: string;
+};
+
 export type PreviewResult = {
   pageIndex: number;
   pageName: string;

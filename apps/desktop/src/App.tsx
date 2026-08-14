@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -21,10 +22,20 @@ import {
   importLibraryPaths,
   removeJob,
   validateSource,
+  takePendingOpenPaths,
+  validateExternalOpenPath,
 } from "./api";
+import {
+  loadExternalOpenRemember,
+  saveExternalOpenRemember,
+  titleFromPath,
+} from "./externalOpen";
 import { stateLabel, t } from "./i18n";
-import { LibraryView, pickComicFile, pickFolder } from "./library/LibraryView";
-import { ReaderView } from "./reader/ReaderView";
+import { LibraryView, pickComicFiles, pickFolder } from "./library/LibraryView";
+import { loadImportSettings, saveImportSettings } from "./library/prefs";
+import { ComicReader, type ReaderSession } from "./reader/ComicReader";
+import { rememberMainWindowGeometry, restoreMainWindowGeometry } from "./reader/smartFit";
+import { startWindowDrag } from "./windowDrag";
 import type {
   DiskEstimate,
   DoctorReport,
@@ -38,7 +49,7 @@ import type {
 } from "./types";
 
 type Preset = "fast" | "balanced" | "quality";
-type Tab = "library" | "enhance" | "reader" | "doctor";
+type Tab = "library" | "enhance" | "doctor";
 type Container = "cbz" | "folder" | "zip";
 type ImgFmt = "jpeg" | "png" | "webp" | "same";
 type Theme = "dark" | "light";
@@ -53,7 +64,7 @@ function readTheme(): Theme {
   }
 }
 
-const THEME_BG = { light: "#f8fafc", dark: "#0a0a0a" } as const;
+const THEME_BG = { light: "#F5F5F7", dark: "#16171C" } as const;
 
 function applyTheme(theme: Theme) {
   const bg = THEME_BG[theme];
@@ -117,7 +128,7 @@ export default function App() {
   const [source, setSource] = useState<string | null>(null);
   const [outputDir, setOutputDir] = useState<string | null>(null);
   const [preset, setPreset] = useState<Preset>("balanced");
-  const [engineId, setEngineId] = useState("waifu2x");
+  const [engineId, setEngineId] = useState("realcugan");
   const [cuganModel, setCuganModel] = useState("se");
   const [catalog, setCatalog] = useState<EngineInfo[]>([]);
   const [scale, setScale] = useState<number>(2);
@@ -135,24 +146,98 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(readTheme);
-  const [readerJobId, setReaderJobId] = useState<string | null>(null);
-  const [readerImmersive, setReaderImmersive] = useState(false);
-  const hideAppChrome = tab === "reader" && readerImmersive;
+  /** 独立阅读器会话；非 null 时全屏展示 ComicReader，隐藏主导航 */
+  const [readerSession, setReaderSession] = useState<ReaderSession | null>(null);
+  const reading = readerSession != null;
+  /** 阅读器全屏接管：隐藏应用顶栏；阅读器内部再处理沉浸工具栏 */
+  const hideAppChrome = reading;
+  /** 临时阅读退出时：是否导入书库 */
+  const [importPrompt, setImportPrompt] = useState<{
+    path: string;
+    title: string;
+  } | null>(null);
+  const [importRemember, setImportRemember] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const libraryRef = useRef<LibraryEntry[]>([]);
+  const readerSessionRef = useRef<ReaderSession | null>(null);
+
+  const openReader = useCallback((session: ReaderSession) => {
+    // 阅读内改窗前先记下主界面几何，返回时还原
+    void rememberMainWindowGeometry();
+    setReaderSession(session);
+    readerSessionRef.current = session;
+    setError(null);
+    setImportPrompt(null);
+  }, []);
+
+  const pathInLibrary = useCallback((path: string) => {
+    const norm = path.replace(/\\/g, "/");
+    return libraryRef.current.some((e) => {
+      const ep = e.path.replace(/\\/g, "/");
+      return ep === norm || ep.endsWith(norm) || norm.endsWith(ep);
+    });
+  }, []);
+
+  const finishCloseReader = useCallback(() => {
+    setReaderSession(null);
+    readerSessionRef.current = null;
+    setImportPrompt(null);
+    setImportRemember(false);
+    void restoreMainWindowGeometry();
+  }, []);
+
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [diagPath, setDiagPath] = useState<string | null>(null);
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
   const [libraryScan, setLibraryScan] = useState(false);
   const [libraryImporting, setLibraryImporting] = useState(false);
+  const [libraryImportProgress, setLibraryImportProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
   const [libraryNotice, setLibraryNotice] = useState<string | null>(null);
   const [scanPreview, setScanPreview] = useState<LibraryScanPreview | null>(null);
 
   const refreshLibrary = useCallback(async () => {
     try {
-      setLibrary(await listLibrary());
+      const list = await listLibrary();
+      setLibrary(list);
+      libraryRef.current = list;
     } catch {
       /* backend not ready */
     }
   }, []);
+
+  const closeReader = useCallback(() => {
+    const session = readerSessionRef.current;
+    if (!session) {
+      finishCloseReader();
+      return;
+    }
+    const isTemp = Boolean(session.temporary || session.from === "external");
+    const path = session.entry?.path ?? session.source;
+    if (!isTemp || !path || pathInLibrary(path)) {
+      finishCloseReader();
+      return;
+    }
+    const remembered = loadExternalOpenRemember();
+    if (remembered === "discard") {
+      finishCloseReader();
+      return;
+    }
+    if (remembered === "import") {
+      setImportBusy(true);
+      void addLibraryPath(path)
+        .then(() => refreshLibrary())
+        .catch((e) => setError(errMsg(e)))
+        .finally(() => {
+          setImportBusy(false);
+          finishCloseReader();
+        });
+      return;
+    }
+    setImportPrompt({ path, title: session.title || titleFromPath(path) });
+  }, [finishCloseReader, pathInLibrary, refreshLibrary]);
 
   const ingestPath = useCallback(
     async (path: string) => {
@@ -194,6 +279,81 @@ export default function App() {
     }
   }, []);
 
+  const openExternalPath = useCallback(
+    async (raw: string) => {
+      try {
+        const path = await validateExternalOpenPath(raw);
+        openReader({
+          source: path,
+          title: titleFromPath(path),
+          from: "external",
+          temporary: true,
+          jobId: null,
+        });
+        setSource(path);
+        setTab("library");
+      } catch (e) {
+        setError(errMsg(e));
+      }
+    },
+    [openReader],
+  );
+
+  // 外部打开：启动参数 + 运行中二次打开
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const pending = await takePendingOpenPaths();
+        if (!cancelled && pending[0]) await openExternalPath(pending[0]);
+      } catch {
+        /* not in tauri */
+      }
+      try {
+        unlisten = await listen<string[]>("app://open-paths", (ev) => {
+          const paths = ev.payload ?? [];
+          if (paths[0]) void openExternalPath(paths[0]);
+        });
+      } catch {
+        /* browser */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [openExternalPath]);
+
+  // 监控目录：进入应用时轻量自动扫描并导入新书
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { watchFolders } = loadImportSettings();
+      if (watchFolders.length === 0) return;
+      for (const root of watchFolders) {
+        if (cancelled) return;
+        try {
+          const preview = await previewLibraryScan(root);
+          const fresh = preview.candidates
+            .filter((c) => !c.alreadyInLibrary)
+            .map((c) => c.path);
+          if (fresh.length === 0) continue;
+          const r = await importLibraryPaths(fresh);
+          if (!cancelled && r.added > 0) {
+            setLibraryNotice(r.message);
+            await refreshLibrary();
+          }
+        } catch {
+          /* watch is best-effort */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshLibrary]);
+
   useEffect(() => {
     refreshLibrary();
     refreshJobs();
@@ -214,14 +374,24 @@ export default function App() {
         const savedModel = localStorage.getItem("comic.cuganModel");
         const pick =
           c.find((e) => e.id === saved && e.available) ??
+          c.find((e) => e.id === "realcugan" && e.available) ??
           c.find((e) => e.available) ??
           c[0];
         if (pick) {
+          if (!saved) {
+            try {
+              localStorage.setItem("comic.engine", pick.id);
+            } catch {
+              /* ignore */
+            }
+          }
           setEngineId(pick.id);
           const mid =
             savedModel && pick.models.some((m) => m.id === savedModel)
               ? savedModel
-              : pick.models[0]?.id ?? "se";
+              : pick.models.find((m) => m.id === "nose")?.id ??
+                pick.models[0]?.id ??
+                "nose";
           setCuganModel(mid);
         }
       })
@@ -309,11 +479,14 @@ export default function App() {
               return;
             }
             void ingestPath(path);
-            if (tab === "enhance") {
+            if (reading) {
+              setReaderSession((prev) =>
+                prev
+                  ? { ...prev, source: path, jobId: null, entry: undefined, title: undefined }
+                  : { source: path, from: "library" },
+              );
+            } else if (tab === "enhance") {
               void applySource(path);
-            } else if (tab === "reader") {
-              setSource(path);
-              setReaderJobId(null);
             } else {
               setTab("library");
             }
@@ -327,7 +500,7 @@ export default function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [applySource, ingestPath, tab]);
+  }, [applySource, ingestPath, tab, reading]);
 
   const pickSource = async () => {
     const selected = await open({
@@ -377,7 +550,6 @@ export default function App() {
         enhance: { scale, noiseLevel: noise, tta, cuganModel },
       });
       await refreshJobs();
-      setReaderJobId(created.jobId);
       setTab("enhance");
       setQueueOpen(true);
       if (created.resumed && created.nextPage) {
@@ -403,7 +575,6 @@ export default function App() {
   const tabs: { id: Tab; label: string }[] = [
     { id: "library", label: i18n.tabLibrary },
     { id: "enhance", label: i18n.tabEnhance },
-    { id: "reader", label: i18n.tabReader },
     { id: "doctor", label: i18n.tabDoctor },
   ];
   const runningJobCount = jobs.filter((j) => canShowCancel(j.state)).length;
@@ -431,18 +602,26 @@ export default function App() {
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <header
-        className={`sticky top-0 z-10 shrink-0 border-b border-ink-300/70 bg-white/90 backdrop-blur-md dark:border-white/[0.06] dark:bg-black/80 ${
+        className={`sticky top-0 z-10 shrink-0 border-b border-ink-300/80 bg-ink-100/85 backdrop-blur-md dark:border-white/[0.08] dark:bg-surface/90 ${
           hideAppChrome ? "hidden" : ""
         }`}
       >
         <div className="flex h-[52px] items-center">
-          <div data-tauri-drag-region className="h-full w-[84px] shrink-0" />
-          <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2.5 h-full pr-3">
-            <h1 className="shrink-0 text-[15px] font-semibold tracking-tight text-ink-950 dark:text-white pointer-events-none">
+          <div
+            data-tauri-drag-region
+            className="h-full w-[84px] shrink-0"
+            onMouseDown={startWindowDrag}
+          />
+          <div
+            data-tauri-drag-region
+            className="flex min-w-0 flex-1 items-center gap-2.5 h-full pr-3"
+            onMouseDown={startWindowDrag}
+          >
+            <h1 className="shrink-0 text-[15px] font-semibold tracking-tight text-ink-900 dark:text-fg pointer-events-none">
               {i18n.appName}
             </h1>
             <span
-              className="min-w-0 truncate rounded-full bg-ink-200 px-2.5 py-0.5 text-[11px] text-ink-600 dark:bg-white/10 dark:text-ink-300"
+              className="min-w-0 truncate rounded-full border border-ink-300 bg-white px-2.5 py-0.5 text-[11px] text-ink-500 dark:border-white/[0.08] dark:bg-surface-high dark:text-fg-muted pointer-events-none"
               title={readyModelHint}
             >
               {readyModelLabel}
@@ -483,13 +662,13 @@ export default function App() {
                     onClick={() => setTab(x.id)}
                     className={`relative px-3 py-2 text-sm transition ${
                       active
-                        ? "font-semibold text-ink-950 dark:text-white"
-                        : "font-normal text-ink-500 hover:text-ink-800 dark:text-ink-400 dark:hover:text-ink-200"
+                        ? "font-semibold text-ink-900 dark:text-fg"
+                        : "font-normal text-ink-500 hover:text-ink-800 dark:text-fg-muted dark:hover:text-fg"
                     }`}
                   >
                     {x.label}
                     {active && (
-                      <span className="absolute inset-x-3 bottom-0.5 h-0.5 rounded-full bg-ink-950 dark:bg-white" />
+                      <span className="absolute inset-x-3 bottom-0.5 h-0.5 rounded-full bg-ink-900 dark:bg-fg" />
                     )}
                   </button>
                 );
@@ -503,7 +682,7 @@ export default function App() {
                 runningJobCount > 0
                   ? "!bg-amber-400/90 !text-ink-950 font-medium"
                   : queueOpen
-                    ? "!bg-ink-300 !text-ink-800 dark:!bg-white/15 dark:!text-ink-100"
+                    ? "!bg-ink-300 !text-ink-800 dark:!bg-surface-high dark:!text-fg"
                     : ""
               }`}
             >
@@ -513,7 +692,7 @@ export default function App() {
                   className={`ml-0.5 inline-flex min-w-[1.15rem] h-[1.15rem] items-center justify-center rounded-full px-1 text-[11px] font-semibold leading-none ${
                     runningJobCount > 0
                       ? "bg-ink-950/15 text-ink-950"
-                      : "bg-ink-300/80 text-ink-800 dark:bg-white/15 dark:text-ink-100"
+                      : "bg-ink-300/80 text-ink-800 dark:bg-surface-high dark:text-fg"
                   }`}
                 >
                   {runningJobCount || jobs.length}
@@ -549,14 +728,69 @@ export default function App() {
 
       <main
         className={
-          tab === "reader"
+          reading
             ? "flex min-h-0 w-full flex-1 flex-col"
             : tab === "library"
               ? "mx-auto flex w-full max-w-6xl min-h-0 flex-1 flex-col px-6 py-4"
               : "mx-auto w-full max-w-6xl flex-1 px-6 py-4"
         }
       >
-        {tab === "library" && (
+        {reading && readerSession && (
+          <ComicReader
+            session={readerSession}
+            jobs={jobs}
+            i18n={i18n}
+            onClose={closeReader}
+            onError={setError}
+            onPickedSource={(path) => {
+              // 阅读器内再开文件：仍按临时会话，不强制入库
+              setSource(path);
+              const next: ReaderSession = {
+                source: path,
+                title: titleFromPath(path),
+                jobId: null,
+                from: readerSession.temporary || readerSession.from === "external" ? "external" : "library",
+                temporary: Boolean(readerSession.temporary || readerSession.from === "external"),
+              };
+              setReaderSession(next);
+              readerSessionRef.current = next;
+            }}
+          />
+        )}
+
+        {importPrompt && (
+          <ExternalImportModal
+            i18n={i18n}
+            title={importPrompt.title}
+            path={importPrompt.path}
+            remember={importRemember}
+            busy={importBusy}
+            onRememberChange={setImportRemember}
+            onAdd={async () => {
+              if (importRemember) saveExternalOpenRemember("import");
+              setImportBusy(true);
+              try {
+                await addLibraryPath(importPrompt.path);
+                await refreshLibrary();
+                finishCloseReader();
+              } catch (e) {
+                setError(errMsg(e));
+              } finally {
+                setImportBusy(false);
+              }
+            }}
+            onDiscard={() => {
+              if (importRemember) saveExternalOpenRemember("discard");
+              finishCloseReader();
+            }}
+            onCancel={() => {
+              setImportPrompt(null);
+              setImportRemember(false);
+            }}
+          />
+        )}
+
+        {!reading && tab === "library" && (
           <div className="flex min-h-0 flex-1 flex-col">
             {libraryNotice && (
               <div className="mb-3 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:text-emerald-100">
@@ -569,18 +803,49 @@ export default function App() {
               scanning={libraryScan}
               scanPreview={scanPreview}
               importing={libraryImporting}
+              importProgress={libraryImportProgress}
               i18n={i18n}
               onAddFile={async () => {
-                const p = await pickComicFile();
-                if (p) await ingestPath(p);
+                const paths = await pickComicFiles();
+                if (paths.length === 0) return;
+                setLibraryImporting(true);
+                setLibraryImportProgress({ done: 0, total: paths.length });
+                setError(null);
+                try {
+                  let done = 0;
+                  for (const p of paths) {
+                    try {
+                      await addLibraryPath(p);
+                    } catch {
+                      /* single fail continues */
+                    }
+                    done += 1;
+                    setLibraryImportProgress({ done, total: paths.length });
+                  }
+                  await refreshLibrary();
+                  setLibraryNotice(
+                    paths.length === 1 ? null : `已处理 ${paths.length} 个文件`,
+                  );
+                } catch (e) {
+                  setError(errMsg(e));
+                } finally {
+                  setLibraryImporting(false);
+                  setLibraryImportProgress(null);
+                }
               }}
               onAddFolder={async () => {
                 const p = await pickFolder();
                 if (p) await ingestPath(p);
               }}
-              onScan={async () => {
+              onScan={async (opts) => {
                 const p = await pickFolder();
                 if (!p) return;
+                if (opts?.addToWatch) {
+                  const s = loadImportSettings();
+                  if (!s.watchFolders.includes(p)) {
+                    saveImportSettings({ ...s, watchFolders: [...s.watchFolders, p] });
+                  }
+                }
                 setLibraryScan(true);
                 setError(null);
                 try {
@@ -595,22 +860,40 @@ export default function App() {
               onConfirmScan={async (paths) => {
                 if (paths.length === 0) return;
                 setLibraryImporting(true);
+                setLibraryImportProgress({ done: 0, total: paths.length });
                 setError(null);
                 try {
-                  const r = await importLibraryPaths(paths);
-                  setLibraryNotice(r.message);
+                  // 分批导入以更新进度提示
+                  const batch = 8;
+                  let done = 0;
+                  let lastMsg = "";
+                  for (let i = 0; i < paths.length; i += batch) {
+                    const slice = paths.slice(i, i + batch);
+                    const r = await importLibraryPaths(slice);
+                    lastMsg = r.message;
+                    done = Math.min(paths.length, i + slice.length);
+                    setLibraryImportProgress({ done, total: paths.length });
+                  }
+                  setLibraryNotice(lastMsg || `已导入 ${paths.length} 本`);
                   setScanPreview(null);
                   await refreshLibrary();
                 } catch (e) {
                   setError(errMsg(e));
                 } finally {
                   setLibraryImporting(false);
+                  setLibraryImportProgress(null);
                 }
               }}
               onOpen={(e) => {
+                if (e.missing) return;
                 setSource(e.path);
-                setReaderJobId(e.jobId ?? null);
-                setTab("reader");
+                openReader({
+                  source: e.path,
+                  jobId: e.jobId ?? null,
+                  title: e.title,
+                  entry: e,
+                  from: "library",
+                });
               }}
               onEnhance={(e) => {
                 void applySource(e.path);
@@ -625,11 +908,11 @@ export default function App() {
           </div>
         )}
 
-        {tab === "enhance" && (
+        {!reading && tab === "enhance" && (
           <div className="grid lg:grid-cols-2 gap-5 items-stretch">
             <section
               className={`card p-5 h-full flex flex-col ${
-                dragOver ? "ring-2 ring-ink-950 border-ink-950 bg-ink-200/40 dark:ring-white dark:border-white" : ""
+                dragOver ? "ring-2 ring-ink-950 border-ink-950 bg-ink-200/40 dark:ring-fg dark:border-fg" : ""
               }`}
             >
               <div className="flex items-center justify-between mb-3">
@@ -646,22 +929,22 @@ export default function App() {
               <button
                 type="button"
                 onClick={pickSource}
-                className="w-full flex-1 min-h-[8rem] rounded-xl border border-dashed border-ink-300 bg-ink-100 px-5 py-10 text-center hover:border-ink-500 hover:bg-ink-200/50 transition grid place-items-center dark:border-white/15 dark:bg-white/[0.03]"
+                className="w-full flex-1 min-h-[8rem] rounded-xl border border-dashed border-ink-300 bg-ink-100 px-5 py-10 text-center hover:border-ink-500 hover:bg-ink-200/50 transition grid place-items-center dark:border-white/[0.08] dark:bg-surface-panel"
               >
                 <div>
-                  <p className="text-sm text-ink-800 dark:text-ink-100">
+                  <p className="text-sm text-ink-800 dark:text-fg">
                     <span className="mr-2 opacity-80">📚</span>
                     {i18n.dropCompact}
                   </p>
                   {source && (
-                    <p className="mt-2 text-xs text-ink-600 break-all font-mono dark:text-ink-300">{source}</p>
+                    <p className="mt-2 text-xs text-ink-600 break-all font-mono dark:text-fg-muted">{source}</p>
                   )}
                 </div>
               </button>
               <div className="mt-4">
                 <p className="label mb-1.5">{i18n.outputDir}</p>
                 <div className="flex gap-2">
-                  <div className="flex-1 min-w-0 rounded-xl bg-ink-100 border border-ink-200 px-3 py-2 text-sm font-mono text-ink-700 truncate dark:bg-ink-950/60 dark:border-white/10 dark:text-ink-200">
+                  <div className="flex-1 min-w-0 rounded-xl bg-ink-100 border border-ink-200 px-3 py-2 text-sm font-mono text-ink-700 truncate dark:bg-surface-raised dark:border-white/[0.08] dark:text-fg">
                     {outputDir ?? "—"}
                   </div>
                   <button type="button" className="btn-ghost shrink-0" onClick={pickOutput}>
@@ -681,7 +964,7 @@ export default function App() {
                     <span
                       className={`rounded-lg px-2.5 py-1 border ${
                         estimate.ok
-                          ? "bg-ink-100 border-ink-200 text-ink-700 dark:bg-white/5 dark:border-white/10 dark:text-ink-200"
+                          ? "bg-ink-100 border-ink-200 text-ink-700 dark:bg-surface-raised dark:border-white/[0.08] dark:text-fg"
                           : "bg-rose-500/10 border-rose-500/30 text-rose-800 dark:text-rose-100"
                       }`}
                     >
@@ -737,7 +1020,10 @@ export default function App() {
                       if (!scales.includes(scale)) {
                         setScale(scales.includes(2) ? 2 : scales[0] ?? 2);
                       }
-                      const mid = info?.models[0]?.id ?? "se";
+                      const mid =
+                        info?.models.find((m) => m.id === "nose")?.id ??
+                        info?.models[0]?.id ??
+                        "nose";
                       if (id === "realcugan") {
                         const keep = info?.models.some((m) => m.id === cuganModel);
                         const next = keep ? cuganModel : mid;
@@ -870,8 +1156,12 @@ export default function App() {
                   className="btn-ghost py-2.5 px-4"
                   disabled={!source}
                   onClick={() => {
-                    setReaderJobId(jobs.find((j) => j.source === source)?.jobId ?? null);
-                    setTab("reader");
+                    if (!source) return;
+                    openReader({
+                      source,
+                      jobId: jobs.find((j) => j.source === source)?.jobId ?? null,
+                      from: "enhance",
+                    });
                   }}
                 >
                   {i18n.readerRead}
@@ -881,23 +1171,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "reader" && (
-          <ReaderView
-            jobs={jobs}
-            source={source}
-            requestedJobId={readerJobId}
-            i18n={i18n}
-            onError={setError}
-            onImmersiveChange={setReaderImmersive}
-            onPickedSource={(path) => {
-              setSource(path);
-              setReaderJobId(null);
-              void ingestPath(path);
-            }}
-          />
-        )}
-
-        {tab === "doctor" && (
+        {!reading && tab === "doctor" && (
           <div className="space-y-6">
             <div className="flex flex-wrap gap-2">
               <button type="button" className="btn-ghost" onClick={refreshDoctor}>
@@ -974,7 +1248,7 @@ export default function App() {
                     {doctorReport.gpus.map((g) => (
                       <li
                         key={`${g.id}-${g.name}`}
-                        className="rounded-lg border border-ink-200 bg-ink-100 px-3 py-2 font-mono text-xs dark:bg-white/5 dark:border-white/10"
+                        className="rounded-lg border border-ink-200 bg-ink-100 px-3 py-2 font-mono text-xs dark:bg-surface-raised dark:border-white/[0.08]"
                       >
                         [{g.id}] {g.name}
                         {g.is_cpu ? " (CPU)" : ""}
@@ -996,7 +1270,7 @@ export default function App() {
             aria-label={i18n.hideQueue}
             onClick={() => setQueueOpen(false)}
           />
-          <aside className="relative h-full w-full max-w-md border-l border-ink-200 bg-white shadow-panel flex flex-col dark:border-white/10 dark:bg-ink-950">
+          <aside className="relative h-full w-full max-w-md border-l border-ink-200 bg-white shadow-panel flex flex-col dark:border-white/[0.08] dark:bg-surface">
             <JobQueue
               jobs={jobs}
               i18n={i18n}
@@ -1022,14 +1296,87 @@ export default function App() {
               }
               onOpen={(id) => openOutputFolder(id).catch((e) => setError(errMsg(e)))}
               onRead={(id) => {
-                setReaderJobId(id);
-                setTab("reader");
+                const job = jobs.find((j) => j.jobId === id);
+                openReader({
+                  source: job?.source ?? source ?? "",
+                  jobId: id,
+                  from: "queue",
+                });
                 setQueueOpen(false);
               }}
             />
           </aside>
         </div>
       )}
+    </div>
+  );
+}
+
+function ExternalImportModal({
+  i18n,
+  title,
+  path,
+  remember,
+  busy,
+  onRememberChange,
+  onAdd,
+  onDiscard,
+  onCancel,
+}: {
+  i18n: ReturnType<typeof t>;
+  title: string;
+  path: string;
+  remember: boolean;
+  busy: boolean;
+  onRememberChange: (v: boolean) => void;
+  onAdd: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/50"
+        aria-label={i18n.externalImportCancel}
+        onClick={onCancel}
+        disabled={busy}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="external-import-title"
+        className="relative w-full max-w-md rounded-2xl border border-ink-200 bg-white p-5 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised"
+      >
+        <p id="external-import-title" className="text-base font-semibold text-ink-900 dark:text-fg">
+          {i18n.externalImportTitle}
+        </p>
+        <p className="mt-2 text-sm text-ink-600 dark:text-fg-muted">{i18n.externalImportBody}</p>
+        <p className="mt-2 truncate rounded-lg bg-ink-100 px-2.5 py-1.5 font-mono text-[11px] text-ink-700 dark:bg-surface-high dark:text-fg" title={path}>
+          {title}
+          <span className="mt-0.5 block truncate text-ink-400 dark:text-fg-muted">{path}</span>
+        </p>
+        <label className="mt-4 flex cursor-pointer items-center gap-2 text-xs text-ink-600 dark:text-fg-muted">
+          <input
+            type="checkbox"
+            checked={remember}
+            disabled={busy}
+            onChange={(e) => onRememberChange(e.target.checked)}
+          />
+          {i18n.externalImportRemember}
+        </label>
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <button type="button" className="btn-ghost !h-9 !px-3 text-xs" disabled={busy} onClick={onCancel}>
+            {i18n.externalImportCancel}
+          </button>
+          <button type="button" className="btn-soft !h-9 !px-3 text-xs" disabled={busy} onClick={onDiscard}>
+            {i18n.externalImportDiscard}
+          </button>
+          <button type="button" className="btn-accent !h-9 !px-3 text-xs" disabled={busy} onClick={onAdd}>
+            {busy ? "…" : i18n.externalImportAdd}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1045,10 +1392,10 @@ function Field({
 }) {
   return (
     <div className="min-w-0">
-      <div className="mb-2 flex h-4 items-center justify-between gap-3">
+      <div className="mb-2 flex min-h-4 items-center justify-between gap-3">
         <p className="label shrink-0">{label}</p>
         {hint && (
-          <p className="text-[11px] text-ink-500 truncate" title={hint}>
+          <p className="field-hint min-w-0 truncate text-right" title={hint}>
             {hint}
           </p>
         )}
@@ -1076,8 +1423,8 @@ function Segmented<T extends string>({
           onClick={() => onChange(opt.id)}
           className={`rounded-full px-3 py-2 text-sm border transition ${
             value === opt.id
-              ? "border-ink-400 bg-ink-300 text-ink-800 dark:border-white/20 dark:bg-white/15 dark:text-ink-100"
-              : "border-ink-300 bg-ink-200/80 text-ink-700 hover:bg-ink-300 dark:border-white/10 dark:bg-white/5 dark:text-ink-200 dark:hover:bg-white/10"
+              ? "border-ink-400 bg-ink-300 text-ink-800 dark:border-white/20 dark:bg-surface-high dark:text-fg"
+              : "border-ink-300 bg-ink-200/80 text-ink-700 hover:bg-ink-300 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg dark:hover:bg-surface-high"
           }`}
         >
           {opt.label}
@@ -1129,14 +1476,14 @@ function SelectBox<T extends string>({
         }}
         className={`w-full h-10 flex items-center justify-between gap-2 rounded-full border px-3 text-sm text-left transition ${
           open
-            ? "border-ink-950 bg-white text-ink-950 dark:border-white dark:bg-ink-900 dark:text-white"
-            : "border-ink-300 bg-white text-ink-800 hover:border-ink-500 dark:border-white/10 dark:bg-ink-900 dark:text-ink-100 dark:hover:border-white/20"
+            ? "border-ink-950 bg-white text-ink-950 dark:border-fg dark:bg-surface-raised dark:text-fg"
+            : "border-ink-300 bg-white text-ink-800 hover:border-ink-500 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg dark:hover:border-white/20"
         } disabled:opacity-80 disabled:cursor-default`}
       >
         <span className="truncate">{selected?.label ?? "—"}</span>
         <svg
           viewBox="0 0 20 20"
-          className={`h-4 w-4 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-ink-950 dark:text-white" : ""}`}
+          className={`h-4 w-4 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-ink-950 dark:text-fg" : ""}`}
           aria-hidden="true"
         >
           <path
@@ -1148,7 +1495,7 @@ function SelectBox<T extends string>({
       {open && !single && (
         <ul
           role="listbox"
-          className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/10 dark:bg-ink-900/95 dark:backdrop-blur-md"
+          className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised/95 dark:backdrop-blur-md"
         >
           {options.map((opt) => {
             const active = opt.id === value;
@@ -1160,8 +1507,8 @@ function SelectBox<T extends string>({
                   aria-selected={active}
                   className={`flex w-full items-center justify-between px-3 py-2 text-sm text-left transition ${
                     active
-                      ? "bg-ink-200 text-ink-950 dark:bg-white/10 dark:text-white"
-                      : "text-ink-700 hover:bg-ink-100 hover:text-ink-950 dark:text-ink-200 dark:hover:bg-white/10 dark:hover:text-white"
+                      ? "bg-ink-200 text-ink-950 dark:bg-surface-high dark:text-fg"
+                      : "text-ink-700 hover:bg-ink-100 hover:text-ink-950 dark:text-fg dark:hover:bg-surface-high dark:hover:text-fg"
                   }`}
                   onClick={() => {
                     onChange(opt.id);
@@ -1170,7 +1517,7 @@ function SelectBox<T extends string>({
                 >
                   <span className="truncate">{opt.label}</span>
                   {active && (
-                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-ink-950 dark:text-white" aria-hidden="true">
+                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-ink-950 dark:text-fg" aria-hidden="true">
                       <path
                         fill="currentColor"
                         d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.2 7.2a1 1 0 0 1-1.4 0L3.3 9.1a1 1 0 1 1 1.4-1.4l4.1 4.08 6.5-6.48a1 1 0 0 1 1.4 0Z"
@@ -1193,19 +1540,19 @@ function stateBadgeClass(state: string): string {
     return "bg-success/15 border-success/35 text-success dark:text-emerald-100";
   if (s === "failed") return "bg-rose-500/20 border-rose-400/40 text-rose-800 dark:text-rose-100";
   if (s === "cancelled" || s === "cancelling")
-    return "bg-ink-200 border-ink-300 text-ink-700 dark:bg-ink-700/60 dark:border-white/15 dark:text-ink-200";
-  if (s === "running") return "bg-accent/15 border-accent/40 text-accent dark:text-white";
+    return "bg-ink-200 border-ink-300 text-ink-700 dark:bg-surface-raised dark:border-white/[0.08] dark:text-fg";
+  if (s === "running") return "bg-accent/15 border-accent/40 text-accent dark:text-fg";
   if (s === "extracting") return "bg-sky-500/20 border-sky-400/40 text-sky-800 dark:text-sky-100";
   if (s === "finalizing")
     return "bg-amber-500/20 border-amber-400/40 text-amber-900 dark:text-amber-100";
-  return "bg-ink-100 border-ink-200 text-ink-700 dark:bg-white/10 dark:border-white/15 dark:text-ink-100";
+  return "bg-ink-100 border-ink-200 text-ink-700 dark:bg-surface-high dark:border-white/[0.08] dark:text-fg";
 }
 
 function Info({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-ink-200 bg-ink-50 px-3 py-2 dark:bg-white/5 dark:border-white/10">
+    <div className="rounded-xl border border-ink-200 bg-ink-50 px-3 py-2 dark:bg-surface-raised dark:border-white/[0.08]">
       <p className="text-[10px] uppercase tracking-wider text-ink-500">{label}</p>
-      <p className="mt-0.5 text-ink-800 break-all dark:text-ink-100">{value}</p>
+      <p className="mt-0.5 text-ink-800 break-all dark:text-fg">{value}</p>
     </div>
   );
 }
@@ -1269,7 +1616,7 @@ function JobQueue({
               {i18n.clearFinished}
             </button>
           )}
-          <button type="button" className="text-xs text-ink-500 hover:text-ink-950 dark:text-ink-400 dark:hover:text-white" onClick={onRefresh}>
+          <button type="button" className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg" onClick={onRefresh}>
             刷新
           </button>
           {onClose && (
@@ -1297,10 +1644,10 @@ function JobQueue({
             const showCancel = canShowCancel(j.state);
             const cancelling = isCancellingState(j.state);
             return (
-              <li key={id || j.source} className="rounded-xl border border-ink-200 bg-ink-50 p-3.5 dark:border-white/10 dark:bg-ink-950/50">
+              <li key={id || j.source} className="rounded-xl border border-ink-200 bg-ink-50 p-3.5 dark:border-white/[0.08] dark:bg-surface-panel">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-ink-900 truncate dark:text-ink-50">
+                    <p className="text-sm font-medium text-ink-900 truncate dark:text-fg">
                       {j.source.split(/[/\\]/).pop()}
                     </p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-2">
@@ -1309,7 +1656,7 @@ function JobQueue({
                       >
                         {stateLabel(normalizeJobState(j.state) || j.state)}
                       </span>
-                      <span className="text-xl font-semibold tabular-nums text-ink-950 leading-none dark:text-white">
+                      <span className="text-xl font-semibold tabular-nums text-ink-950 leading-none dark:text-fg">
                         {pct}%
                       </span>
                     </div>
@@ -1318,7 +1665,7 @@ function JobQueue({
                     {id && (
                       <button
                         type="button"
-                        className="rounded-full border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/15 dark:bg-white/10 dark:text-ink-100"
+                        className="rounded-full border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/[0.08] dark:bg-surface-high dark:text-fg"
                         onClick={() => onRead(id)}
                       >
                         {i18n.readerRead}
@@ -1337,7 +1684,7 @@ function JobQueue({
                     {isTerminalState(j.state) && (
                       <button
                         type="button"
-                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-ink-400 dark:hover:text-white"
+                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
                         onClick={() => id && onRemove(id)}
                       >
                         {i18n.remove}
@@ -1346,7 +1693,7 @@ function JobQueue({
                     {j.outputPath && (
                       <button
                         type="button"
-                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-ink-400 dark:hover:text-white"
+                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
                         onClick={() => id && onOpen(id)}
                       >
                         {i18n.openOut}
@@ -1354,7 +1701,7 @@ function JobQueue({
                     )}
                   </div>
                 </div>
-                <div className="mt-3 h-2.5 rounded-full bg-ink-200 overflow-hidden dark:bg-white/10">
+                <div className="mt-3 h-2.5 rounded-full bg-ink-200 overflow-hidden dark:bg-surface-high">
                   <div
                     className={`h-full transition-all ${
                       normalizeJobState(j.state) === "failed"
@@ -1366,7 +1713,7 @@ function JobQueue({
                     style={{ width: `${pct}%` }}
                   />
                 </div>
-                <p className="mt-1.5 text-sm font-medium text-ink-800 dark:text-ink-100">
+                <p className="mt-1.5 text-sm font-medium text-ink-800 dark:text-fg">
                   {pagesDone}/{pagesTotal} {i18n.pages}
                   {j.stage ? ` · ${j.stage}` : ""}
                 </p>
