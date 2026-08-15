@@ -537,7 +537,8 @@ pub fn run() {
                 scheduler,
                 pending_open: pending,
             });
-            if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon-1024.png"))
+            if let Ok(icon) =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/icon-1024.png"))
             {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.set_icon(icon);

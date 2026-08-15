@@ -4,8 +4,8 @@ mod hub;
 mod mock;
 pub mod paths;
 mod realcugan;
-mod waifu2x;
 mod realesrgan_coreml;
+mod waifu2x;
 mod waifu2x_coreml;
 
 pub use hub::{EngineHub, EngineInfo};
@@ -15,8 +15,8 @@ pub use paths::{
     resolve_waifu2x_coreml_model, resolve_waifu2x_coreml_model_for_noise, resolve_waifu2x_paths,
     RealCuganPaths, Waifu2xPaths,
 };
-pub use realesrgan_coreml::RealEsrganCoreMlEngine;
 pub use realcugan::{CuganModelPack, RealCuganEngine};
+pub use realesrgan_coreml::RealEsrganCoreMlEngine;
 pub use waifu2x::Waifu2xEngine;
 pub use waifu2x_coreml::Waifu2xCoreMlEngine;
 

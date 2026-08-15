@@ -120,7 +120,10 @@ impl EngineHub {
                 if self.allow_mock {
                     return Ok(self.mock.clone());
                 }
-                Err("未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh".into())
+                Err(
+                    "未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh"
+                        .into(),
+                )
             }
             EngineKind::RealCugan => {
                 if let Some(e) = &self.realcugan {

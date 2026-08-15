@@ -183,8 +183,9 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
             EngineAvailability::MissingBinary => EngineStatus {
                 id: "realesrgan-coreml".into(),
                 available: false,
-                detail: "未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh"
-                    .into(),
+                detail:
+                    "未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh"
+                        .into(),
                 version: None,
             },
             EngineAvailability::Unavailable(s) => EngineStatus {
@@ -285,9 +286,8 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     fn model_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-            "../../third_party/realesrgan-coreml/RealESRGAN_x4plus_anime_6B.mlmodel",
-        )
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/realesrgan-coreml/RealESRGAN_x4plus_anime_6B.mlmodel")
     }
 
     #[test]

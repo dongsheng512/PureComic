@@ -541,8 +541,13 @@ pub async fn enhance_pages(
         } else {
             MAX_INPUT_SIDE
         };
-        match prepare_reader_input(&original, &batch_root.join("prep"), &stem, params.scale, cap)
-        {
+        match prepare_reader_input(
+            &original,
+            &batch_root.join("prep"),
+            &stem,
+            params.scale,
+            cap,
+        ) {
             Ok((prepared, owned, scale)) => {
                 let batch_in = batch_root.join(format!("in-s{}", scale.as_u8()));
                 let ext = passthrough_ext(&prepared).unwrap_or("jpg");

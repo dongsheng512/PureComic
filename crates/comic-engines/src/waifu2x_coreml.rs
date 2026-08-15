@@ -305,22 +305,12 @@ mod tests {
         let mut img = RgbImage::new(200, 280);
         for y in 0..280 {
             for x in 0..200 {
-                img.put_pixel(
-                    x,
-                    y,
-                    Rgb([
-                        (40 + x / 2) as u8,
-                        (80 + y / 3) as u8,
-                        160,
-                    ]),
-                );
+                img.put_pixel(x, y, Rgb([(40 + x / 2) as u8, (80 + y / 3) as u8, 160]));
             }
         }
         let inp = dir.path().join("in.png");
         let out = dir.path().join("out.jpg");
-        image::DynamicImage::ImageRgb8(img)
-            .save(&inp)
-            .unwrap();
+        image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
         let engine = Waifu2xCoreMlEngine::new(model);
         engine.load_for_noise(2).unwrap();
         run_file(&inp, &out, &CancellationToken::new()).unwrap();
