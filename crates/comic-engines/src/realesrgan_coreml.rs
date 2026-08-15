@@ -45,7 +45,7 @@ impl RealEsrganCoreMlEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = &self.model_path;
-            return Err(EngineError::Process("仅 macOS 支持 Core ML".into()));
+            Err(EngineError::Process("仅 macOS 支持 Core ML".into()))
         }
         #[cfg(target_os = "macos")]
         {
@@ -91,6 +91,7 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         .checked_mul(out_h as usize)
         .and_then(|n| n.checked_mul(3))
         .ok_or_else(|| EngineError::Image("输出尺寸过大".into()))?;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut out_buf = vec![0u8; cap];
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut ow = 0i32;
