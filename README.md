@@ -6,12 +6,7 @@ Local-first desktop **comic enhancer, reader, and library**.
 
 技术栈：**Tauri 2 + Rust + React + TypeScript + Tailwind CSS**
 
-| 文档 | 说明 |
-|------|------|
-| [docs/README.md](docs/README.md) | 文档索引 |
-| [docs/design-comic-enhancer.md](docs/design-comic-enhancer.md) | 增强管线设计 |
-| [docs/reader-schedule.md](docs/reader-schedule.md) | 阅读器 / 书库排期 |
-| [docs/adr/](docs/adr/) | 架构决策记录 |
+引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
 
 ## 能做什么
 
@@ -36,8 +31,7 @@ PureComic/
 │   ├── comic-engines/     # 引擎：mock / waifu2x / realcugan / Core ML
 │   └── comic-cli/         # 命令行（purecomic）
 ├── third_party/           # pin / NOTICE；引擎与模型由脚本拉取
-├── scripts/               # fetch / verify / macOS 打包
-└── docs/                  # 设计与 ADR
+└── scripts/               # fetch / verify / macOS 打包
 ```
 
 内部 crate 仍为 `comic-core` / `comic-engines` / `comic-cli`；CLI 可执行文件为 **`purecomic`**。
