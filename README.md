@@ -1,12 +1,15 @@
 # PureComic
 
+[![CI](https://github.com/dongsheng512/PureComic/actions/workflows/ci.yml/badge.svg)](https://github.com/dongsheng512/PureComic/actions/workflows/ci.yml)
+[![version](https://img.shields.io/badge/version-v0.2.0-6bb6ff)](https://github.com/dongsheng512/PureComic/tags)
+
 本地优先的桌面端 **漫画增强 + 阅读 + 书库** 工具。
 
 Local-first desktop **comic enhancer, reader, and library**.
 
 技术栈：**Tauri 2 + Rust + React + TypeScript + Tailwind CSS**
 
-引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
+当前版本：**v0.2.0**。引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
 
 ## 能做什么
 
@@ -15,7 +18,7 @@ Local-first desktop **comic enhancer, reader, and library**.
 - **阅读器 AI（macOS Core ML）**
   - **Waifu2x Core ML**：2×，可调去噪（轻度 / 标准 / 加强 / 最强）
   - **Real-ESRGAN Anime 4×**：4× 动漫超分（输入长边约 1024）
-  - 当前页优先，再预热后续页（单页前方 2 + 回翻 1；双页前方 4 + 回翻 2）
+  - 当前页优先，再预热后续页（前方 4 + 回翻 1）
   - 结果写入本地缓存（约 2GB / 400 张上限）
 - **整本增强**：任务队列里用 **Waifu2x（Vulkan）** 或 **Real-CUGAN（Vulkan）** 导出 CBZ / ZIP / Folder
 
@@ -49,7 +52,7 @@ PureComic/
 ## 开发
 
 ```bash
-# 阅读器 Core ML 模型（macOS）
+# 阅读器 Core ML 模型（macOS，下载后按 pin.json 校验 sha256）
 ./scripts/fetch-waifu2x-coreml.sh
 ./scripts/fetch-realesrgan-coreml.sh
 
@@ -90,6 +93,9 @@ export COMIC_WAIFU2X_JOBS=4:8:4
 export COMIC_ENHANCE_MODE=directory      # 默认
 export COMIC_ENHANCE_MODE=parallel
 ```
+
+- Core ML 的 FastPrediction 特化默认关闭（waifu2x Double I/O 下实测更慢），
+  如需实验：`COMIC_W2X_FASTPRED=1`（macOS 15+ 才生效）
 
 拖放：Tauri `onDragDropEvent` 提供本机绝对路径，拖入 CBZ/ZIP/文件夹即可导入。
 
