@@ -163,7 +163,7 @@ fn run_file(
     };
     #[cfg(not(target_os = "macos"))]
     let rc = {
-        let _ = (&out_buf, &ow, &oh, &cancel_flag, &rgb);
+        let _ = (&out_buf, &ow, &oh, &cancel_flag, &rgb, cap_i32);
         -1
     };
     if let Some(w) = watcher {

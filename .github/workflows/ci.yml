@@ -39,6 +39,20 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # tauri-build 要求 conf 里的 sidecar / resources 路径存在；CI 不下载真实引擎。
+      - name: stub sidecar and resources
+        run: |
+          BIN=apps/desktop/src-tauri/binaries
+          RES=apps/desktop/src-tauri/resources
+          mkdir -p "$BIN" \
+            "$RES/models-cunet" "$RES/models-se" "$RES/models-pro" "$RES/models-nose" \
+            "$RES/waifu2x-coreml" "$RES/realesrgan-coreml"
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            : > "$BIN/waifu2x-ncnn-vulkan-$triple"
+            : > "$BIN/realcugan-ncnn-vulkan-$triple"
+          done
+          : > "$RES/NOTICE"
+          : > "$RES/checksums.sha256"
       - name: clippy
         run: cargo clippy -p purecomic --all-targets -- -D warnings
       - name: build

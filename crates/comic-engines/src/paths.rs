@@ -162,10 +162,13 @@ pub fn resolve_waifu2x_paths(
 }
 
 fn waifu2x_coreml_roots() -> Vec<PathBuf> {
-    let mut dirs = third_party_candidates();
-    // 与 third_party_candidates 对齐：release 禁止从 cwd 加载模型（模型等同可执行代码）
-    #[cfg(debug_assertions)]
-    dirs.insert(0, PathBuf::from("third_party"));
+    let dirs = {
+        let mut dirs = third_party_candidates();
+        // 与 third_party_candidates 对齐：release 禁止从 cwd 加载模型（模型等同可执行代码）
+        #[cfg(debug_assertions)]
+        dirs.insert(0, PathBuf::from("third_party"));
+        dirs
+    };
     let mut roots = Vec::new();
     for tp in dirs {
         roots.push(tp.join("waifu2x-coreml"));
@@ -238,9 +241,12 @@ pub fn resolve_realesrgan_coreml_model() -> Option<PathBuf> {
         "realesrgan_anime4x.mlmodelc",
         "realesrgan_anime4x.mlmodel",
     ];
-    let mut dirs = third_party_candidates();
-    #[cfg(debug_assertions)]
-    dirs.insert(0, PathBuf::from("third_party"));
+    let dirs = {
+        let mut dirs = third_party_candidates();
+        #[cfg(debug_assertions)]
+        dirs.insert(0, PathBuf::from("third_party"));
+        dirs
+    };
     for tp in dirs {
         for root in [
             tp.join("realesrgan-coreml"),
