@@ -222,8 +222,10 @@ mod tests {
             .save(src.join("a.png"))
             .unwrap();
 
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
 
         let engine: Arc<dyn UpscaleEngine> = Arc::new(MockEngine { delay_ms: 0 });

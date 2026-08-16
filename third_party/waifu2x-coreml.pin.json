@@ -1,0 +1,30 @@
+{
+  "comment": "Official waifu2x-ios 2× anime Core ML models (fp32, Double I/O). Hashes from local copies after fetch-waifu2x-coreml.sh. fp16 swap is R2-C and is not these files.",
+  "source": "https://github.com/imxieyi/waifu2x-ios",
+  "models": [
+    {
+      "name": "up_anime_noise0_scale2x_model.mlmodel",
+      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise0_scale2x_model.mlmodel",
+      "sha256": "09288536faaa4eb4f3e46bf0c66e748f4226a4bb5fd8068e38a5f434f0a75b48",
+      "bytes": 2211033
+    },
+    {
+      "name": "up_anime_noise1_scale2x_model.mlmodel",
+      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise1_scale2x_model.mlmodel",
+      "sha256": "e04d3b26e93498d3183b9a4e27af8d5688e62e276554d03c1103646c66969f6b",
+      "bytes": 2211033
+    },
+    {
+      "name": "up_anime_noise2_scale2x_model.mlmodel",
+      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise2_scale2x_model.mlmodel",
+      "sha256": "7aa191c4c72f35ea6a5936ce28ac17e3adfa127c08a11444d93a7bc614003a8c",
+      "bytes": 2211033
+    },
+    {
+      "name": "up_anime_noise3_scale2x_model.mlmodel",
+      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise3_scale2x_model.mlmodel",
+      "sha256": "c6334b9b98734318600deffc13755faaef6753682dd77dd2e7daa7596062dc8e",
+      "bytes": 2211033
+    }
+  ]
+}

@@ -1,25 +1,54 @@
 #!/usr/bin/env bash
 # Download john-rocky Real-ESRGAN Anime 4× Core ML model for the reader.
+# sha256 is required (third_party/realesrgan-coreml.pin.json).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/third_party/realesrgan-coreml"
-NAME="RealESRGAN_x4plus_anime_6B.mlmodel"
-FILE_ID="1qXdLx46Lpqya7Txc5Wvgkd2Dqlnqm3Qm"
+PIN="$ROOT/third_party/realesrgan-coreml.pin.json"
 mkdir -p "$DEST"
-OUT="$DEST/$NAME"
-if [[ -f "$OUT" ]]; then
-  SZ=$(wc -c < "$OUT" | tr -d ' ')
-  if [[ "$SZ" -gt 10000000 ]]; then
-    echo "already have $OUT ($SZ bytes)"
-    exit 0
-  fi
+
+if [[ ! -f "$PIN" ]]; then
+  echo "missing pin: $PIN" >&2
+  exit 1
 fi
-echo "fetch Real-ESRGAN Anime 4× Core ML ($FILE_ID)"
+
+NAME="$(python3 -c "import json; print(json.load(open(r'''$PIN'''))['models'][0]['name'])")"
+FILE_URL="$(python3 -c "import json; print(json.load(open(r'''$PIN'''))['models'][0]['url'])")"
+EXPECT="$(python3 -c "import json; print(json.load(open(r'''$PIN'''))['models'][0]['sha256'])")"
+OUT="$DEST/$NAME"
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+verify() {
+  local got
+  got="$(sha256_file "$OUT" | tr '[:upper:]' '[:lower:]')"
+  local exp
+  exp="$(echo "$EXPECT" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$got" != "$exp" ]]; then
+    echo "checksum mismatch: $NAME" >&2
+    echo "  expect $exp" >&2
+    echo "  got    $got" >&2
+    return 1
+  fi
+  return 0
+}
+
+if [[ -f "$OUT" ]] && verify; then
+  echo "already have $OUT"
+  exit 0
+fi
+
+echo "fetch Real-ESRGAN Anime 4× Core ML"
 python3 - <<PY
 import urllib.request, os
-file_id = "${FILE_ID}"
 out = r"${OUT}"
-url = f"https://drive.google.com/uc?export=download&id={file_id}"
+url = r"${FILE_URL}"
 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
 with urllib.request.urlopen(req, timeout=180) as r:
     data = r.read()
@@ -29,5 +58,7 @@ os.makedirs(os.path.dirname(out), exist_ok=True)
 open(out, "wb").write(data)
 print("wrote", out, len(data))
 PY
+
+verify
 ls -lh "$OUT"
 echo "ok — restart the app and pick Real-ESRGAN Anime 4×"

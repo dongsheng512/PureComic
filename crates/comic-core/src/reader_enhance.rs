@@ -18,6 +18,44 @@ pub const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Extra safety: do not keep more than this many enhanced pages.
 pub const MAX_CACHE_FILES: usize = 400;
 
+/// 在途增强计数：clear_cache 需等待归零，避免删除推理中的缓存目录
+static INFLIGHT_ENHANCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static INFLIGHT_IDLE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+struct InflightGuard;
+
+impl InflightGuard {
+    fn enter() -> Self {
+        INFLIGHT_ENHANCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        INFLIGHT_ENHANCES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        INFLIGHT_IDLE.notify_waiters();
+    }
+}
+
+/// 等待在途增强退出（最多 timeout），返回是否已空闲。
+pub async fn wait_reader_enhance_idle(timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if INFLIGHT_ENHANCES.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::select! {
+            _ = INFLIGHT_IDLE.notified() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnhanceCacheStats {
@@ -47,10 +85,27 @@ pub fn cache_signature(options: Option<&EnhanceOptionsDto>) -> AppResult<String>
     } else {
         "anime-2x-v4"
     };
+    // 实际解析到的模型文件：请求 n3 而本机只有 n2 时回退推理，键必须反映
+    // 真实模型，否则日后装上 n3 模型后旧缓存继续冒充
+    let resolved_model = if engine == "realesrgan-coreml" {
+        comic_engines::resolve_realesrgan_coreml_model()
+    } else {
+        comic_engines::resolve_waifu2x_coreml_model_for_noise(opts.noise)
+    };
+    let model_tag = resolved_model
+        .as_deref()
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_string())
+        })
+        .unwrap_or_else(|| "missing".into());
+    let mut h = crate::image_io::digest_bytes(model_tag.as_bytes());
+    h.truncate(8);
     let tta = if opts.tta { "t" } else { "" };
     let cap = reader_input_cap(engine);
     Ok(format!(
-        "{engine}-{model}-sa-n{}{tta}-c{cap}-t{READER_TILE}-j",
+        "{engine}-{model}-m{h}-sa-n{}{tta}-c{cap}-t{READER_TILE}-j",
         opts.noise
     ))
 }
@@ -405,7 +460,14 @@ async fn enhance_one_page(
         return Err(AppError::cancelled());
     }
 
-    let _guard = gpu.lock().await;
+    // GPU 锁等待可取消：整本增强占锁期间，阅读器取消应立即返回而非干等
+    let _guard = tokio::select! {
+        guard = gpu.lock() => guard,
+        _ = cancel.cancelled() => {
+            cleanup();
+            return Err(AppError::cancelled());
+        }
+    };
     if cache_ready(dest) {
         drop(_guard);
         cleanup();
@@ -463,6 +525,7 @@ pub async fn enhance_pages(
     cfg: &AppConfig,
     cancel: CancellationToken,
 ) -> AppResult<Vec<ReaderPageFile>> {
+    let _inflight = InflightGuard::enter();
     if page_indexes.is_empty() {
         return Err(AppError::invalid("需要至少一页"));
     }
@@ -609,7 +672,11 @@ pub async fn enhance_pages(
             last_err = Some(e.into());
             continue;
         }
-        let _guard = gpu.lock().await;
+        // GPU 锁等待可取消：整本增强占锁期间，阅读器取消应立即返回而非干等
+        let _guard = tokio::select! {
+            guard = gpu.lock() => guard,
+            _ = cancel.cancelled() => break,
+        };
         if cancel.is_cancelled() {
             drop(_guard);
             break;
@@ -672,8 +739,10 @@ mod tests {
     }
 
     fn test_cfg(tmp: &Path) -> AppConfig {
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.join("work");
+        let cfg = AppConfig {
+            work_root: tmp.join("work"),
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
         cfg
     }

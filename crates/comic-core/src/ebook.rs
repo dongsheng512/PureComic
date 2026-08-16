@@ -13,7 +13,7 @@ use crate::security::{check_entry_limits, sanitize_entry_path};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 /// Ordered list of image entry paths inside an EPUB (zip-relative, forward slashes).
@@ -368,14 +368,19 @@ pub fn extract_epub_page_raw(source: &Path, entry_name: &str, dest: &Path) -> Ap
         }
     }
     let idx = found.ok_or_else(|| AppError::not_found(format!("EPUB 中无页: {entry_name}")))?;
-    let mut entry = archive
+    let entry = archive
         .by_index(idx)
         .map_err(|e| AppError::internal(e.to_string()))?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let declared = entry.size();
     let mut f = File::create(dest)?;
-    std::io::copy(&mut entry, &mut f)?;
+    // 与 zip 路径一致：篡改声明大小的条目不得绕过上限写满磁盘
+    std::io::copy(&mut entry.take(declared.saturating_add(1)), &mut f)?;
+    if f.metadata().map(|m| m.len()).unwrap_or(0) > declared {
+        return Err(AppError::invalid("EPUB 条目实际大小超过声明值，已中止解压"));
+    }
     Ok(())
 }
 
@@ -554,12 +559,127 @@ pub fn write_mobi_engine_input(bytes: &[u8], dest: &Path) -> AppResult<()> {
     Ok(())
 }
 
-pub fn extract_mobi_page_index(source: &Path, page_index: usize, dest_png: &Path) -> AppResult<()> {
+/// MOBI 解析展开目录（work/mobi-cache/<hash>-<len>-<mtime>）。
+/// 目录名带内容指纹：文件变化即换新目录，不会命中陈旧缓存。
+fn mobi_cache_path(source: &Path, cfg: &AppConfig) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    use std::time::UNIX_EPOCH;
+
+    let meta = std::fs::metadata(source).ok();
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let mtime = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut hasher = Sha256::new();
+    hasher.update(source.to_string_lossy().as_bytes());
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    cfg.work_root
+        .join("mobi-cache")
+        .join(format!("mobi-{digest}-{len}-{mtime}"))
+}
+
+/// MOBI 缓存构建互斥：预取窗口内多页并发首建时，
+/// 若不串行化，B 的「先删旧目录再 rename」会删掉 A 刚建好的目录，
+/// 导致并发读页误报「索引越界」。
+static MOBI_CACHE_BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 把整本书展开进 tmp 目录（调用方持有构建锁）。
+fn build_mobi_cache_into(source: &Path, tmp: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(tmp)?;
     let (_names, blobs) = list_mobi_images(source)?;
-    let bytes = blobs
-        .get(page_index)
-        .ok_or_else(|| AppError::invalid(format!("MOBI 页索引越界: {page_index}")))?;
-    extract_mobi_page_bytes(bytes, dest_png)
+    for (i, b) in blobs.iter().enumerate() {
+        std::fs::write(tmp.join(format!("{i:05}.img")), b)?;
+    }
+    std::fs::write(tmp.join("meta.json"), "1")?;
+    Ok(())
+}
+
+/// 原子安装缓存目录：tmp 构建完成后 rename 到 dir（调用方持有构建锁）。
+/// 只清理超过 10 分钟的 tmp-* 构建残留——不删并发中的 tmp，也不删其它书的指纹缓存。
+fn install_mobi_cache(source: &Path, dir: &Path) -> AppResult<()> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| AppError::internal("MOBI 缓存目录无父目录"))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(e) = build_mobi_cache_into(source, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    std::fs::rename(&tmp, dir)?;
+    if let Ok(rd) = std::fs::read_dir(parent) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 60);
+        for e in rd.flatten() {
+            let is_tmp = e.file_name().to_string_lossy().starts_with("tmp-");
+            let stale = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t < cutoff)
+                .unwrap_or(false);
+            if is_tmp && stale {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 首次把 MOBI 全部图片展开到缓存目录，之后按页读取——
+/// 避免每翻一页都整本重读 + 全量解析（500MB 的 AZW3 = O(全书)/页）。
+fn ensure_mobi_cache(source: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
+    let dir = mobi_cache_path(source, cfg);
+    if dir.join("meta.json").is_file() {
+        return Ok(dir);
+    }
+    let _guard = MOBI_CACHE_BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // 双重检查：等锁期间可能已有其它线程建好
+    if dir.join("meta.json").is_file() {
+        return Ok(dir);
+    }
+    install_mobi_cache(source, &dir)?;
+    Ok(dir)
+}
+
+pub fn extract_mobi_page_index(
+    source: &Path,
+    page_index: usize,
+    dest_png: &Path,
+    cfg: &AppConfig,
+) -> AppResult<()> {
+    let dir = ensure_mobi_cache(source, cfg)?;
+    let file = dir.join(format!("{page_index:05}.img"));
+    if let Ok(bytes) = std::fs::read(&file) {
+        return extract_mobi_page_bytes(&bytes, dest_png);
+    }
+    // 页文件缺失（缓存被并发重建的窗口击中）：持锁强制重建一次自愈
+    {
+        let _guard = MOBI_CACHE_BUILD_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !file.is_file() {
+            install_mobi_cache(source, &dir)?;
+        }
+    }
+    let bytes = std::fs::read(&file)
+        .map_err(|_| AppError::invalid(format!("MOBI 页索引越界: {page_index}")))?;
+    extract_mobi_page_bytes(&bytes, dest_png)
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use comic_core::preview::EnhanceOptionsDto;
 use comic_core::Scheduler;
 use open_paths::{extract_open_paths, normalize_open_path};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
@@ -28,9 +29,29 @@ fn push_pending_open(state: &AppState, paths: Vec<String>) {
     }
 }
 
+/// 用户自选文件夹漫画：按路径动态放行 asset 协议，避免恢复 `$HOME/**`。
+fn allow_asset_path(app: &AppHandle, path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    let p = Path::new(path);
+    let dir = if p.is_dir() {
+        p
+    } else {
+        match p.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => return,
+        }
+    };
+    let _ = app.asset_protocol_scope().allow_directory(dir, true);
+}
+
 fn emit_open_paths(app: &AppHandle, paths: Vec<String>) {
     if paths.is_empty() {
         return;
+    }
+    for p in &paths {
+        allow_asset_path(app, p);
     }
     if let Some(state) = app.try_state::<AppState>() {
         push_pending_open(state.inner(), paths.clone());
@@ -58,19 +79,8 @@ struct ProgressPayload {
 async fn create_job(
     state: State<'_, AppState>,
     req: CreateJobRequest,
-) -> Result<serde_json::Value, String> {
-    let r = state
-        .scheduler
-        .create_job(req)
-        .await
-        .map_err(|e| e.message)?;
-    Ok(serde_json::json!({
-        "jobId": r.job_id,
-        "resumed": r.resumed,
-        "pagesDone": r.pages_done,
-        "pagesTotal": r.pages_total,
-        "nextPage": r.next_page,
-    }))
+) -> Result<comic_core::job::CreateJobResult, String> {
+    state.scheduler.create_job(req).await.map_err(|e| e.message)
 }
 
 #[tauri::command]
@@ -113,14 +123,18 @@ async fn list_jobs(state: State<'_, AppState>) -> Result<Vec<comic_core::job::Jo
 
 #[tauri::command]
 async fn validate_source(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<comic_core::archive::ValidateResult, String> {
-    state
+    // 先校验、后放行 asset scope：坏路径不应获得 scope 权限
+    let result = state
         .scheduler
         .validate_source_path(&path)
         .await
-        .map_err(|e| e.message)
+        .map_err(|e| e.message)?;
+    allow_asset_path(&app, &path);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -184,40 +198,56 @@ async fn list_engines(
 
 #[tauri::command]
 async fn get_reader_state(
+    app: AppHandle,
     state: State<'_, AppState>,
     job_id: Option<String>,
     source: Option<String>,
 ) -> Result<comic_core::reader::ReaderState, String> {
-    state
+    if let Some(src) = source.as_deref() {
+        allow_asset_path(&app, src);
+    }
+    let st = state
         .scheduler
         .get_reader_state(job_id.as_deref(), source.as_deref())
         .await
-        .map_err(|e| e.message)
+        .map_err(|e| e.message)?;
+    allow_asset_path(&app, &st.source);
+    Ok(st)
 }
 
 #[tauri::command]
 async fn prepare_reader_page(
+    app: AppHandle,
     state: State<'_, AppState>,
     job_id: Option<String>,
     source: Option<String>,
     page_index: u32,
 ) -> Result<comic_core::reader::ReaderPageFile, String> {
-    state
+    if let Some(src) = source.as_deref() {
+        allow_asset_path(&app, src);
+    }
+    let page = state
         .scheduler
         .prepare_reader_page(job_id.as_deref(), source.as_deref(), page_index)
         .await
-        .map_err(|e| e.message)
+        .map_err(|e| e.message)?;
+    allow_asset_path(&app, &page.path);
+    Ok(page)
 }
 
 #[tauri::command]
 async fn prepare_reader_pages(
+    app: AppHandle,
     state: State<'_, AppState>,
     job_id: Option<String>,
     source: Option<String>,
     page_indexes: Vec<u32>,
     prefer_original: Option<bool>,
 ) -> Result<Vec<comic_core::reader::ReaderPageFile>, String> {
-    state
+    if let Some(src) = source.as_deref() {
+        allow_asset_path(&app, src);
+    }
+    let pages = state
         .scheduler
         .prepare_reader_pages(
             job_id.as_deref(),
@@ -226,26 +256,39 @@ async fn prepare_reader_pages(
             prefer_original.unwrap_or(false),
         )
         .await
-        .map_err(|e| e.message)
+        .map_err(|e| e.message)?;
+    if let Some(first) = pages.first() {
+        allow_asset_path(&app, &first.path);
+    }
+    Ok(pages)
 }
 
 #[tauri::command]
 async fn enhance_reader_pages(
+    app: AppHandle,
     state: State<'_, AppState>,
     source: Option<String>,
     job_id: Option<String>,
     page_indexes: Vec<u32>,
     options: Option<EnhanceOptionsDto>,
 ) -> Result<Vec<comic_core::reader::ReaderPageFile>, String> {
-    state
+    if let Some(src) = source.as_deref() {
+        allow_asset_path(&app, src);
+    }
+    let pages = state
         .scheduler
         .enhance_reader_pages(source.as_deref(), job_id.as_deref(), &page_indexes, options)
         .await
-        .map_err(|e| e.message)
+        .map_err(|e| e.message)?;
+    if let Some(first) = pages.first() {
+        allow_asset_path(&app, &first.path);
+    }
+    Ok(pages)
 }
 
 #[tauri::command]
-fn lookup_reader_enhance_pages(
+async fn lookup_reader_enhance_pages(
+    app: AppHandle,
     state: State<'_, AppState>,
     source: Option<String>,
     job_id: Option<String>,
@@ -256,26 +299,44 @@ fn lookup_reader_enhance_pages(
     if src.is_none() && job_id.as_ref().is_some_and(|s| !s.is_empty()) {
         return Err("lookup 需要 source 路径".into());
     }
-    state
-        .scheduler
-        .lookup_reader_enhance_pages(src.as_deref(), job_id.as_deref(), &page_indexes, options)
-        .map_err(|e| e.message)
+    if let Some(s) = src.as_deref() {
+        allow_asset_path(&app, s);
+    }
+    // 同步实现会打开整个 CBZ 扫描页，放 blocking 线程避免卡 UI
+    let sched = state.scheduler.clone();
+    let pages = tokio::task::spawn_blocking(move || {
+        sched.lookup_reader_enhance_pages(src.as_deref(), job_id.as_deref(), &page_indexes, options)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.message)?;
+    if let Some(first) = pages.first() {
+        allow_asset_path(&app, &first.path);
+    }
+    Ok(pages)
 }
 
 #[tauri::command]
-fn reader_enhance_cache_stats(
+async fn reader_enhance_cache_stats(
     state: State<'_, AppState>,
-) -> comic_core::reader_enhance::EnhanceCacheStats {
-    state.scheduler.reader_enhance_cache_stats()
+) -> Result<comic_core::reader_enhance::EnhanceCacheStats, String> {
+    let sched = state.scheduler.clone();
+    // 全树遍历磁盘缓存，放 blocking 线程
+    let stats = tokio::task::spawn_blocking(move || sched.reader_enhance_cache_stats())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(stats)
 }
 
 #[tauri::command]
-fn clear_reader_enhance_cache(
+async fn clear_reader_enhance_cache(
     state: State<'_, AppState>,
 ) -> Result<comic_core::reader_enhance::EnhanceCacheClearResult, String> {
+    // 内部先取消在途增强并等待退出，再在 blocking 线程删除目录
     state
         .scheduler
         .clear_reader_enhance_cache()
+        .await
         .map_err(|e| e.message)
 }
 
@@ -297,25 +358,34 @@ async fn list_library(
 
 /// 领取启动时 / 外部打开时缓存的路径（一次性清空）。
 #[tauri::command]
-fn take_pending_open_paths(state: State<'_, AppState>) -> Vec<String> {
-    state
+fn take_pending_open_paths(app: AppHandle, state: State<'_, AppState>) -> Vec<String> {
+    let paths = state
         .pending_open
         .lock()
         .map(|mut g| std::mem::take(&mut *g))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for p in &paths {
+        allow_asset_path(&app, p);
+    }
+    paths
 }
 
 /// 校验外部路径是否允许作为临时阅读源（扩展名 + 存在性）。
 #[tauri::command]
-fn validate_external_open_path(path: String) -> Result<String, String> {
-    normalize_open_path(&path).ok_or_else(|| "不支持的文件类型，或路径不存在".into())
+fn validate_external_open_path(app: AppHandle, path: String) -> Result<String, String> {
+    let normalized =
+        normalize_open_path(&path).ok_or_else(|| "不支持的文件类型，或路径不存在".to_string())?;
+    allow_asset_path(&app, &normalized);
+    Ok(normalized)
 }
 
 #[tauri::command]
 async fn add_library_path(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<comic_core::library::LibraryEntry, String> {
+    allow_asset_path(&app, &path);
     let sched = state.scheduler.clone();
     tokio::task::spawn_blocking(move || sched.add_library_path(&path))
         .await
@@ -346,9 +416,13 @@ async fn preview_library_scan(
 
 #[tauri::command]
 async fn import_library_paths(
+    app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
 ) -> Result<comic_core::library::LibraryScanResult, String> {
+    for p in &paths {
+        allow_asset_path(&app, p);
+    }
     let sched = state.scheduler.clone();
     tokio::task::spawn_blocking(move || sched.import_library_paths(&paths))
         .await
@@ -370,11 +444,13 @@ async fn touch_library(
 
 #[tauri::command]
 async fn preview_page(
+    app: AppHandle,
     state: State<'_, AppState>,
     source: String,
     page_index: u32,
     options: Option<EnhanceOptionsDto>,
 ) -> Result<comic_core::preview::PreviewResult, String> {
+    allow_asset_path(&app, &source);
     state
         .scheduler
         .preview_page(&source, page_index, options)
@@ -495,7 +571,6 @@ pub fn run() {
             emit_open_paths(app, paths);
         }))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             let mut cfg = AppConfig::from_env();
             if let Ok(dir) = app.path().app_data_dir() {
@@ -503,7 +578,7 @@ pub fn run() {
                 // 书库封面在 work/library/covers，显式放行 asset 协议（含空格路径）
                 let scope = app.asset_protocol_scope();
                 let _ = scope.allow_directory(&dir, true);
-                let _ = scope.allow_directory(&dir.join("work"), true);
+                let _ = scope.allow_directory(dir.join("work"), true);
             }
             apply_packaged_engine_paths(app.handle(), &mut cfg);
             #[cfg(not(debug_assertions))]

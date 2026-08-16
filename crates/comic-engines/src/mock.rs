@@ -36,7 +36,7 @@ impl UpscaleEngine for MockEngine {
             id: "mock".into(),
             available: true,
             detail: "开发/测试用 mock 引擎（非真实 Waifu2x）".into(),
-            version: Some("0.1.0-mock".into()),
+            version: Some("0.2.0-mock".into()),
         }
     }
 

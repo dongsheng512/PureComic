@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreML/CoreML.h>
+#include <Availability.h>
 #include "waifu2x_coreml.h"
 #include <string.h>
 #include <stdlib.h>
@@ -68,6 +69,27 @@ static int comic_w2x_ensure_inputs(void) {
     return 0;
 }
 
+/* 空推理一次：把 GPU/ANE program 编译与特化成本付在 load 里，
+   而不是切 noise 后的第一页。缓冲在此惰性创建，顺带省掉首页分配。 */
+static void comic_w2x_warmup(MLModel *model) {
+    if (!model || comic_w2x_ensure_inputs() != 0) {
+        return;
+    }
+    const NSInteger sc = g_in0.strides[0].integerValue;
+    const NSInteger sh = g_in0.strides[1].integerValue;
+    const NSInteger sw = g_in0.strides[2].integerValue;
+    double *din = (double *)g_in0.dataPointer;
+    for (NSInteger c = 0; c < 3; c++) {
+        for (NSInteger y = 0; y < kW2xIn; y++) {
+            for (NSInteger x = 0; x < kW2xIn; x++) {
+                din[c * sc + y * sh + x * sw] = 0.5; /* 中性灰 */
+            }
+        }
+    }
+    NSError *err = nil;
+    (void)[model predictionFromFeatures:g_feat0 error:&err];
+}
+
 int comic_w2x_coreml_load(const char *model_path) {
     if (!model_path) {
         return -1;
@@ -107,7 +129,31 @@ int comic_w2x_coreml_load(const char *model_path) {
             }
         }
         MLModelConfiguration *cfg = [[MLModelConfiguration alloc] init];
+        /* 与 ESRGAN 对齐：FastPrediction 削减每页上百次小推理的 per-call 开销，
+           低精度累加减小 GPU 中间精度成本。Double I/O 下两者可能无效或微改数值，
+           留环境开关供 A/B（COMIC_W2X_FASTPRED=0 / COMIC_W2X_LOWPREC=0 关闭），
+           验收后收口默认值。 */
         cfg.computeUnits = MLComputeUnitsAll;
+        const char *env = getenv("COMIC_W2X_LOWPREC");
+        const BOOL use_lowprec = !(env && strcmp(env, "0") == 0);
+        if (use_lowprec &&
+            [cfg respondsToSelector:@selector(setAllowLowPrecisionAccumulationOnGPU:)]) {
+            cfg.allowLowPrecisionAccumulationOnGPU = YES;
+        }
+        /* FastPrediction 在 MLOptimizationHints.specializationStrategy（macOS 15+）。
+           本机 1200×1600 Double I/O 实测默认开会慢约 40%，故 opt-in：
+           COMIC_W2X_FASTPRED=1 才打开。 */
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+        env = getenv("COMIC_W2X_FASTPRED");
+        const BOOL use_fastpred = env && strcmp(env, "1") == 0;
+        if (use_fastpred) {
+            if (@available(macOS 15.0, *)) {
+                MLOptimizationHints *hints = cfg.optimizationHints;
+                hints.specializationStrategy = MLSpecializationStrategyFastPrediction;
+                cfg.optimizationHints = hints;
+            }
+        }
+#endif
         g_model = [MLModel modelWithContentsOfURL:compiled configuration:cfg error:&err];
         if (g_model) {
             g_loaded_path = [path copy];
@@ -115,6 +161,7 @@ int comic_w2x_coreml_load(const char *model_path) {
             g_in1 = nil;
             g_feat0 = nil;
             g_feat1 = nil;
+            comic_w2x_warmup(g_model);
         }
         [g_lock unlock];
         return g_model ? 0 : -3;
@@ -122,7 +169,8 @@ int comic_w2x_coreml_load(const char *model_path) {
 }
 
 static int comic_w2x_cancelled(const int *flag) {
-    return flag && *flag != 0;
+    /* flag 指向 Rust 侧 AtomicI32，需原子读取避免缓存陈旧值 */
+    return flag && __atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0;
 }
 
 static void comic_w2x_sample(

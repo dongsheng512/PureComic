@@ -8,6 +8,12 @@ use std::path::Path;
 
 pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
 
+/// Hard decode guardrails: a compressed bomb can pass byte-size checks but
+/// explode to 10GB+ of pixels on decode (Rust allocation failure aborts the
+/// process, it is not a recoverable error). 16384² RGB8 ≈ 805MB.
+pub const HARD_MAX_IMAGE_SIDE: u32 = 16_384;
+pub const HARD_MAX_IMAGE_PIXELS: u64 = 268_435_456; // 16384²
+
 pub fn is_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -17,7 +23,19 @@ pub fn is_image_path(path: &Path) -> bool {
 
 /// Decode by magic bytes, not the file extension. Comic archives often store
 /// PNG/WebP payloads under a `.jpg` name; trusting the suffix then fails.
+/// Rejects images beyond `HARD_MAX_IMAGE_SIDE` / `HARD_MAX_IMAGE_PIXELS`
+/// before decoding.
 pub fn load_image(path: &Path) -> AppResult<DynamicImage> {
+    let (w, h) = image_dimensions(path)?;
+    if w > HARD_MAX_IMAGE_SIDE
+        || h > HARD_MAX_IMAGE_SIDE
+        || (w as u64).saturating_mul(h as u64) > HARD_MAX_IMAGE_PIXELS
+    {
+        return Err(AppError::new(
+            ErrorCode::DecodeFail,
+            format!("图像尺寸超过安全上限 ({}x{})", w, h),
+        ));
+    }
     image::ImageReader::open(path)
         .map_err(|e| {
             AppError::new(
@@ -71,7 +89,8 @@ pub fn image_dimensions(path: &Path) -> AppResult<(u32, u32)> {
     })
 }
 
-/// Convert grayscale/LA to RGB(A) so Waifu2x-class models get 3 channels.
+/// Convert grayscale/LA/16-bit to RGB(A) 8-bit so Waifu2x-class models get
+/// exactly 3 channels at the bit depth they support.
 pub fn prepare_for_engine(img: DynamicImage) -> DynamicImage {
     match img {
         DynamicImage::ImageLuma8(_) | DynamicImage::ImageLuma16(_) => {
@@ -80,7 +99,28 @@ pub fn prepare_for_engine(img: DynamicImage) -> DynamicImage {
         DynamicImage::ImageLumaA8(_) | DynamicImage::ImageLumaA16(_) => {
             DynamicImage::ImageRgba8(img.to_rgba8())
         }
+        // 16-bit RGB(A) PNG: engines (waifu2x-ncnn / Core ML) expect 8-bit;
+        // DynamicImage::to_rgb8/to_rgba8 scale down correctly.
+        DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgb8(img.to_rgb8()),
+        DynamicImage::ImageRgba16(_) => DynamicImage::ImageRgba8(img.to_rgba8()),
         other => other,
+    }
+}
+
+/// Composite any alpha channel over white. JPEG has no alpha and a naive
+/// `to_rgb8` keeps the (often black) RGB values under transparent pixels.
+pub fn flatten_white(img: &DynamicImage) -> DynamicImage {
+    if img.color().has_alpha() {
+        let rgba = img.to_rgba8();
+        let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
+        for (x, y, p) in rgba.enumerate_pixels() {
+            let a = p[3] as u32;
+            let blend = |c: u8| (((c as u32).saturating_mul(a) + 255 * (255 - a)) / 255) as u8;
+            rgb.put_pixel(x, y, image::Rgb([blend(p[0]), blend(p[1]), blend(p[2])]));
+        }
+        DynamicImage::ImageRgb8(rgb)
+    } else {
+        img.to_rgb8().into()
     }
 }
 
@@ -109,6 +149,7 @@ pub fn save_export(
     let fmt = match format {
         ImageFormat::Png => ImgFmt::Png,
         ImageFormat::Jpeg => ImgFmt::Jpeg,
+        // image 0.25 的 WebP 编码器仅支持无损（VP8L），quality 不适用。
         ImageFormat::Webp => ImgFmt::WebP,
         ImageFormat::Same => match source_ext.map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("png") => ImgFmt::Png,
@@ -119,10 +160,12 @@ pub fn save_export(
 
     match fmt {
         ImgFmt::Jpeg => {
-            let rgb = img.to_rgb8();
+            let rgb = flatten_white(img).to_rgb8();
             let mut file = std::fs::File::create(path)?;
-            let mut enc =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, jpeg_quality);
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut file,
+                jpeg_quality.clamp(1, 100),
+            );
             enc.encode(
                 rgb.as_raw(),
                 rgb.width(),
@@ -162,9 +205,10 @@ pub fn is_engine_native_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy jpg/png/webp as-is; convert other formats to PNG for the engine.
+/// Copy jpg/png/webp as-is; convert other formats (and 16-bit PNG, which
+/// waifu2x-ncnn handles poorly) to 8-bit PNG for the engine.
 pub fn write_engine_input(src: &Path, dest: &Path) -> AppResult<()> {
-    if is_engine_native_path(src) {
+    if is_engine_native_path(src) && !png_is_16bit(src) {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -172,6 +216,25 @@ pub fn write_engine_input(src: &Path, dest: &Path) -> AppResult<()> {
         return Ok(());
     }
     convert_file_to_engine_png(src, dest)
+}
+
+/// Cheap IHDR sniff: is this an 8-bit-depth-challenged PNG (16-bit channels)?
+fn png_is_16bit(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    // PNG signature 8B + IHDR len 4B + "IHDR" 4B + width 4B + height 4B + bit depth 1B
+    if bytes.len() < 25 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return false;
+    }
+    let depth = bytes[24];
+    !matches!(depth, 1 | 2 | 4 | 8)
+}
+
+/// Hex sha256 of arbitrary bytes (cache signature tags etc.).
+pub fn digest_bytes(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(data))
 }
 
 /// Encode export image into memory (avoids temp files during zip pack).
@@ -197,10 +260,12 @@ pub fn save_export_bytes(
 
     match fmt {
         ImgFmt::Jpeg => {
-            let rgb = img.to_rgb8();
+            let rgb = flatten_white(img).to_rgb8();
             let mut buf = Vec::new();
-            let mut enc =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, jpeg_quality);
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut buf,
+                jpeg_quality.clamp(1, 100),
+            );
             enc.encode(
                 rgb.as_raw(),
                 rgb.width(),

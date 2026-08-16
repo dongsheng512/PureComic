@@ -617,8 +617,10 @@ mod tests {
     use zip::ZipWriter;
 
     fn cfg_tmp(dir: &Path) -> AppConfig {
-        let mut c = AppConfig::default();
-        c.work_root = dir.join("work");
+        let c = AppConfig {
+            work_root: dir.join("work"),
+            ..Default::default()
+        };
         c.ensure_dirs().unwrap();
         c
     }

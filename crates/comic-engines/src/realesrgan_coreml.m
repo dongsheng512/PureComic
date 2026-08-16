@@ -2,6 +2,7 @@
 #import <CoreML/CoreML.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Accelerate/Accelerate.h>
+#include <Availability.h>
 #include "realesrgan_coreml.h"
 #include <string.h>
 #include <stdlib.h>
@@ -9,7 +10,9 @@
 enum {
     kEsrTile = 512,
     kEsrScale = 4,
-    kEsrPad = 8
+    /* 6B(RRDB) 感受野大，8px 上下文不足；参考实现用 10。裁边量与 pad 联动。
+       A/B：pad 10 边界残差 1.14×/1.21×，pad 12 为 1.11×/1.21×，持平 → 按默认取 10。 */
+    kEsrPad = 10
 };
 
 @interface ComicEsrganInput : NSObject <MLFeatureProvider>
@@ -62,7 +65,8 @@ static void comic_esr_ensure_lock(void) {
 }
 
 static int comic_esr_cancelled(const int *flag) {
-    return flag && *flag != 0;
+    /* flag 指向 Rust 侧 AtomicI32，需原子读取避免缓存陈旧值 */
+    return flag && __atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0;
 }
 
 static CVPixelBufferRef comic_esr_make_pb(void) {
@@ -164,9 +168,12 @@ int comic_esrgan_coreml_load(const char *model_path) {
         if ([cfg respondsToSelector:@selector(setAllowLowPrecisionAccumulationOnGPU:)]) {
             cfg.allowLowPrecisionAccumulationOnGPU = YES;
         }
-#ifdef MLSpecializationStrategyFastPrediction
-        if (@available(macOS 14.4, *)) {
-            cfg.specializationStrategy = MLSpecializationStrategyFastPrediction;
+        /* FastPrediction 在 MLOptimizationHints.specializationStrategy（macOS 15+）。 */
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+        if (@available(macOS 15.0, *)) {
+            MLOptimizationHints *hints = cfg.optimizationHints;
+            hints.specializationStrategy = MLSpecializationStrategyFastPrediction;
+            cfg.optimizationHints = hints;
         }
 #endif
         g_model = [MLModel modelWithContentsOfURL:compiled configuration:cfg error:&err];
@@ -236,10 +243,24 @@ static void comic_esr_blit(
     const size_t stride = CVPixelBufferGetBytesPerRow(src);
     const int tw = (int)CVPixelBufferGetWidth(src);
     const int th = (int)CVPixelBufferGetHeight(src);
-    const int y0 = dy0 < 0 ? -dy0 : 0;
-    const int x0 = dx0 < 0 ? -dx0 : 0;
-    const int y1 = (dy0 + th > out_h) ? (out_h - dy0) : th;
-    const int x1 = (dx0 + tw > out_w) ? (out_w - dx0) : tw;
+    /* 裁掉 pad×scale 的感受野不足带，只拼有效区。
+       仅裁内侧边：贴画布的边不裁（clamp 填充区），避免丢图。
+       原点生成保证贴边 tile 满足 dx0==0 或 dx0+tw==out_w，据此判边。 */
+    const int crop = kEsrPad * kEsrScale;
+    const int cx0 = (dx0 > 0) ? crop : 0;
+    const int cx1 = (dx0 + tw < out_w) ? crop : 0;
+    const int cy0 = (dy0 > 0) ? crop : 0;
+    const int cy1 = (dy0 + th < out_h) ? crop : 0;
+    int y0 = dy0 < 0 ? -dy0 : 0;
+    int x0 = dx0 < 0 ? -dx0 : 0;
+    int y1 = (dy0 + th > out_h) ? (out_h - dy0) : th;
+    int x1 = (dx0 + tw > out_w) ? (out_w - dx0) : tw;
+    if (x0 < cx0) x0 = cx0;
+    if (y0 < cy0) y0 = cy0;
+    const int x1m = tw - cx1;
+    const int y1m = th - cy1;
+    if (x1 > x1m) x1 = x1m;
+    if (y1 > y1m) y1 = y1m;
     if (x1 <= x0 || y1 <= y0) {
         CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
         return;

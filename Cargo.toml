@@ -13,7 +13,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["PureComic contributors"]
@@ -52,3 +52,15 @@ num_cpus = "1.16"
 lto = true
 codegen-units = 1
 strip = true
+# 桌面应用无需 unwind 语义（无 catch_unwind 使用），减小体积
+panic = "abort"
+
+# dev 下图像解码/编码热路径太慢，给自身 crate 开优化
+[profile.dev.package.comic-core]
+opt-level = 1
+
+[profile.dev.package.comic-engines]
+opt-level = 1
+
+[profile.dev.package.comic-cli]
+opt-level = 1

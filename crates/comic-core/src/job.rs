@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use comic_engines::{EngineKind, QualityPreset, ScaleFactor};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -214,6 +215,40 @@ impl EnhanceOptions {
             },
         }
     }
+
+    /// Real-CUGAN 参数归一化：包体只有 up2x/up3x/up4x，Nose 包固定 2×/n0，
+    /// Pro 包只训 n0/n3。把实际生效参数显式写进 manifest（引擎内部同规则仅兜底），
+    /// 避免 UI 显示 1× 实际出 2× 的静默偏差。返回是否发生改写。
+    pub fn normalize_realcugan(&mut self) -> bool {
+        if self.engine != EngineKind::RealCugan {
+            return false;
+        }
+        let pack = match self.cugan_model.to_ascii_lowercase().as_str() {
+            "pro" => comic_engines::CuganModelPack::Pro,
+            "nose" => comic_engines::CuganModelPack::Nose,
+            _ => comic_engines::CuganModelPack::Se,
+        };
+        let mut changed = false;
+        let clamped = self.scale.as_u8().clamp(2, 4);
+        if clamped != self.scale.as_u8() {
+            changed = true;
+        }
+        self.scale = match ScaleFactor::try_from_u8(clamped) {
+            Ok(s) => s,
+            Err(_) => ScaleFactor::X2,
+        };
+        if pack == comic_engines::CuganModelPack::Nose {
+            if self.scale != ScaleFactor::X2 || self.noise != 0 {
+                changed = true;
+            }
+            self.scale = ScaleFactor::X2;
+            self.noise = 0;
+        } else if pack == comic_engines::CuganModelPack::Pro && self.noise > 0 && self.noise < 3 {
+            changed = true;
+            self.noise = 3;
+        }
+        changed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +310,14 @@ pub struct JobManifest {
     /// Latest human-readable progress note (threads, packing page, …)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
+    /// remove_job 超时后置位：worker 的后续 save() 全部跳过，防止目录复活。
+    /// 由 scheduler 传入；磁盘加载的 manifest 恒为 false。
+    #[serde(skip, default = "default_abandoned")]
+    pub abandoned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn default_abandoned() -> Arc<std::sync::atomic::AtomicBool> {
+    Arc::new(std::sync::atomic::AtomicBool::new(false))
 }
 
 impl JobManifest {
@@ -309,6 +352,7 @@ impl JobManifest {
             error: None,
             workdir,
             last_message: None,
+            abandoned: default_abandoned(),
         }
     }
 
@@ -317,6 +361,10 @@ impl JobManifest {
     }
 
     pub fn save(&self) -> AppResult<()> {
+        // 任务目录已被 remove_job 删除：跳过落盘，防止目录复活
+        if self.abandoned.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         std::fs::create_dir_all(&self.workdir)?;
         let path = Self::manifest_path(&self.workdir);
         let tmp = path.with_extension("json.tmp");
@@ -385,26 +433,13 @@ impl JobManifest {
 
 fn output_artifact_ready(m: &JobManifest) -> Option<std::path::PathBuf> {
     let path = crate::archive::expected_output_path(m);
+    let done_pages = m.stats.pages_done as usize;
     let ready = match m.output.container {
-        OutputContainer::Folder => path.is_dir(),
+        OutputContainer::Folder => {
+            path.is_dir() && crate::archive::folder_export_complete(&path, done_pages)
+        }
         OutputContainer::Cbz | OutputContainer::Zip => {
-            if path.is_file() {
-                path.metadata()
-                    .map(|x| {
-                        if x.len() <= 1024 {
-                            return false;
-                        }
-                        // Avoid flipping while the zip is still being written.
-                        x.modified()
-                            .ok()
-                            .and_then(|t| t.elapsed().ok())
-                            .map(|d| d.as_millis() >= 800)
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(false)
-            } else {
-                false
-            }
+            path.is_file() && crate::archive::zip_is_complete(&path, done_pages)
         }
     };
     if ready {
@@ -526,6 +561,10 @@ pub struct CreateJobResult {
     pub pages_done: u32,
     pub pages_total: u32,
     pub next_page: u32,
+    /// 归一化后的实际参数（Real-CUGAN 等会改写 scale/noise），UI 应以此为准
+    pub actual_scale: u8,
+    pub actual_noise: i8,
+    pub actual_cugan_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,8 +705,8 @@ impl CreateJobRequest {
             dir: PathBuf::from(&self.output.dir),
             container,
             image_format,
-            jpeg_quality: self.output.jpeg_quality.unwrap_or(92),
-            webp_quality: self.output.webp_quality.unwrap_or(90),
+            jpeg_quality: self.output.jpeg_quality.unwrap_or(92).clamp(1, 100),
+            webp_quality: self.output.webp_quality.unwrap_or(90).clamp(1, 100),
             naming: self
                 .output
                 .naming
@@ -763,6 +802,10 @@ mod tests {
 
     #[test]
     fn heal_finalizing_when_cbz_already_written() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
         let dir = tempfile::tempdir().unwrap();
         let out_dir = dir.path().join("dest");
         std::fs::create_dir_all(&out_dir).unwrap();
@@ -779,13 +822,47 @@ mod tests {
             dir.path().join("work"),
         );
         m.state = JobState::Finalizing;
-        m.stats.pages_done = 0;
+        m.stats.pages_done = 1;
         m.stats.pages_total = 12;
         let dest = crate::archive::expected_output_path(&m);
-        std::fs::write(&dest, vec![1u8; 4096]).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(850));
+        // 完整写入一个合法 zip（1 个条目）
+        {
+            let f = std::fs::File::create(&dest).unwrap();
+            let mut w = ZipWriter::new(f);
+            w.start_file("00000.jpg", SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(&[1u8; 4096]).unwrap();
+            w.finish().unwrap();
+        }
         assert!(heal_if_output_ready(&mut m));
         assert_eq!(m.state, JobState::Completed);
         assert!(m.output_path.is_some());
+    }
+
+    #[test]
+    fn heal_rejects_truncated_cbz() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("dest");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let src = dir.path().join("book.cbz");
+        let _ = std::fs::write(&src, b"x");
+        let mut m = JobManifest::new(
+            src,
+            EnhanceOptions::default(),
+            OutputOptions {
+                dir: out_dir,
+                naming: "{stem}_x{scale}".into(),
+                ..Default::default()
+            },
+            dir.path().join("work"),
+        );
+        m.state = JobState::Finalizing;
+        m.stats.pages_done = 12;
+        m.stats.pages_total = 12;
+        let dest = crate::archive::expected_output_path(&m);
+        // 半截/损坏 zip（>1024 字节但不合法）
+        std::fs::write(&dest, vec![7u8; 4096]).unwrap();
+        assert!(!heal_if_output_ready(&mut m));
+        assert_eq!(m.state, JobState::Finalizing);
     }
 }

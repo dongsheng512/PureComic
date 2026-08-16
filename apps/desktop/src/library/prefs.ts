@@ -16,7 +16,9 @@ const FILTER_KEY = "comic.library.filter";
 const VIEW_KEY = "comic.library.view";
 const IMPORT_KEY = "comic.library.import";
 
-export const DEFAULT_EXTENSIONS = ["cbz", "cbr", "zip", "rar", "epub", "mobi", "azw", "azw3"];
+import { COMIC_EXTENSIONS } from "../formats";
+
+export const DEFAULT_EXTENSIONS = [...COMIC_EXTENSIONS];
 
 const DEFAULT_IMPORT: LibraryImportSettings = {
   includeSubfolders: true,

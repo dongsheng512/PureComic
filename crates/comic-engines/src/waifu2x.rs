@@ -177,7 +177,8 @@ impl UpscaleEngine for Waifu2xEngine {
 
         let mut cmd = Command::new(&self.binary);
         cmd.args(&args)
-            .stdout(Stdio::piped())
+            // stdout 只打进度且无人消费，pipe 会在管道缓冲满后阻塞子进程（大书死锁）
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
@@ -215,8 +216,12 @@ impl UpscaleEngine for Waifu2xEngine {
         let stderr_abort = stderr_task.abort_handle();
 
         let timeout = if is_dir {
+            // 按输入页数估算整批耗时：约 page_timeout × pages / 8 线程，再给 2× 余量。
+            // 固定 64 页预算会误杀慢 GPU 上的大书（2000 页）。
+            let pages = count_files(&input).unwrap_or(0).max(1) as u32;
             self.page_timeout
-                .saturating_mul(64)
+                .saturating_mul((pages / 8).max(1))
+                .saturating_mul(2)
                 .max(Duration::from_secs(600))
         } else {
             self.page_timeout
@@ -353,6 +358,29 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // 找到不超过 max 的 UTF-8 字符边界，避免在多字节字符中间切片 panic
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_multibyte_boundary_is_safe() {
+        // 「任」是 3 字节 UTF-8；max 落在字符中间不得 panic
+        let s = "任务已取消：引擎进程失败".repeat(40);
+        for max in [1usize, 2, 3, 4, 5, 1023, 1024] {
+            let out = truncate(&s, max);
+            assert!(out.ends_with('…'));
+            assert!(out.len() <= max + 3);
+        }
+        // ASCII 短串原样返回
+        assert_eq!(truncate("abc", 10), "abc");
     }
 }

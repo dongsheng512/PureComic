@@ -102,6 +102,22 @@ pub fn assert_disk_ok(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult<Disk
     Ok(est)
 }
 
+fn human_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let x = n as f64;
+    if x >= GB {
+        format!("{:.2} GB", x / GB)
+    } else if x >= MB {
+        format!("{:.1} MB", x / MB)
+    } else if x >= KB {
+        format!("{:.0} KB", x / KB)
+    } else {
+        format!("{n} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,30 +142,16 @@ mod tests {
                 .save(src.join(format!("{i:03}.png")))
                 .unwrap();
         }
-        let mut cfg = AppConfig::default();
-        cfg.work_root = dir.path().join("work");
-        cfg.forced_free_bytes = Some(1024);
+        let cfg = AppConfig {
+            work_root: dir.path().join("work"),
+            forced_free_bytes: Some(1024),
+            ..Default::default()
+        };
         let est = estimate_disk_usage(&src, 2, &cfg).unwrap();
         assert!(est.page_count >= 100);
         assert!(!est.ok);
         let err = assert_disk_ok(&src, 2, &cfg).unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::DiskInsufficient);
         assert!(err.message.contains("磁盘空间不足"));
-    }
-}
-
-fn human_bytes(n: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let x = n as f64;
-    if x >= GB {
-        format!("{:.2} GB", x / GB)
-    } else if x >= MB {
-        format!("{:.1} MB", x / MB)
-    } else if x >= KB {
-        format!("{:.0} KB", x / KB)
-    } else {
-        format!("{n} B")
     }
 }

@@ -20,8 +20,13 @@ const SMART_MIN = { width: 360, height: 320 };
 
 /** 模块级缓存：同一阅读会话只记一次进入前的主窗尺寸 */
 let savedMainGeometry: WindowGeometry | null = null;
-/** 工具栏高度（含边框），与 .reader-bar 一致 */
+/** 工具栏高度（含边框）——单一来源：ReaderView 挂载时写入 CSS 变量 --reader-bar-h */
 export const READER_BAR_H = 44;
+
+/** 把工具栏高度注入 CSS 变量（.reader-bar 高度引用它），保证 TS/CSS 单一来源 */
+export function syncReaderBarHeightCss(): void {
+  document.documentElement.style.setProperty("--reader-bar-h", `${READER_BAR_H}px`);
+}
 /** 窗口与屏幕边缘的安全边距（逻辑像素） */
 const SCREEN_MARGIN = 24;
 

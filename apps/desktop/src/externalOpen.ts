@@ -1,5 +1,7 @@
 /** 外部打开 / 临时阅读：偏好与路径处理 */
 
+import { COMIC_EXT_RE } from "./formats";
+
 export type ExternalOpenRemember = "import" | "discard" | null;
 
 const REMEMBER_KEY = "comic.externalOpen.remember";
@@ -25,5 +27,5 @@ export function saveExternalOpenRemember(v: ExternalOpenRemember) {
 
 export function titleFromPath(path: string): string {
   const base = path.split(/[/\\]/).pop() || path;
-  return base.replace(/\.(cbz|cbr|zip|rar|epub|mobi|azw3?)$/i, "") || base;
+  return base.replace(COMIC_EXT_RE, "") || base;
 }

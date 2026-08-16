@@ -1,7 +1,8 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { comicFileFilter } from "../formats";
 import {
   cancelReaderEnhance,
   clearReaderEnhanceCache,
@@ -34,9 +35,18 @@ import {
   type ReadDirection,
   type SpreadMode,
 } from "./prefs";
-import { fitWindowToPageUrls, restoreDefaultWindowMinSize } from "./smartFit";
+import {
+  fitWindowToPageUrls,
+  restoreDefaultWindowMinSize,
+  syncReaderBarHeightCss,
+} from "./smartFit";
 
 const BAR_KEY = "comic.reader.barHidden";
+/** 与后端 AppError::cancelled() 的固定文案保持一致（crates/comic-core/src/error.rs） */
+const CANCEL_MESSAGE = "任务已取消";
+/** 原图页内存 LRU 窗口：保留当前页 ±N 页，超长书翻页不无限膨胀 */
+const LOADED_WINDOW = 120;
+const LOADED_HALF_WINDOW = 60;
 
 type Props = {
   jobs: JobStatus[];
@@ -108,10 +118,11 @@ export function ReaderView({
   const [barHidden, setBarHidden] = useState(readBarHidden);
   const [fullscreen, setFullscreen] = useState(false);
   const [progressHud, setProgressHud] = useState(false);
+  /** 悬停滑杆拖动中的暂存值：拖动不 align，松手再对齐（避免 double 模式 thumb 回弹） */
+  const [sliderDragValue, setSliderDragValue] = useState<number | null>(null);
   const [pageEditing, setPageEditing] = useState(false);
   const [pageDraft, setPageDraft] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
-  const [aiMenuOpen, setAiMenuOpen] = useState(false);
   const [enhanceOn, setEnhanceOn] = useState(false);
   const [enhanceBusy, setEnhanceBusy] = useState(false);
   const [aiPages, setAiPages] = useState<Record<number, LoadedPage>>({});
@@ -119,15 +130,40 @@ export function ReaderView({
   const [noiseLevel, setNoiseLevel] = useState<0 | 1 | 2 | 3>(loadEnhanceNoise);
   const [catalog, setCatalog] = useState<EngineInfo[]>([]);
   const [cacheStats, setCacheStats] = useState<EnhanceCacheStats | null>(null);
+  /** 清除缓存：行内二次确认 / 清除中 / 完成 toast */
+  const [clearConfirming, setClearConfirming] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [clearToast, setClearToast] = useState<string | null>(null);
+  /** 切换引擎后、缓存仍存在时的提示（新缓存生成期间保持可见） */
+  const [engineSwitchHint, setEngineSwitchHint] = useState(false);
+  const clearRevertTimer = useRef<number | null>(null);
+  const clearToastTimer = useRef<number | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
-  const aiMenuRef = useRef<HTMLDivElement>(null);
   const enhanceEpochRef = useRef(0);
   const pageInputRef = useRef<HTMLInputElement>(null);
   const progressTimer = useRef<number | null>(null);
   const sourceRef = useRef<string>("");
   const skipSaveRef = useRef(true);
   const lastCountRef = useRef(0);
+  /** 悬停说明：极简单例 tooltip（延迟 120ms 显示，避免扫过闪烁） */
+  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const tipTimer = useRef<number | null>(null);
+  const showTip = useCallback((e: React.MouseEvent, text: string) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (tipTimer.current) window.clearTimeout(tipTimer.current);
+    tipTimer.current = window.setTimeout(() => {
+      setTip({
+        text,
+        x: Math.min(Math.max(rect.left + rect.width / 2, 64), window.innerWidth - 64),
+        y: rect.bottom,
+      });
+    }, 120);
+  }, []);
+  const hideTip = useCallback(() => {
+    if (tipTimer.current) window.clearTimeout(tipTimer.current);
+    setTip(null);
+  }, []);
   /**
    * 智能适应会话键：仅在「进入 smart / 换书 / 单双页切换」时变，
    * 翻页不变更 → 窗口不会跟页乱跳（方案 A）。
@@ -136,6 +172,11 @@ export function ReaderView({
   const smartFitGen = useRef(0);
 
   const immersive = barHidden || fullscreen;
+
+  // 工具栏高度单一来源：smartFit.ts 常量 → CSS 变量（.reader-bar 引用）
+  useEffect(() => {
+    syncReaderBarHeightCss();
+  }, []);
 
   useEffect(() => {
     setJobId(requestedJobId);
@@ -251,6 +292,7 @@ export function ReaderView({
     if (bookChanged) {
       sourceRef.current = state.source;
       lastCountRef.current = state.pageCount;
+      setLoaded({});
       setEnhanceOn(false);
       setAiPages({});
       setEnhanceBusy(false);
@@ -311,6 +353,8 @@ export function ReaderView({
 
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
+  const pageIndexRef = useRef(pageIndex);
+  pageIndexRef.current = pageIndex;
 
   const enhanceOpts = useMemo<ReaderEnhanceOptions>(
     () => ({
@@ -426,7 +470,7 @@ export function ReaderView({
     const stillThis = () => !cancelled && epoch === enhanceEpochRef.current;
     const isCancel = (e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e);
-      return msg.includes("取消") || msg.toLowerCase().includes("cancel");
+      return msg === CANCEL_MESSAGE || msg.startsWith(CANCEL_MESSAGE);
     };
 
     (async () => {
@@ -518,7 +562,6 @@ export function ReaderView({
     source,
     jobId,
     // applyAiFiles / onError 用 ref，避免父组件重渲打断预热
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   ]);
 
   useEffect(() => {
@@ -538,6 +581,14 @@ export function ReaderView({
         const next = { ...prev };
         for (const file of files) {
           next[file.index] = { ...file, url: fileUrl(file.path, file.kind) };
+        }
+        // 原图页 LRU 窗口：翻完超长书后 loaded 无限膨胀（与 aiPages 同思路）
+        const keys = Object.keys(next).map(Number);
+        const center = pageIndexRef.current;
+        if (keys.length > LOADED_WINDOW) {
+          for (const k of keys) {
+            if (Math.abs(k - center) > LOADED_HALF_WINDOW) delete next[k];
+          }
         }
         return next;
       });
@@ -617,6 +668,18 @@ export function ReaderView({
     [state, spread],
   );
 
+  const toggleAi = useCallback(() => {
+    if (enhanceOn) {
+      enhanceEpochRef.current += 1;
+      setEnhanceOn(false);
+      setEnhanceBusy(false);
+      void cancelReaderEnhance();
+      return;
+    }
+    if (visibleIndexes.length === 0) return;
+    setEnhanceOn(true);
+  }, [enhanceOn, visibleIndexes]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -645,14 +708,16 @@ export function ReaderView({
       } else if (e.key === "h" || e.key === "H") {
         e.preventDefault();
         setBar(!barHidden);
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        toggleAi();
       } else if (e.key === "Escape") {
         if (pageEditing) {
           e.preventDefault();
           setPageEditing(false);
-        } else if (moreOpen || aiMenuOpen) {
+        } else if (moreOpen) {
           e.preventDefault();
           setMoreOpen(false);
-          setAiMenuOpen(false);
         } else if (fullscreen) {
           e.preventDefault();
           void toggleFullscreen();
@@ -679,16 +744,14 @@ export function ReaderView({
     onClose,
     pageEditing,
     moreOpen,
-    aiMenuOpen,
+    toggleAi,
   ]);
 
   const pickFile = async () => {
     const p = await open({
       multiple: false,
       directory: false,
-      filters: [
-        { name: "Comic", extensions: ["cbz", "cbr", "zip", "rar", "epub", "mobi", "azw", "azw3"] },
-      ],
+      filters: [comicFileFilter("Comic")],
     });
     if (typeof p === "string") {
       setJobId(null);
@@ -717,6 +780,63 @@ export function ReaderView({
     visibleIndexes.every((i) => Boolean(aiPages[i]));
   const pageEnhancing = enhanceBusy && !showingAi;
   const displayPages = direction === "rtl" ? [...pagesInView].reverse() : pagesInView;
+  const total = state?.pageCount ?? 0;
+
+  const cacheSizeText = (stats: EnhanceCacheStats | null): string => {
+    if (!stats) return "—";
+    const mb = stats.bytes / (1024 * 1024);
+    return mb >= 10 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
+  };
+
+  /** 引擎分段选项：主标签 13pt + 副标签 10pt */
+  const engineOptions = useMemo(() => {
+    const list =
+      catalog.length > 0
+        ? catalog
+        : [
+            {
+              id: "waifu2x-coreml",
+              label: "Waifu2x Core ML",
+              available: true,
+              detail: "",
+              scales: [2],
+              models: [],
+            },
+            {
+              id: "realesrgan-coreml",
+              label: "Real-ESRGAN Anime 4×",
+              available: true,
+              detail: "",
+              scales: [4],
+              models: [],
+            },
+          ];
+    return list
+      .filter((e) => e.available !== false)
+      .map((e) => {
+        const known =
+          e.id === "waifu2x-coreml"
+            ? { main: "Waifu2x", sub: "Core ML" }
+            : e.id === "realesrgan-coreml"
+              ? { main: "Real-ESRGAN", sub: "4×" }
+              : null;
+        return {
+          id: e.id,
+          main: known?.main ?? e.label,
+          sub: known?.sub ?? e.detail ?? "",
+        };
+      });
+  }, [catalog]);
+  const engineIndex = Math.max(0, engineOptions.findIndex((o) => o.id === engineId));
+
+  const cacheLine = cacheStats
+    ? i18n.readerAiCacheCount
+        .replace("{done}", String(cacheStats.files))
+        .replace("{total}", String(total))
+        .replace("{size}", cacheSizeText(cacheStats))
+    : "—";
+  const cachePct =
+    total > 0 && cacheStats ? Math.min(100, (cacheStats.files / total) * 100) : 0;
 
   const persistEngine = (id: string) => {
     if (!isReaderEngine(id) || id === engineId) return;
@@ -725,6 +845,8 @@ export function ReaderView({
     setEngineId(id);
     saveReaderEngine(id);
     setAiPages({});
+    // 已有缓存时切换引擎：提示新缓存需重新生成（清除缓存后自动消失）
+    if (cacheStats && cacheStats.bytes > 0) setEngineSwitchHint(true);
   };
 
   const persistNoise = (n: 0 | 1 | 2 | 3) => {
@@ -736,36 +858,34 @@ export function ReaderView({
     setAiPages({});
   };
 
-  const toggleAi = () => {
-    if (enhanceOn) {
-      enhanceEpochRef.current += 1;
-      setEnhanceOn(false);
-      setEnhanceBusy(false);
-      void cancelReaderEnhance();
+  /** 清除缓存：行内二次确认（3 秒自动还原）→ 清除中 spinner → toast */
+  const handleClearClick = async () => {
+    if (clearingCache) return;
+    if (!clearConfirming) {
+      setClearConfirming(true);
+      if (clearRevertTimer.current) window.clearTimeout(clearRevertTimer.current);
+      clearRevertTimer.current = window.setTimeout(() => setClearConfirming(false), 3000);
       return;
     }
-    if (visibleIndexes.length === 0) return;
-    setEnhanceOn(true);
-  };
-
-  const clearAiCache = async () => {
+    if (clearRevertTimer.current) window.clearTimeout(clearRevertTimer.current);
+    setClearConfirming(false);
+    setClearingCache(true);
+    const size = cacheSizeText(cacheStats);
     try {
       await clearReaderEnhanceCache();
       setAiPages({});
+      setEngineSwitchHint(false);
       refreshCacheStats();
       onError(null);
+      setClearToast(i18n.readerAiClearedToast.replace("{size}", size));
+      if (clearToastTimer.current) window.clearTimeout(clearToastTimer.current);
+      clearToastTimer.current = window.setTimeout(() => setClearToast(null), 2200);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setClearingCache(false);
     }
   };
-
-  const formatCache = (stats: EnhanceCacheStats | null) => {
-    if (!stats) return "—";
-    const mb = stats.bytes / (1024 * 1024);
-    const size = mb >= 10 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
-    return `${size} · ${stats.files} ${i18n.libraryPages}`;
-  };
-  const total = state?.pageCount ?? 0;
 
   const pageUrlsKey = pagesInView.map((p) => `${p.index}:${p.url}`).join("|");
   const bookKey = state?.source ?? source ?? "";
@@ -837,6 +957,7 @@ export function ReaderView({
 
   const lastVisible = visibleIndexes[visibleIndexes.length - 1] ?? pageIndex;
   const progressPct = total > 0 ? Math.min(100, ((lastVisible + 1) / total) * 100) : 0;
+  const sliderPage = Math.min(total, (visibleIndexes[0] ?? pageIndex) + 1);
 
   const seekProgress = (clientX: number, rect: DOMRect) => {
     if (total <= 0) return;
@@ -857,21 +978,6 @@ export function ReaderView({
     pageInputRef.current?.focus();
     pageInputRef.current?.select();
   }, [pageEditing]);
-
-  useEffect(() => {
-    if (!aiMenuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (aiMenuRef.current && !aiMenuRef.current.contains(t)) setAiMenuOpen(false);
-    };
-    const timer = window.setTimeout(() => {
-      document.addEventListener("mousedown", onDoc);
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-      document.removeEventListener("mousedown", onDoc);
-    };
-  }, [aiMenuOpen]);
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -899,7 +1005,16 @@ export function ReaderView({
   const canNext = !!state && pageIndex < Math.max(0, total - (spread === "double" ? 2 : 1));
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-black">
+    <div
+      className="relative flex h-full min-h-0 flex-col bg-black"
+      onMouseDownCapture={(e) => {
+        if (e.button !== 0) return;
+        /* WebKit：点击 user-select:none 的内容不会收起既有选区，
+           任何点击先清一次，保证阅读器里不会出现“无法取消选中”。 */
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) sel.removeAllRanges();
+      }}
+    >
       {/* 工具栏隐藏时：整条顶栏拖窗 */}
       {barHidden && (
         <div
@@ -912,7 +1027,7 @@ export function ReaderView({
       {!barHidden && (
         <div
           className={`reader-bar relative shrink-0 border-b border-ink-200/70 bg-ink-100/95 pl-[88px] pr-2 backdrop-blur-md dark:border-white/[0.08] dark:bg-surface/95 ${
-            moreOpen || aiMenuOpen ? "z-50" : "z-40"
+            moreOpen ? "z-50" : "z-40"
           }`}
           onClick={(e) => e.stopPropagation()}
         >
@@ -929,8 +1044,9 @@ export function ReaderView({
                 <button
                   type="button"
                   className="reader-icon-btn pointer-events-auto"
-                  title={`${backLabel ?? i18n.readerBackLibrary} (Esc)`}
                   aria-label={backLabel ?? i18n.readerBackLibrary}
+                  onMouseEnter={(e) => showTip(e, backLabel ?? i18n.readerBackLibrary)}
+                  onMouseLeave={hideTip}
                   onClick={onClose}
                 >
                   <IconBack />
@@ -969,7 +1085,9 @@ export function ReaderView({
                     type="button"
                     className="reader-icon-btn"
                     disabled={!canPrev}
-                    aria-label="prev"
+                    aria-label={i18n.readerPrevPage}
+                    onMouseEnter={(e) => showTip(e, i18n.readerPrevPage)}
+                    onMouseLeave={hideTip}
                     onClick={() => go(-1)}
                   >
                     {direction === "rtl" ? <IconChevronRight /> : <IconChevronLeft />}
@@ -989,7 +1107,7 @@ export function ReaderView({
                           setPageEditing(false);
                         }
                       }}
-                      className="reader-page-chip w-[5.5rem] border-0 bg-white text-center outline-none ring-1 ring-ink-300 dark:bg-surface-raised dark:ring-white/15"
+                      className="reader-page-chip border-0 bg-white text-center outline-none ring-1 ring-ink-300 dark:bg-surface-raised dark:ring-white/15"
                       inputMode="numeric"
                       aria-label={i18n.readerJumpHint}
                     />
@@ -997,7 +1115,9 @@ export function ReaderView({
                     <button
                       type="button"
                       className="reader-page-chip"
-                      title={i18n.readerJumpHint}
+                      aria-label={i18n.readerPageLabel}
+                      onMouseEnter={(e) => showTip(e, i18n.readerPageLabel)}
+                      onMouseLeave={hideTip}
                       disabled={total <= 0}
                       onClick={() => {
                         const cur = (visibleIndexes[0] ?? pageIndex) + 1;
@@ -1012,183 +1132,90 @@ export function ReaderView({
                     type="button"
                     className="reader-icon-btn"
                     disabled={!canNext}
-                    aria-label="next"
+                    aria-label={i18n.readerNextPage}
+                    onMouseEnter={(e) => showTip(e, i18n.readerNextPage)}
+                    onMouseLeave={hideTip}
                     onClick={() => go(1)}
                   >
                     {direction === "rtl" ? <IconChevronLeft /> : <IconChevronRight />}
                   </button>
                 </div>
-                {/* 悬停显示进度条跳转 */}
+                {/* 悬停显示进度条跳转：面板化，与 reader-menu / 底部 HUD 同一套视觉语言 */}
                 {total > 0 && (
-                  <div className="pointer-events-none absolute top-full z-20 mt-1 w-48 opacity-0 transition-opacity group-hover/pager:pointer-events-auto group-hover/pager:opacity-100">
-                    <input
-                      type="range"
-                      min={1}
-                      max={total}
-                      value={Math.min(total, (visibleIndexes[0] ?? pageIndex) + 1)}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        setPageIndex(alignIndex(n - 1, spread, total));
-                      }}
-                      className="h-1 w-full cursor-pointer accent-ink-800 dark:accent-fg"
-                      aria-label="progress"
-                    />
+                  <div className="pointer-events-none absolute top-full z-20 pt-2 opacity-0 transition-opacity duration-150 group-hover/pager:pointer-events-auto group-hover/pager:opacity-100">
+                    <div className="w-64 select-none rounded-xl border border-ink-200 bg-white px-3 py-2.5 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised">
+                      <input
+                        type="range"
+                        min={1}
+                        max={total}
+                        value={sliderDragValue ?? sliderPage}
+                        onPointerDown={() => setSliderDragValue(sliderPage)}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          setSliderDragValue(n);
+                          // 拖动中直接落位（不 align），thum 跟随指针，页码不闪跳
+                          setPageIndex(Math.min(Math.max(0, n - 1), Math.max(0, total - 1)));
+                        }}
+                        onPointerUp={() => {
+                          if (sliderDragValue == null) return;
+                          setSliderDragValue(null);
+                          setPageIndex((i) => alignIndex(i, spread, total));
+                        }}
+                        onBlur={() => {
+                          if (sliderDragValue == null) return;
+                          setSliderDragValue(null);
+                          setPageIndex((i) => alignIndex(i, spread, total));
+                        }}
+                        onKeyUp={() => {
+                          // 键盘方向键走 onChange（会置 drag 值），此处统一收口对齐
+                          setSliderDragValue(null);
+                          setPageIndex((i) => alignIndex(i, spread, total));
+                        }}
+                        className="reader-range w-full"
+                        style={
+                          {
+                            "--range-pct":
+                              (total > 0
+                                ? ((sliderDragValue ?? sliderPage) / total) * 100
+                                : 0) + "%",
+                          } as CSSProperties
+                        }
+                        aria-label="progress"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* —— 右：模式 / 工具 —— */}
+            {/* —— 右：AI / 阅读模式+隐藏 / 窗口，三组分隔 —— */}
             <div className="relative z-20 ml-auto flex shrink-0 items-center gap-1 pointer-events-auto">
-              <div
-                className={`reader-ai-split ${aiMenuOpen ? "is-open" : ""}`}
-                ref={aiMenuRef}
-              >
+              <div className="relative z-50">
                 <button
                   type="button"
-                  className={`reader-ai-btn ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
+                  className={`reader-ai-trigger ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
                   disabled={visibleIndexes.length === 0}
-                  title={i18n.readerAiOptimize}
+                  aria-label={i18n.readerAiTooltip}
+                  onMouseEnter={(e) => showTip(e, i18n.readerAiTooltip)}
+                  onMouseLeave={hideTip}
+                  aria-pressed={showingAi}
                   onClick={() => toggleAi()}
                 >
-                  {pageEnhancing ? (
-                    <>
-                      <span className="reader-ai-spin" aria-hidden="true" />
-                      {i18n.readerAiBusy}
-                    </>
-                  ) : showingAi ? (
-                    <>
-                      <span aria-hidden="true">✨</span>
-                      {i18n.readerAiOn}
-                    </>
-                  ) : (
-                    <>
-                      <span aria-hidden="true">✨</span>
-                      {i18n.readerAiOptimize}
-                    </>
-                  )}
+                  <IconSparkles />
+                  {showingAi && <span className="reader-ai-dot" aria-hidden="true" />}
                 </button>
-                <button
-                  type="button"
-                  className={`reader-icon-btn reader-ai-caret ${aiMenuOpen ? "is-active" : ""}`}
-                  title={i18n.readerAiModel}
-                  aria-expanded={aiMenuOpen}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setMoreOpen(false);
-                    setAiMenuOpen((v) => !v);
-                  }}
-                >
-                  <IconChevronDown />
-                </button>
-                {aiMenuOpen && (
-                  <div className="reader-ai-pop" role="menu">
-                    <p className="px-3 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
-                      {i18n.engine}
-                    </p>
-                    {(catalog.length > 0
-                      ? catalog
-                      : [
-                          {
-                            id: "waifu2x-coreml",
-                            label: "Waifu2x Core ML",
-                            available: true,
-                            detail: "",
-                            scales: [2],
-                            models: [],
-                          },
-                          {
-                            id: "realesrgan-coreml",
-                            label: "Real-ESRGAN Anime 4×",
-                            available: true,
-                            detail: "",
-                            scales: [4],
-                            models: [],
-                          },
-                        ]
-                    ).map((eng) => (
-                      <button
-                        key={eng.id}
-                        type="button"
-                        disabled={eng.available === false}
-                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs ${
-                          engineId === eng.id
-                            ? "bg-ink-100 font-medium text-ink-900 dark:bg-surface-high dark:text-fg"
-                            : "text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
-                        } disabled:opacity-40`}
-                        onClick={() => persistEngine(eng.id)}
-                      >
-                        <span className="w-3 shrink-0 text-accent">
-                          {engineId === eng.id ? <IconCheck /> : null}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">
-                          {eng.id === "realesrgan-coreml"
-                            ? "Real-ESRGAN Anime 4×"
-                            : "Waifu2x Core ML"}
-                        </span>
-                      </button>
-                    ))}
-                    {engineId === "waifu2x-coreml" && (
-                      <>
-                        <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
-                        <p className="px-3 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
-                          去噪强度
-                        </p>
-                        {(
-                          [
-                            [0, "轻度"],
-                            [1, "标准"],
-                            [2, "加强"],
-                            [3, "最强"],
-                          ] as const
-                        ).map(([n, label]) => (
-                          <button
-                            key={n}
-                            type="button"
-                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs ${
-                              noiseLevel === n
-                                ? "bg-ink-100 font-medium text-ink-900 dark:bg-surface-high dark:text-fg"
-                                : "text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
-                            }`}
-                            onClick={() => persistNoise(n)}
-                          >
-                            <span className="w-3 shrink-0 text-accent">
-                              {noiseLevel === n ? <IconCheck /> : null}
-                            </span>
-                            <span className="min-w-0 flex-1 truncate">{label}</span>
-                          </button>
-                        ))}
-                      </>
-                    )}
-                    <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
-                    <div className="flex items-center justify-between gap-2 px-3 py-1.5">
-                      <span className="text-[11px] text-ink-600 dark:text-fg-muted">
-                        {i18n.readerAiCache}
-                      </span>
-                      <span className="text-[11px] tabular-nums text-ink-800 dark:text-fg">
-                        {formatCache(cacheStats)}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="flex w-full px-3 py-1.5 text-left text-xs text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
-                      onClick={() => {
-                        setAiMenuOpen(false);
-                        void clearAiCache();
-                      }}
-                    >
-                      {i18n.readerAiCacheClear}
-                    </button>
-                  </div>
-                )}
               </div>
 
-              {/* 单页 / 双页 图标分段 */}
+              <span className="reader-bar-sep" aria-hidden="true" />
+
+              {/* ② 阅读模式：单双页 + 方向 */}
               <div className="reader-seg" role="group" aria-label={i18n.readerSingle}>
                 <button
                   type="button"
                   className={`reader-seg-item ${spread === "single" ? "is-active" : ""}`}
-                  title={i18n.readerSingle}
+                  aria-label={i18n.readerSingle}
+                  onMouseEnter={(e) => showTip(e, i18n.readerSingle)}
+                  onMouseLeave={hideTip}
                   aria-pressed={spread === "single"}
                   onClick={() => {
                     setSpread("single");
@@ -1200,7 +1227,9 @@ export function ReaderView({
                 <button
                   type="button"
                   className={`reader-seg-item ${spread === "double" ? "is-active" : ""}`}
-                  title={i18n.readerDouble}
+                  aria-label={i18n.readerDouble}
+                  onMouseEnter={(e) => showTip(e, i18n.readerDouble)}
+                  onMouseLeave={hideTip}
                   aria-pressed={spread === "double"}
                   onClick={() => {
                     setSpread("double");
@@ -1209,57 +1238,167 @@ export function ReaderView({
                 >
                   <IconDoublePage />
                 </button>
+                {/* 方向并入同一容器：视觉上是一个「阅读模式」组 */}
+                <button
+                  type="button"
+                  className={`reader-seg-item ${direction === "rtl" ? "is-active" : ""}`}
+                  aria-label={direction === "rtl" ? i18n.readerRtl : i18n.readerLtr}
+                  onMouseEnter={(e) =>
+                    showTip(e, direction === "rtl" ? i18n.readerRtl : i18n.readerLtr)
+                  }
+                  onMouseLeave={hideTip}
+                  aria-pressed={direction === "rtl"}
+                  onClick={() => setDirection((d) => (d === "ltr" ? "rtl" : "ltr"))}
+                >
+                  {direction === "rtl" ? <IconRtl /> : <IconLtr />}
+                </button>
+                {/* 隐藏工具栏：方向切换按钮右侧，快捷键 H 保留 */}
+                <button
+                  type="button"
+                  className="reader-seg-item"
+                  aria-label={i18n.readerHideBar}
+                  onMouseEnter={(e) => showTip(e, i18n.readerHideBar)}
+                  onMouseLeave={hideTip}
+                  onClick={() => setBar(true)}
+                >
+                  <IconHideBar />
+                </button>
               </div>
 
-              {/* 阅读方向 */}
-              <button
-                type="button"
-                className={`reader-icon-btn ${direction === "rtl" ? "is-active" : ""}`}
-                title={direction === "rtl" ? i18n.readerRtl : i18n.readerLtr}
-                aria-label={direction === "rtl" ? i18n.readerRtl : i18n.readerLtr}
-                onClick={() => setDirection((d) => (d === "ltr" ? "rtl" : "ltr"))}
-              >
-                {direction === "rtl" ? <IconRtl /> : <IconLtr />}
-              </button>
+              <span className="reader-bar-sep" aria-hidden="true" />
 
-              {/* 原「适应屏幕」位：点击隐藏顶栏 */}
-              <button
-                type="button"
-                className="reader-icon-btn"
-                title={`${i18n.readerHideBar} (H)`}
-                aria-label={i18n.readerHideBar}
-                onClick={() => setBar(true)}
-              >
-                <IconHideBar />
-              </button>
-
+              {/* ③ 窗口：全屏 + 更多（隐藏工具栏收进更多，快捷键 H 保留） */}
               <button
                 type="button"
                 className={`reader-icon-btn ${fullscreen ? "is-active" : ""}`}
-                title={`${fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen} (F)`}
+                aria-label={`${fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen}`}
+                onMouseEnter={(e) =>
+                  showTip(e, fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen)
+                }
+                onMouseLeave={hideTip}
                 onClick={() => void toggleFullscreen()}
               >
                 {fullscreen ? <IconExitFullscreen /> : <IconFullscreen />}
               </button>
 
-              {/* 更多：适应模式 / 打开文件 / 任务切换 */}
+              {/* 更多：AI 设置 / 适应模式 / 打开文件 / 任务切换 */}
               <div className="relative z-50" ref={moreRef}>
                 <button
                   type="button"
                   className={`reader-icon-btn ${moreOpen ? "is-active" : ""}`}
-                  title={i18n.readerMore}
+                  aria-label={i18n.readerMore}
+                  onMouseEnter={(e) => showTip(e, i18n.readerMore)}
+                  onMouseLeave={hideTip}
                   aria-expanded={moreOpen}
                   aria-haspopup="menu"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setAiMenuOpen(false);
                     setMoreOpen((v) => !v);
                   }}
                 >
                   <IconMore />
                 </button>
                 {moreOpen && (
-                  <div className="reader-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+                  <div className="reader-menu reader-menu-wide" role="menu" onClick={(e) => e.stopPropagation()}>
+                    {/* AI 设置：引擎 / 去噪 / 缓存（顶栏 AI 按钮只做开关，设置收敛于此） */}
+                    <div className="px-3 pb-1 pt-2">
+                      <p className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
+                        <IconSparkles className="h-3 w-3" />
+                        {i18n.readerAiLabel}
+                      </p>
+                      {/* AI 关闭时设置整体降透明并禁用交互，但保持可见 */}
+                      <div className={`mt-2 flex flex-col gap-3 ${enhanceOn ? "" : "pointer-events-none opacity-40"}`}>
+                        {/* 引擎 */}
+                        <div>
+                          <p className="ai-block-title">{i18n.engine}</p>
+                          <div className="ai-seg ai-seg-lg mt-1.5" role="radiogroup" aria-label={i18n.engine}>
+                            <span
+                              className="ai-seg-thumb"
+                              aria-hidden="true"
+                              style={{ transform: `translateX(calc(100% * ${engineIndex}))` }}
+                            />
+                            {engineOptions.map((eng) => (
+                              <button
+                                key={eng.id}
+                                type="button"
+                                role="radio"
+                                aria-checked={engineId === eng.id}
+                                className="ai-seg-item"
+                                onClick={() => persistEngine(eng.id)}
+                              >
+                                <span className="ai-seg-main">{eng.main}</span>
+                                <span className="ai-seg-sub">{eng.sub}</span>
+                              </button>
+                            ))}
+                          </div>
+                          {engineSwitchHint && cacheStats && cacheStats.bytes > 0 && (
+                            <p className="ai-hint">{i18n.readerAiEngineCacheHint}</p>
+                          )}
+                        </div>
+                        {/* 去噪强度 */}
+                        <div>
+                          <p className="ai-block-title">{i18n.readerNoiseLevel}</p>
+                          <div className="ai-seg ai-seg-sm mt-1.5" role="radiogroup" aria-label={i18n.readerNoiseLevel}>
+                            <span
+                              className="ai-seg-thumb"
+                              aria-hidden="true"
+                              style={{ transform: `translateX(calc(100% * ${noiseLevel}))` }}
+                            />
+                            {(
+                              [
+                                [0, i18n.readerNoiseLight],
+                                [1, i18n.readerNoiseStandard],
+                                [2, i18n.readerNoiseStrong],
+                                [3, i18n.readerNoiseMax],
+                              ] as const
+                            ).map(([n, label]) => (
+                              <button
+                                key={n}
+                                type="button"
+                                role="radio"
+                                aria-checked={noiseLevel === n}
+                                className={`ai-seg-item ${noiseLevel === n ? "is-active" : ""}`}
+                                onClick={() => persistNoise(n)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {/* 缓存信息 */}
+                        <div>
+                          <p className="ai-block-title">{i18n.readerAiCache}</p>
+                          <div className="mt-1.5 flex items-baseline justify-between gap-2">
+                            <span className="text-[12px] text-ink-500 dark:text-fg-muted">
+                              {i18n.readerAiCacheLabel}
+                            </span>
+                            <span className="text-[12px] tabular-nums text-ink-800 dark:text-fg">
+                              {cacheLine}
+                            </span>
+                          </div>
+                          <div className="reader-cache-bar mt-1.5" aria-hidden="true">
+                            <span style={{ width: `${cachePct}%` }} />
+                          </div>
+                          <button
+                            type="button"
+                            className={`ai-clear-btn ${clearConfirming ? "is-confirm" : ""}`}
+                            onClick={() => void handleClearClick()}
+                          >
+                            {clearingCache ? (
+                              <>
+                                <span className="reader-ai-spin" aria-hidden="true" />
+                                {i18n.readerAiClearing}
+                              </>
+                            ) : clearConfirming ? (
+                              i18n.readerAiClearConfirm.replace("{size}", cacheSizeText(cacheStats))
+                            ) : (
+                              i18n.readerAiCacheClear
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
                     <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                       {i18n.readerFitScreen}
                     </p>
@@ -1326,20 +1465,7 @@ export function ReaderView({
                         {i18n.readerFitCurrentHint}
                       </span>
                     </button>
-                    <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
-                    <button
-                      type="button"
-                      className="flex w-full flex-col items-start px-3 py-2 text-left text-xs text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
-                      onClick={() => {
-                        setMoreOpen(false);
-                        void clearAiCache();
-                      }}
-                    >
-                      <span>{i18n.readerAiCacheClear}</span>
-                      <span className="mt-0.5 font-normal text-[10px] text-ink-400 dark:text-fg-muted">
-                        {i18n.readerAiCache} {formatCache(cacheStats)}
-                      </span>
-                    </button>
+                    {/* 清缓存已收敛到 AI 菜单（含用量进度条），此处不再重复 */}
                     <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
                     <button
                       type="button"
@@ -1407,8 +1533,9 @@ export function ReaderView({
         <button
           type="button"
           className="reader-no-drag absolute right-3 top-2.5 z-40 flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-black/50 text-white/90 backdrop-blur-sm hover:bg-black/70"
-          title={`${i18n.readerShowBar} (H)`}
           aria-label={i18n.readerShowBar}
+          onMouseEnter={(e) => showTip(e, i18n.readerShowBar)}
+          onMouseLeave={hideTip}
           onClick={() => setBar(false)}
         >
           <IconShowBar />
@@ -1417,7 +1544,7 @@ export function ReaderView({
 
       <div
         ref={viewportRef}
-        className="relative min-h-0 flex-1 overflow-auto bg-black"
+        className="relative min-h-0 flex-1 select-none overflow-auto bg-black"
         onClick={(e) => clickNav(e.clientX, e.currentTarget.getBoundingClientRect())}
       >
         {!state && (
@@ -1431,7 +1558,7 @@ export function ReaderView({
           </div>
         )}
         {state && displayPages.length > 0 && (
-          <div className="flex h-full min-h-full items-center justify-center">
+          <div className="flex h-full min-h-full select-none items-center justify-center">
             {displayPages.map((p) => (
               <img
                 key={`${p.index}-${p.kind}`}
@@ -1452,7 +1579,7 @@ export function ReaderView({
 
       {total > 0 && (
         <div
-          className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 transition-opacity duration-300 ${
+          className={`pointer-events-none absolute inset-x-0 bottom-0 z-20 select-none transition-opacity duration-300 ${
             progressHud ? "opacity-100" : "opacity-0"
           }`}
         >
@@ -1464,10 +1591,14 @@ export function ReaderView({
             }}
             onMouseLeave={flashProgress}
           >
+            {/* mousedown preventDefault：细条按下易变成拖选（WebKit 选区），禁止从进度条启动选区 */}
             <button
               type="button"
               aria-label={pageLabel}
-              className="block h-3 w-full cursor-pointer"
+              className={`block h-3 w-full cursor-pointer ${
+                progressHud ? "pointer-events-auto" : "pointer-events-none"
+              }`}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={(e) => {
                 e.stopPropagation();
                 seekProgress(e.clientX, e.currentTarget.getBoundingClientRect());
@@ -1480,8 +1611,22 @@ export function ReaderView({
                 />
               </span>
             </button>
-            <p className="mt-1.5 text-center text-[11px] tabular-nums text-white/80">{pageLabel}</p>
+            <p className="pointer-events-none mt-1.5 select-none text-center text-[11px] tabular-nums text-white/80">
+              {pageLabel}
+            </p>
           </div>
+        </div>
+      )}
+
+      {clearToast && (
+        <div className="reader-toast" role="status">
+          {clearToast}
+        </div>
+      )}
+
+      {tip && (
+        <div className="reader-tip" role="tooltip" style={{ left: tip.x, top: tip.y }}>
+          {tip.text}
         </div>
       )}
     </div>
@@ -1520,18 +1665,21 @@ function IconChevronRight() {
   );
 }
 
-function IconChevronDown() {
+function IconSparkles({ className = "" }: { className?: string }) {
   return (
-    <svg viewBox="0 0 20 20" className={iconClass()} fill="none" aria-hidden="true">
-      <path d="m5 8 5 5 5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconCheck() {
-  return (
-    <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" aria-hidden="true">
-      <path d="M2.2 6.2 4.7 8.6 9.8 3.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    <svg viewBox="0 0 20 20" className={iconClass(className)} fill="none" aria-hidden="true">
+      <path
+        d="M10 3.2c.42 2.1 1.4 3.08 3.5 3.5-2.1.42-3.08 1.4-3.5 3.5-.42-2.1-1.4-3.08-3.5-3.5 2.1-.42 3.08-1.4 3.5-3.5Z"
+        fill="currentColor"
+      />
+      <path
+        d="M16.2 11.4c.25 1.25.83 1.83 2.08 2.08-1.25.25-1.83.83-2.08 2.08-.25-1.25-.83-1.83-2.08-2.08 1.25-.25 1.83-.83 2.08-2.08Z"
+        fill="currentColor"
+      />
+      <path
+        d="M5.6 11.8c.18.9.6 1.32 1.5 1.5-.9.18-1.32.6-1.5 1.5-.18-.9-.6-1.32-1.5-1.5.9-.18 1.32-.6 1.5-1.5Z"
+        fill="currentColor"
+      />
     </svg>
   );
 }
@@ -1588,8 +1736,8 @@ function IconExitFullscreen() {
 function IconHideBar() {
   return (
     <svg viewBox="0 0 20 20" className={iconClass()} fill="none" aria-hidden="true">
-      <path d="M4 6.5h12M4 10h12M4 13.5h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="m14 12 2.5 2.5L14 17" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      {/* 两条横线：与 ShowBar 三条横线形成「收起一行」的折叠语义 */}
+      <path d="M4 7h12M4 13h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   );
 }

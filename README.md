@@ -43,6 +43,9 @@ PureComic/
 - macOS：Xcode Command Line Tools（Core ML 引擎仅 macOS）
 - 整本增强（可选）：`waifu2x-ncnn-vulkan` / `realcugan-ncnn-vulkan`
 
+> 中国大陆网络环境可自行配置 crates.io 镜像（例如 `~/.cargo/config.toml` 指向
+> rsproxy.cn），仓库不再内置全局镜像配置，以免影响海外贡献者与 CI。
+
 ## 开发
 
 ```bash

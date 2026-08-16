@@ -45,6 +45,21 @@ export function loadReaderPref(source: string): ReaderPref {
   };
 }
 
+/** 一次性读取全部阅读偏好（只解析一次 JSON，供书库排序/过滤等批量场景使用） */
+export function loadAllReaderPrefs(): Map<string, ReaderPref> {
+  const all = loadAll();
+  const map = new Map<string, ReaderPref>();
+  for (const [k, v] of Object.entries(all)) {
+    map.set(k, {
+      pageIndex: Number.isFinite(v.pageIndex) ? Math.max(0, v.pageIndex) : 0,
+      spread: v.spread === "double" ? "double" : "single",
+      direction: v.direction === "rtl" ? "rtl" : "ltr",
+      fit: v.fit === "smart" ? "smart" : "screen",
+    });
+  }
+  return map;
+}
+
 export function saveReaderPref(source: string, pref: ReaderPref) {
   try {
     const all = loadAll();
@@ -57,8 +72,8 @@ export function saveReaderPref(source: string, pref: ReaderPref) {
 
 const READER_ENGINE_KEY = "comic.reader.engine";
 
-const READER_ENGINES = ["waifu2x-coreml", "realesrgan-coreml"] as const;
-export type ReaderEngineId = (typeof READER_ENGINES)[number];
+/** 阅读器可用的引擎（仅用于类型收窄） */
+export type ReaderEngineId = "waifu2x-coreml" | "realesrgan-coreml";
 
 export function isReaderEngine(id: string): id is ReaderEngineId {
   return id === "waifu2x-coreml" || id === "realesrgan-coreml";

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { comicFileFilter, isComicPath } from "./formats";
 import {
   cancelJob,
   clearFinishedJobs,
@@ -41,6 +42,7 @@ import type {
   DoctorReport,
   EngineInfo,
   EngineStatus,
+  JobState,
   JobStatus,
   LibraryEntry,
   LibraryScanPreview,
@@ -93,6 +95,37 @@ function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
   return String(e);
+}
+
+/** 进行中的任务状态（空闲时轮询退避，避免常驻全量重渲染） */
+const ACTIVE_JOB_STATES: readonly JobState[] = [
+  "pending",
+  "validating",
+  "extracting",
+  "running",
+  "finalizing",
+  "cancelling",
+];
+
+/** jobs 列表浅比较：仅关注影响 UI 的字段 */
+function jobsEqual(a: JobStatus[], b: JobStatus[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.jobId !== y.jobId ||
+      x.state !== y.state ||
+      x.pagesDone !== y.pagesDone ||
+      x.pagesTotal !== y.pagesTotal ||
+      x.stage !== y.stage ||
+      x.error !== y.error ||
+      x.outputPath !== y.outputPath
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function accelLabel(
@@ -171,18 +204,23 @@ export default function App() {
   }, []);
 
   const pathInLibrary = useCallback((path: string) => {
-    const norm = path.replace(/\\/g, "/");
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+    const n = norm(path);
     return libraryRef.current.some((e) => {
-      const ep = e.path.replace(/\\/g, "/");
-      return ep === norm || ep.endsWith(norm) || norm.endsWith(ep);
+      const ep = norm(e.path);
+      // 全等，或互为祖先/后代（按路径段边界，避免 /Users/a/X 误匹配 /Volumes/b/X）
+      return ep === n || ep.startsWith(n + "/") || n.startsWith(ep + "/");
     });
   }, []);
+
+  const [readerPrefsRev, setReaderPrefsRev] = useState(0);
 
   const finishCloseReader = useCallback(() => {
     setReaderSession(null);
     readerSessionRef.current = null;
     setImportPrompt(null);
     setImportRemember(false);
+    setReaderPrefsRev((n) => n + 1);
     void restoreMainWindowGeometry();
   }, []);
 
@@ -264,11 +302,15 @@ export default function App() {
 
   const refreshJobs = useCallback(async () => {
     try {
-      setJobs(await listJobs());
+      const list = await listJobs();
+      // 浅比较：无变化时不触发 setState，避免空闲状态 1.5s 一次全量重渲染
+      setJobs((prev) => (jobsEqual(prev, list) ? prev : list));
     } catch {
       /* backend not ready */
     }
   }, []);
+
+  const jobsActive = jobs.some((j) => ACTIVE_JOB_STATES.includes(j.state));
 
   const refreshDoctor = useCallback(async () => {
     try {
@@ -364,7 +406,7 @@ export default function App() {
           id: "mock",
           available: true,
           detail: "dev",
-          version: "0.1.0-mock",
+          version: "0.2.0-mock",
         }),
       );
     listEngines()
@@ -401,7 +443,10 @@ export default function App() {
         }
       })
       .catch(() => undefined);
-    const timer = setInterval(refreshJobs, 1500);
+    const timer = setInterval(
+      refreshJobs,
+      jobsActive ? 1500 : 15000, // 空闲时低频兜底轮询
+    );
     let unlisten: (() => void) | undefined;
     onJobProgress(() => {
       refreshJobs();
@@ -412,8 +457,7 @@ export default function App() {
       clearInterval(timer);
       unlisten?.();
     };
-  }, [refreshJobs, refreshLibrary]);
-
+  }, [refreshJobs, refreshLibrary, jobsActive]);
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -453,9 +497,7 @@ export default function App() {
   /** Prefer CBZ/ZIP files over random paths; accept directories. */
   const pickDroppedPath = (paths: string[]): string | null => {
     if (!paths.length) return null;
-    const comic = paths.find((p) =>
-      /\.(cbz|zip|cbr|rar|epub|mobi|azw|azw3)$/i.test(p),
-    );
+    const comic = paths.find((p) => isComicPath(p));
     if (comic) return comic;
     // folder or other path — backend detects kind
     return paths[0] ?? null;
@@ -485,11 +527,18 @@ export default function App() {
             }
             void ingestPath(path);
             if (reading) {
-              setReaderSession((prev) =>
-                prev
-                  ? { ...prev, source: path, jobId: null, entry: undefined, title: undefined }
-                  : { source: path, from: "library" },
-              );
+              const current = readerSessionRef.current;
+              const next: ReaderSession = current
+                ? {
+                    ...current,
+                    source: path,
+                    jobId: null,
+                    entry: undefined,
+                    title: undefined,
+                  }
+                : { source: path, from: "library" as const };
+              setReaderSession(next);
+              readerSessionRef.current = next;
             } else if (tab === "enhance") {
               void applySource(path);
             } else {
@@ -512,10 +561,7 @@ export default function App() {
       multiple: false,
       directory: false,
       filters: [
-        {
-          name: "Comic / Ebook",
-          extensions: ["cbz", "cbr", "zip", "rar", "epub", "mobi", "azw", "azw3"],
-        },
+        comicFileFilter("Comic / Ebook"),
         { name: "All", extensions: ["*"] },
       ],
     });
@@ -554,6 +600,22 @@ export default function App() {
         },
         enhance: { scale, noiseLevel: noise, tta, cuganModel },
       });
+      // Real-CUGAN 等引擎会归一化参数（如 1×→2×、Pro 包 noise→3）：
+      // 以返回的实际值为准回写 UI，任务消息里会显示归一化说明
+      if (created.actualScale && created.actualScale !== scale) {
+        setScale(created.actualScale);
+      }
+      if (
+        created.actualNoise !== undefined &&
+        (created.actualNoise === -1 ||
+          created.actualNoise === 0 ||
+          created.actualNoise === 1 ||
+          created.actualNoise === 2 ||
+          created.actualNoise === 3) &&
+        created.actualNoise !== noise
+      ) {
+        setNoise(created.actualNoise);
+      }
       await refreshJobs();
       setTab("enhance");
       setQueueOpen(true);
@@ -604,6 +666,151 @@ export default function App() {
     readyModels.length > 0
       ? readyModels.map((e) => `${e.label}${e.detail ? ` · ${e.detail}` : ""}`).join("\n")
       : (engine?.detail ?? "");
+  const onLibAddFile = useCallback(async () => {
+    const paths = await pickComicFiles();
+    if (paths.length === 0) return;
+    setLibraryImporting(true);
+    setLibraryImportProgress({ done: 0, total: paths.length });
+    setError(null);
+    try {
+      let done = 0;
+      for (const p of paths) {
+        try {
+          await addLibraryPath(p);
+        } catch {
+          /* single fail continues */
+        }
+        done += 1;
+        setLibraryImportProgress({ done, total: paths.length });
+      }
+      await refreshLibrary();
+      setLibraryNotice(paths.length === 1 ? null : `已处理 ${paths.length} 个文件`);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setLibraryImporting(false);
+      setLibraryImportProgress(null);
+    }
+  }, [refreshLibrary]);
+
+  const onLibAddFolder = useCallback(async () => {
+    const p = await pickFolder();
+    if (p) await ingestPath(p);
+  }, [ingestPath]);
+
+  const onLibScan = useCallback(
+    async (opts?: { addToWatch?: boolean }) => {
+      const p = await pickFolder();
+      if (!p) return;
+      if (opts?.addToWatch) {
+        const s = loadImportSettings();
+        if (!s.watchFolders.includes(p)) {
+          saveImportSettings({ ...s, watchFolders: [...s.watchFolders, p] });
+        }
+      }
+      setLibraryScan(true);
+      setError(null);
+      try {
+        setScanPreview(await previewLibraryScan(p));
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setLibraryScan(false);
+      }
+    },
+    [],
+  );
+
+  const onLibCancelScan = useCallback(() => setScanPreview(null), []);
+
+  const onLibConfirmScan = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0) return;
+      setLibraryImporting(true);
+      setLibraryImportProgress({ done: 0, total: paths.length });
+      setError(null);
+      try {
+        // 分批导入以更新进度提示
+        const batch = 8;
+        let done = 0;
+        let lastMsg = "";
+        for (let i = 0; i < paths.length; i += batch) {
+          const slice = paths.slice(i, i + batch);
+          const r = await importLibraryPaths(slice);
+          lastMsg = r.message;
+          done = Math.min(paths.length, i + slice.length);
+          setLibraryImportProgress({ done, total: paths.length });
+        }
+        setLibraryNotice(lastMsg || `已导入 ${paths.length} 本`);
+        setScanPreview(null);
+        await refreshLibrary();
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setLibraryImporting(false);
+        setLibraryImportProgress(null);
+      }
+    },
+    [refreshLibrary],
+  );
+
+  const onLibOpen = useCallback(
+    (e: LibraryEntry) => {
+      if (e.missing) return;
+      setSource(e.path);
+      openReader({
+        source: e.path,
+        jobId: e.jobId ?? null,
+        title: e.title,
+        entry: e,
+        from: "library",
+      });
+    },
+    [openReader],
+  );
+
+  const onLibEnhance = useCallback(
+    (e: LibraryEntry) => {
+      void applySource(e.path);
+      setTab("enhance");
+    },
+    [applySource],
+  );
+
+  const onLibRemove = useCallback(
+    (e: LibraryEntry) => {
+      void removeLibraryEntry(e.id)
+        .then(refreshLibrary)
+        .catch((err) => setError(errMsg(err)));
+    },
+    [refreshLibrary],
+  );
+
+  const onExternalImportAdd = useCallback(async () => {
+    if (!importPrompt) return;
+    if (importRemember) saveExternalOpenRemember("import");
+    setImportBusy(true);
+    try {
+      await addLibraryPath(importPrompt.path);
+      await refreshLibrary();
+      finishCloseReader();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setImportBusy(false);
+    }
+  }, [importPrompt, importRemember, refreshLibrary, finishCloseReader]);
+
+  const onExternalImportDiscard = useCallback(() => {
+    if (importRemember) saveExternalOpenRemember("discard");
+    finishCloseReader();
+  }, [importRemember, finishCloseReader]);
+
+  const onExternalImportCancel = useCallback(() => {
+    setImportPrompt(null);
+    setImportRemember(false);
+  }, []);
+
   const accel = accelLabel(catalog, engineId, cuganModel, engine);
 
   return (
@@ -773,27 +980,9 @@ export default function App() {
             remember={importRemember}
             busy={importBusy}
             onRememberChange={setImportRemember}
-            onAdd={async () => {
-              if (importRemember) saveExternalOpenRemember("import");
-              setImportBusy(true);
-              try {
-                await addLibraryPath(importPrompt.path);
-                await refreshLibrary();
-                finishCloseReader();
-              } catch (e) {
-                setError(errMsg(e));
-              } finally {
-                setImportBusy(false);
-              }
-            }}
-            onDiscard={() => {
-              if (importRemember) saveExternalOpenRemember("discard");
-              finishCloseReader();
-            }}
-            onCancel={() => {
-              setImportPrompt(null);
-              setImportRemember(false);
-            }}
+            onAdd={onExternalImportAdd}
+            onDiscard={onExternalImportDiscard}
+            onCancel={onExternalImportCancel}
           />
         )}
 
@@ -812,105 +1001,15 @@ export default function App() {
               importing={libraryImporting}
               importProgress={libraryImportProgress}
               i18n={i18n}
-              onAddFile={async () => {
-                const paths = await pickComicFiles();
-                if (paths.length === 0) return;
-                setLibraryImporting(true);
-                setLibraryImportProgress({ done: 0, total: paths.length });
-                setError(null);
-                try {
-                  let done = 0;
-                  for (const p of paths) {
-                    try {
-                      await addLibraryPath(p);
-                    } catch {
-                      /* single fail continues */
-                    }
-                    done += 1;
-                    setLibraryImportProgress({ done, total: paths.length });
-                  }
-                  await refreshLibrary();
-                  setLibraryNotice(
-                    paths.length === 1 ? null : `已处理 ${paths.length} 个文件`,
-                  );
-                } catch (e) {
-                  setError(errMsg(e));
-                } finally {
-                  setLibraryImporting(false);
-                  setLibraryImportProgress(null);
-                }
-              }}
-              onAddFolder={async () => {
-                const p = await pickFolder();
-                if (p) await ingestPath(p);
-              }}
-              onScan={async (opts) => {
-                const p = await pickFolder();
-                if (!p) return;
-                if (opts?.addToWatch) {
-                  const s = loadImportSettings();
-                  if (!s.watchFolders.includes(p)) {
-                    saveImportSettings({ ...s, watchFolders: [...s.watchFolders, p] });
-                  }
-                }
-                setLibraryScan(true);
-                setError(null);
-                try {
-                  setScanPreview(await previewLibraryScan(p));
-                } catch (e) {
-                  setError(errMsg(e));
-                } finally {
-                  setLibraryScan(false);
-                }
-              }}
-              onCancelScan={() => setScanPreview(null)}
-              onConfirmScan={async (paths) => {
-                if (paths.length === 0) return;
-                setLibraryImporting(true);
-                setLibraryImportProgress({ done: 0, total: paths.length });
-                setError(null);
-                try {
-                  // 分批导入以更新进度提示
-                  const batch = 8;
-                  let done = 0;
-                  let lastMsg = "";
-                  for (let i = 0; i < paths.length; i += batch) {
-                    const slice = paths.slice(i, i + batch);
-                    const r = await importLibraryPaths(slice);
-                    lastMsg = r.message;
-                    done = Math.min(paths.length, i + slice.length);
-                    setLibraryImportProgress({ done, total: paths.length });
-                  }
-                  setLibraryNotice(lastMsg || `已导入 ${paths.length} 本`);
-                  setScanPreview(null);
-                  await refreshLibrary();
-                } catch (e) {
-                  setError(errMsg(e));
-                } finally {
-                  setLibraryImporting(false);
-                  setLibraryImportProgress(null);
-                }
-              }}
-              onOpen={(e) => {
-                if (e.missing) return;
-                setSource(e.path);
-                openReader({
-                  source: e.path,
-                  jobId: e.jobId ?? null,
-                  title: e.title,
-                  entry: e,
-                  from: "library",
-                });
-              }}
-              onEnhance={(e) => {
-                void applySource(e.path);
-                setTab("enhance");
-              }}
-              onRemove={(e) => {
-                void removeLibraryEntry(e.id)
-                  .then(refreshLibrary)
-                  .catch((err) => setError(errMsg(err)));
-              }}
+              onAddFile={onLibAddFile}
+              onAddFolder={onLibAddFolder}
+              onScan={onLibScan}
+              onCancelScan={onLibCancelScan}
+              onConfirmScan={onLibConfirmScan}
+              onOpen={onLibOpen}
+              onEnhance={onLibEnhance}
+              onRemove={onLibRemove}
+              prefsRev={readerPrefsRev}
             />
           </div>
         )}

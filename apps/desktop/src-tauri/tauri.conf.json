@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PureComic",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "app.comic.enhance",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -21,21 +21,30 @@
         "dragDropEnabled": true,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay",
-        "trafficLightPosition": { "x": 16, "y": 18 },
-        "backgroundColor": "#F5F5F7"
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 18
+        },
+        "backgroundColor": "#16171C"
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**", "$TEMP/**", "$HOME/**"]
+        "scope": [
+          "$APPDATA/**",
+          "$TEMP/**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/16x16.png",
       "icons/32x32.png",
@@ -53,9 +62,17 @@
     "copyright": "Apache-2.0",
     "shortDescription": "PureComic — 本地漫画画质增强",
     "longDescription": "PureComic 本地优先：导入 CBZ/CBR/文件夹/EPUB/MOBI，Waifu2x 或 Real-CUGAN 增强后导出。",
-    "externalBin": ["binaries/waifu2x-ncnn-vulkan"],
+    "externalBin": [
+      "binaries/waifu2x-ncnn-vulkan",
+      "binaries/realcugan-ncnn-vulkan"
+    ],
     "resources": [
       "resources/models-cunet",
+      "resources/models-se",
+      "resources/models-pro",
+      "resources/models-nose",
+      "resources/waifu2x-coreml",
+      "resources/realesrgan-coreml",
       "resources/NOTICE",
       "resources/checksums.sha256"
     ],
@@ -63,21 +80,40 @@
       "bundleName": "PureComic",
       "minimumSystemVersion": "11.0",
       "dmg": {
-        "appPosition": { "x": 180, "y": 170 },
-        "applicationFolderPosition": { "x": 480, "y": 170 },
-        "windowSize": { "width": 660, "height": 400 }
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        },
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        }
       }
     },
     "fileAssociations": [
       {
-        "ext": ["cbz", "cbr", "zip", "rar"],
+        "ext": [
+          "cbz",
+          "cbr",
+          "zip",
+          "rar"
+        ],
         "name": "Comic Archive",
         "description": "Comic book archive",
         "role": "Viewer",
         "mimeType": "application/vnd.comicbook+zip"
       },
       {
-        "ext": ["epub", "mobi", "azw", "azw3"],
+        "ext": [
+          "epub",
+          "mobi",
+          "azw",
+          "azw3"
+        ],
         "name": "Ebook",
         "description": "Ebook for comic reading",
         "role": "Viewer"

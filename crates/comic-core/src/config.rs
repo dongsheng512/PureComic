@@ -20,6 +20,9 @@ pub struct AppConfig {
     pub page_timeout_secs: u64,
     /// Max side length before warn / tile floor
     pub max_image_side: u32,
+    /// Batch enhance input cap: pages larger than this are downscaled (aspect
+    /// preserved) before inference, bounding engine output buffers.
+    pub engine_input_max_side: u32,
     /// Force mock engine. Default **false** (prefer real Waifu2x when bundled).
     /// Set true for CI / offline dev without GPU binary.
     pub use_mock_engine: bool,
@@ -65,6 +68,7 @@ impl Default for AppConfig {
             max_compression_ratio: 500.0,
             page_timeout_secs: 180,
             max_image_side: 16_384,
+            engine_input_max_side: 4096,
             use_mock_engine: false,
             waifu2x_bin: None,
             models_dir: None,

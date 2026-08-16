@@ -7,14 +7,38 @@ use crate::pipeline::{self, new_gpu_lock, GpuLock, ProgressCallback};
 use comic_engines::{EngineHub, EngineInfo, EngineKind, MockEngine, UpscaleEngine};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+enum WorkerSlot {
+    Pending,
+    Running(tokio::task::JoinHandle<()>),
+}
+
+struct ClearActive(Arc<AtomicBool>);
+
+impl Drop for ClearActive {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 struct LiveJob {
     manifest: Arc<RwLock<JobManifest>>,
     cancel: CancellationToken,
+    /// 源路径快照：jobs 锁内做同源去重，避免嵌套读 manifest 锁
+    source: PathBuf,
+    /// worker 仍视为活动（含 handle 尚未挂上的预约窗口）
+    active: Arc<AtomicBool>,
+    /// remove_job 等待超时后置位：worker 后续 save() 全部跳过，防目录复活
+    abandoned: Arc<AtomicBool>,
+    /// worker 任务句柄：remove_job 等其挂上并退出，避免删除后目录被重建
+    handle: Arc<StdMutex<WorkerSlot>>,
+    handle_ready: Arc<tokio::sync::Notify>,
 }
 
 pub struct Scheduler {
@@ -98,7 +122,9 @@ impl Scheduler {
     }
 
     pub async fn create_job(&self, req: CreateJobRequest) -> AppResult<CreateJobResult> {
-        let (source, options, output) = req.into_parts()?;
+        let (source, mut options, output) = req.into_parts()?;
+        // Real-CUGAN 参数归一化：实际生效值写进 manifest（引擎内部同规则仅兜底）
+        let normalized = options.normalize_realcugan();
         self.ensure_engine_ready(options.engine)?;
         let engine = self.pick_engine(options.engine)?;
         crate::estimate::assert_disk_ok(&source, options.scale.as_u8(), &self.cfg)?;
@@ -106,12 +132,14 @@ impl Scheduler {
             std::fs::create_dir_all(&output.dir)?;
         }
 
-        if let Some(live_id) = self.live_job_for_source(&source).await {
+        let want = source_key(&source);
+        if let Some(live_id) = self.live_active_id_for_source(&want).await {
             return Err(AppError::invalid(format!(
                 "该书已在队列中处理（任务 {live_id}）"
             )));
         }
 
+        // 磁盘 resume 放在写锁外，避免扫目录卡住 cancel/list。
         let resume = self.find_resume_on_disk(&source);
         let (job_id, manifest, resumed, done, total, next) = if let Some(hint) = resume {
             let dir = self.cfg.jobs_dir().join(&hint.job_id);
@@ -131,29 +159,88 @@ impl Scheduler {
         } else {
             let job_id = uuid::Uuid::new_v4().to_string();
             let workdir = self.cfg.jobs_dir().join(&job_id);
-            let mut manifest = JobManifest::new(source, options, output, workdir);
+            let mut manifest = JobManifest::new(source.clone(), options, output, workdir);
             manifest.job_id = job_id.clone();
             manifest.workdir = self.cfg.jobs_dir().join(&job_id);
+            if normalized {
+                manifest.last_message = Some(format!(
+                    "参数已按模型包归一化：{}× / n{}",
+                    manifest.options.scale.as_u8(),
+                    manifest.options.noise
+                ));
+            }
             (job_id, manifest, false, 0, 0, 1)
         };
 
         let cancel = CancellationToken::new();
         let manifest_arc = Arc::new(RwLock::new(manifest));
-        let live = LiveJob {
-            manifest: manifest_arc.clone(),
-            cancel: cancel.clone(),
-        };
-
-        self.jobs.write().await.insert(job_id.clone(), live);
+        let handle_slot = Arc::new(StdMutex::new(WorkerSlot::Pending));
+        let handle_ready = Arc::new(tokio::sync::Notify::new());
+        let active = Arc::new(AtomicBool::new(true));
+        let abandoned = Arc::new(AtomicBool::new(false));
         {
-            let m = manifest_arc.read().await;
-            m.save()?;
+            let mut m = manifest_arc.try_write().expect("fresh manifest lock");
+            m.abandoned = abandoned.clone();
+            // 真实引擎缺失回退 mock 时，任务消息里显式警告（不覆盖归一化提示）
+            if engine.status().id == "mock" && !self.cfg.use_mock_engine {
+                let note = "⚠️ 真实引擎不可用，使用模拟引擎（最近邻放大，非真实超分）";
+                m.last_message = Some(match m.last_message.take() {
+                    Some(existing) => format!("{existing}；{note}"),
+                    None => note.into(),
+                });
+            }
         }
 
         let cfg = self.cfg.clone();
         let gpu = self.gpu.clone();
         let on_progress = self.on_progress.read().await.clone();
-        let job_id_spawn = job_id.clone();
+
+        // 写锁内只做「再检查 + 预约插入 + 挂上 handle」；不读磁盘、不嵌套 manifest。
+        {
+            let mut jobs = self.jobs.write().await;
+            for (id, live) in jobs.iter() {
+                if live.active.load(Ordering::Acquire) && source_key(&live.source) == want {
+                    return Err(AppError::invalid(format!(
+                        "该书已在队列中处理（任务 {id}）"
+                    )));
+                }
+            }
+            jobs.insert(
+                job_id.clone(),
+                LiveJob {
+                    manifest: manifest_arc.clone(),
+                    cancel: cancel.clone(),
+                    source: source.clone(),
+                    active: active.clone(),
+                    abandoned: abandoned.clone(),
+                    handle: handle_slot.clone(),
+                    handle_ready: handle_ready.clone(),
+                },
+            );
+
+            let job_id_spawn = job_id.clone();
+            let manifest_run = manifest_arc.clone();
+            let cancel_run = cancel.clone();
+            let active_run = active.clone();
+            let handle = tokio::spawn(async move {
+                let _clear = ClearActive(active_run);
+                let res =
+                    pipeline::run_job(manifest_run, engine, cfg, gpu, cancel_run, on_progress)
+                        .await;
+                if let Err(e) = res {
+                    warn!(job = %job_id_spawn, error = %e, "job ended with error");
+                } else {
+                    info!(job = %job_id_spawn, "job finished ok");
+                }
+            });
+            *handle_slot.lock().unwrap_or_else(|e| e.into_inner()) = WorkerSlot::Running(handle);
+            handle_ready.notify_waiters();
+        }
+
+        if let Err(e) = manifest_arc.read().await.save() {
+            let _ = self.remove_job(&job_id).await;
+            return Err(e);
+        }
 
         {
             let p = manifest_arc.read().await.source.path.clone();
@@ -163,21 +250,23 @@ impl Scheduler {
             }
         }
 
-        tokio::spawn(async move {
-            let res = pipeline::run_job(manifest_arc, engine, cfg, gpu, cancel, on_progress).await;
-            if let Err(e) = res {
-                warn!(job = %job_id_spawn, error = %e, "job ended with error");
-            } else {
-                info!(job = %job_id_spawn, "job finished ok");
-            }
-        });
-
+        let (actual_scale, actual_noise, actual_cugan_model) = {
+            let m = manifest_arc.read().await;
+            (
+                m.options.scale.as_u8(),
+                m.options.noise,
+                m.options.cugan_model.clone(),
+            )
+        };
         Ok(CreateJobResult {
             job_id,
             resumed,
             pages_done: done,
             pages_total: total,
             next_page: next,
+            actual_scale,
+            actual_noise,
+            actual_cugan_model,
         })
     }
 
@@ -294,21 +383,42 @@ impl Scheduler {
     }
 
     /// Remove one job directory (and drop from memory if present).
-    /// Active live jobs are cancelled first.
+    /// Active live jobs are cancelled first and awaited before the directory is
+    /// removed — otherwise the worker's final manifest save recreates the folder
+    /// and the job "resurrects" in list_jobs.
     pub async fn remove_job(&self, job_id: &str) -> AppResult<()> {
-        // cancel live worker if any
-        {
-            let jobs = self.jobs.read().await;
-            if let Some(live) = jobs.get(job_id) {
-                live.cancel.cancel();
+        let live = self.jobs.write().await.remove(job_id);
+        if let Some(live) = live {
+            live.cancel.cancel();
+            live.active.store(false, Ordering::Release);
+            match wait_for_worker_handle(&live, Duration::from_secs(15)).await {
+                Some(handle) => {
+                    if tokio::time::timeout(Duration::from_secs(15), handle)
+                        .await
+                        .is_err()
+                    {
+                        // 超时：worker 可能卡在 sidecar 上。置放弃标志，其后续
+                        // manifest.save() 全部跳过，防止目录复活。
+                        warn!(job = %job_id, "remove_job: worker 未在 15s 内退出，已置放弃标志");
+                        live.abandoned.store(true, Ordering::Release);
+                    }
+                }
+                None => {
+                    warn!(job = %job_id, "remove_job: worker handle 未就绪");
+                    live.abandoned.store(true, Ordering::Release);
+                }
             }
         }
-        self.jobs.write().await.remove(job_id);
         let dir = self.cfg.jobs_dir().join(job_id);
         if dir.is_dir() {
-            std::fs::remove_dir_all(&dir).map_err(|e| {
-                AppError::internal(format!("删除任务目录失败: {}: {e}", dir.display()))
-            })?;
+            // 数 GB 目录删除放 blocking 线程，避免卡 tokio worker
+            let dir2 = dir.clone();
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir2))
+                .await
+                .map_err(|e| AppError::internal(format!("删除任务目录 join: {e}")))?
+                .map_err(|e| {
+                    AppError::internal(format!("删除任务目录失败: {}: {e}", dir.display()))
+                })?;
             info!(job = %job_id, "job directory removed");
         }
         Ok(())
@@ -349,22 +459,27 @@ impl Scheduler {
             }
         }
 
-        let mut removed = 0u32;
+        // 删除/扫描目录放 blocking 线程，避免卡事件循环
         let jobs_dir = self.cfg.jobs_dir();
+        let live_ids2 = live_ids;
+        let mut dirs: Vec<(String, PathBuf)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&jobs_dir) {
             for e in rd.flatten() {
                 let id = e.file_name().to_string_lossy().to_string();
-                if live_ids.contains(&id) {
-                    continue; // still running
-                }
                 let path = e.path();
-                if !path.is_dir() {
+                if live_ids2.contains(&id) || !path.is_dir() {
                     continue;
                 }
-                // Any job not actively live in memory is safe to purge (finished + orphans).
+                dirs.push((id, path));
+            }
+        }
+        let jobs_dir2 = jobs_dir.clone();
+        let removed = tokio::task::spawn_blocking(move || {
+            let mut n = 0u32;
+            for (id, path) in dirs {
                 match std::fs::remove_dir_all(&path) {
                     Ok(()) => {
-                        removed += 1;
+                        n += 1;
                         info!(job = %id, "cleared finished/orphan job");
                     }
                     Err(err) => {
@@ -372,7 +487,11 @@ impl Scheduler {
                     }
                 }
             }
-        }
+            let _ = jobs_dir2;
+            n
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("清理任务目录 join: {e}")))?;
         Ok(removed)
     }
 
@@ -530,10 +649,17 @@ impl Scheduler {
         crate::reader_enhance::cache_stats(&self.cfg)
     }
 
-    pub fn clear_reader_enhance_cache(
+    pub async fn clear_reader_enhance_cache(
         &self,
     ) -> AppResult<crate::reader_enhance::EnhanceCacheClearResult> {
-        crate::reader_enhance::clear_cache(&self.cfg)
+        // 先取消在途增强，等待其退出（推理中的页写盘失败会浪费 GPU 且目录
+        // 被删），再在 blocking 线程删除目录。
+        self.cancel_reader_enhance();
+        crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || crate::reader_enhance::clear_cache(&cfg))
+            .await
+            .map_err(|e| AppError::internal(format!("清理增强缓存 join: {e}")))?
     }
 
     async fn resolve_reader_source(
@@ -708,6 +834,12 @@ impl Scheduler {
             return Ok(());
         }
         let e = self.pick_engine(kind)?;
+        // 静默回退到 mock（最近邻放大）会让用户拿到「假超分」；至少在日志与
+        // 任务消息里显式警告。desktop release 已关 allow_mock_fallback，主要
+        // 影响 CLI / 开发环境。
+        if e.status().id == "mock" && !self.cfg.use_mock_engine {
+            warn!("请求的引擎 {kind:?} 不可用，回退到模拟引擎（最近邻放大，非真实超分）");
+        }
         match e.is_available() {
             comic_engines::EngineAvailability::Ready => Ok(()),
             comic_engines::EngineAvailability::MissingBinary => Err(AppError::new(
@@ -736,10 +868,13 @@ impl Scheduler {
 
     async fn live_job_for_source(&self, source: &std::path::Path) -> Option<String> {
         let want = source_key(source);
+        self.live_active_id_for_source(&want).await
+    }
+
+    async fn live_active_id_for_source(&self, want: &str) -> Option<String> {
         let map = self.jobs.read().await;
         for (id, live) in map.iter() {
-            let m = live.manifest.read().await;
-            if is_active_state(m.state) && source_key(&m.source.path) == want {
+            if live.active.load(Ordering::Acquire) && source_key(&live.source) == want {
                 return Some(id.clone());
             }
         }
@@ -803,6 +938,28 @@ fn remap_done_from_disk(m: &mut JobManifest) {
     m.refresh_stats();
 }
 
+async fn wait_for_worker_handle(
+    live: &LiveJob,
+    timeout: Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        {
+            let mut slot = live.handle.lock().unwrap_or_else(|e| e.into_inner());
+            if let WorkerSlot::Running(h) = std::mem::replace(&mut *slot, WorkerSlot::Pending) {
+                return Some(h);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::select! {
+            _ = live.handle_ready.notified() => {}
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
+}
+
 fn is_active_state(state: JobState) -> bool {
     matches!(
         state,
@@ -858,9 +1015,11 @@ mod tests {
         let out = tmp.path().join("out");
         std::fs::create_dir_all(&out).unwrap();
 
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
-        cfg.use_mock_engine = true;
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
 
         let sched = Scheduler::new(cfg).unwrap();
@@ -908,9 +1067,11 @@ mod tests {
     #[tokio::test]
     async fn cancel_orphan_disk_job() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
-        cfg.use_mock_engine = true;
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
 
         let job_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -970,9 +1131,11 @@ mod tests {
         for i in 0..5 {
             tiny_png(&src, &format!("{i}.png"));
         }
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
-        cfg.use_mock_engine = true;
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
 
         let job_id = "resume-job-1";
@@ -1020,10 +1183,12 @@ mod tests {
         let out = tmp.path().join("out");
         std::fs::create_dir_all(&out).unwrap();
 
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
-        cfg.use_mock_engine = false;
-        cfg.allow_mock_fallback = false;
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: false,
+            allow_mock_fallback: false,
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
         let models = tmp.path().join("models");
         std::fs::create_dir_all(&models).unwrap();
@@ -1052,9 +1217,11 @@ mod tests {
         let out = tmp.path().join("out");
         std::fs::create_dir_all(&out).unwrap();
 
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
-        cfg.use_mock_engine = true;
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
         cfg.ensure_dirs().unwrap();
 
         let engine = Arc::new(MockEngine { delay_ms: 30 });
@@ -1083,5 +1250,60 @@ mod tests {
             s.state,
             s.error
         );
+    }
+
+    /// C11 回归：并发 create_job 同源时，写锁内「检查+插入」保证只有一个通过去重
+    #[tokio::test]
+    async fn concurrent_create_job_same_source_deduped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("book");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 0..8 {
+            tiny_png(&src, &format!("{i}.png"));
+        }
+        let out = tmp.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+
+        // 足够的每页延迟，保证两个请求都落在任务进行中的窗口内
+        let sched =
+            Arc::new(Scheduler::with_engine(cfg, Arc::new(MockEngine { delay_ms: 50 })).unwrap());
+        let a = sched.clone();
+        let b = sched.clone();
+        let src2 = src.clone();
+        let out2 = out.clone();
+        let (ra, rb) = tokio::join!(
+            async move { a.create_job(sample_req(&src, &out)).await },
+            async move { b.create_job(sample_req(&src2, &out2)).await },
+        );
+        let ok_count = [&ra, &rb].iter().filter(|r| r.is_ok()).count();
+        let dup_count = [&ra, &rb]
+            .iter()
+            .filter(|r| {
+                r.as_ref()
+                    .err()
+                    .is_some_and(|e| e.message.contains("已在队列中"))
+            })
+            .count();
+        assert_eq!(ok_count, 1, "只有一个请求应成功: {ra:?} {rb:?}");
+        assert_eq!(dup_count, 1, "另一个应报已在队列中: {ra:?} {rb:?}");
+        // 清理：取消残留任务，等待 worker 退出
+        let id = ra.unwrap().job_id;
+        let _ = sched.cancel_job(&id).await;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if matches!(
+                sched.get_job(&id).await.unwrap().state,
+                JobState::Cancelled | JobState::Completed | JobState::Failed
+            ) {
+                break;
+            }
+        }
     }
 }

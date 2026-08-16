@@ -61,18 +61,15 @@ pub fn find_third_party_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Candidate roots: env, cwd, executable dir, compile-time CARGO_MANIFEST_DIR chain.
+/// Candidate roots: env, packaged resources, cwd (debug only), exe dir, repo root.
+/// Release 构建禁止从 cwd 向上遍历找 third_party —— 否则可从任意工作目录
+/// 启动时注入替换过的引擎二进制（配合 checksums 校验才是完整的防线）。
 pub fn third_party_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(p) = env::var("COMIC_THIRD_PARTY") {
         out.push(PathBuf::from(p));
     }
-    if let Ok(cwd) = env::current_dir() {
-        if let Some(tp) = find_third_party_root(&cwd) {
-            out.push(tp);
-        }
-        out.push(cwd.join("third_party"));
-    }
+    // 打包资源优先
     if let Ok(exe) = env::current_exe() {
         if let Some(parent) = exe.parent() {
             // app bundle: Contents/MacOS -> Resources
@@ -81,16 +78,33 @@ pub fn third_party_candidates() -> Vec<PathBuf> {
             out.push(parent.join("../Resources/resources"));
             out.push(parent.join("../Resources/third_party"));
             out.push(parent.join("../../third_party"));
+        }
+    }
+    if cfg!(debug_assertions) {
+        // 开发便利：允许 cwd 下的 third_party（仅 debug 构建）
+        if let Ok(cwd) = env::current_dir() {
+            if let Some(tp) = find_third_party_root(&cwd) {
+                out.push(tp);
+            }
+            out.push(cwd.join("third_party"));
+        }
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Some(parent) = exe.parent() {
             if let Some(tp) = find_third_party_root(parent) {
                 out.push(tp);
             }
         }
     }
-    // workspace relative from this crate at compile time
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/comic-engines -> repo root
-    if let Some(root) = manifest.parent().and_then(|p| p.parent()) {
-        out.push(root.join("third_party"));
+    // workspace relative from this crate at compile time — dev only, so a
+    // release binary never trusts a repo checkout on the machine that built it
+    #[cfg(debug_assertions)]
+    {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // crates/comic-engines -> repo root
+        if let Some(root) = manifest.parent().and_then(|p| p.parent()) {
+            out.push(root.join("third_party"));
+        }
     }
     out
 }
@@ -149,6 +163,8 @@ pub fn resolve_waifu2x_paths(
 
 fn waifu2x_coreml_roots() -> Vec<PathBuf> {
     let mut dirs = third_party_candidates();
+    // 与 third_party_candidates 对齐：release 禁止从 cwd 加载模型（模型等同可执行代码）
+    #[cfg(debug_assertions)]
     dirs.insert(0, PathBuf::from("third_party"));
     let mut roots = Vec::new();
     for tp in dirs {
@@ -223,6 +239,7 @@ pub fn resolve_realesrgan_coreml_model() -> Option<PathBuf> {
         "realesrgan_anime4x.mlmodel",
     ];
     let mut dirs = third_party_candidates();
+    #[cfg(debug_assertions)]
     dirs.insert(0, PathBuf::from("third_party"));
     for tp in dirs {
         for root in [
@@ -322,10 +339,8 @@ pub fn expected_binary_sha256(third_party: &Path) -> Option<String> {
         let mut parts = line.split_whitespace();
         let sum = parts.next()?;
         let path = parts.next()?;
-        if path == needle
-            || path.ends_with(bin_name)
-            || (path.ends_with(&format!("/{bin_name}")) && path.contains(triple))
-        {
+        // 只接受本 host triple 的精确路径，避免匹配到其它平台的同名行
+        if path == needle || path.ends_with(&format!("/{triple}/{bin_name}")) {
             return Some(sum.to_string());
         }
     }

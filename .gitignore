@@ -71,3 +71,7 @@ third_party/models-cunet/**
 .env
 .env.*
 !.env.example
+
+# Working notes (local only, not part of releases)
+docs/
+FIX_PLAN.md

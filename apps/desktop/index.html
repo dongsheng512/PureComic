@@ -4,17 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PureComic</title>
-    <script>
-      try {
-        var light = localStorage.getItem("comic.theme") === "light";
-        if (light) {
-          document.documentElement.classList.remove("dark");
-          document.documentElement.style.backgroundColor = "#F5F5F7";
-        } else {
-          document.documentElement.style.backgroundColor = "#16171C";
-        }
-      } catch (_) {}
-    </script>
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

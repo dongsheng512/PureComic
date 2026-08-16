@@ -128,17 +128,12 @@ download_asset() {
   mkdir -p "$CACHE" "$BIN_ROOT/$target" "$MODELS_DEST"
   zip_path="$CACHE/${tag}-${name}"
   primary="https://github.com/nihui/waifu2x-ncnn-vulkan/releases/download/${tag}/${name}"
-  # Optional mirror prefix, e.g. https://ghfast.top/  or https://mirror.ghproxy.com/
+  # 镜像只能显式 opt-in（COMIC_GITHUB_MIRROR），不做默认第三方镜像回退：
+  # 默认镜像不可审计，下载的内容没有与官方 release asset 的哈希比对就被打进安装包
   mirrors=()
   if [[ -n "${COMIC_GITHUB_MIRROR:-}" ]]; then
     mirrors+=("${COMIC_GITHUB_MIRROR}")
   fi
-  # Common fallbacks when github.com is slow/blocked
-  mirrors+=(
-    "https://ghfast.top/"
-    "https://mirror.ghproxy.com/"
-    "https://ghproxy.net/"
-  )
 
   echo "==> [${target}] tag=${tag}"
   echo "    asset=${name}"
@@ -255,7 +250,8 @@ download_asset() {
   echo "    sha256: $sum"
 
   if [[ "$SKIP_VERIFY" -eq 0 ]]; then
-    "$SCRIPT_DIR/verify-waifu2x.sh" --target "$target" || true
+    # 校验失败必须中断（此前 || true 会把损坏的引擎原样打进安装包）
+    "$SCRIPT_DIR/verify-waifu2x.sh" --target "$target"
   fi
 }
 

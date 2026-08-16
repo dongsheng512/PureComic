@@ -95,6 +95,10 @@ export type CreateJobResult = {
   pagesDone?: number;
   pagesTotal?: number;
   nextPage?: number;
+  /** 归一化后的实际生效参数（Real-CUGAN 会改写 scale/noise） */
+  actualScale?: number;
+  actualNoise?: number;
+  actualCuganModel?: string;
 };
 
 export type LibraryEntry = {
@@ -138,7 +142,7 @@ export type ReaderPageMeta = {
   index: number;
   name: string;
   status: string;
-  kind: "original" | "enhanced" | "missing" | string;
+  kind: "original" | "enhanced" | "missing" | (string & {});
 };
 
 export type ReaderState = {
@@ -154,7 +158,7 @@ export type ReaderState = {
 export type ReaderPageFile = {
   index: number;
   name: string;
-  kind: "original" | "enhanced" | "missing" | string;
+  kind: "original" | "enhanced" | "missing" | (string & {});
   path: string;
 };
 

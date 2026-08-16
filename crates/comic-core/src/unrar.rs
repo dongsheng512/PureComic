@@ -179,8 +179,10 @@ mod tests {
 
     #[test]
     fn missing_unrar_is_explicit() {
-        let mut cfg = AppConfig::default();
-        cfg.unrar_bin = Some(PathBuf::from("/no/such/unrar-binary"));
+        let cfg = AppConfig {
+            unrar_bin: Some(PathBuf::from("/no/such/unrar-binary")),
+            ..Default::default()
+        };
         // Isolate PATH so we don't accidentally find a system unrar
         let err = require_unrar(&cfg).unwrap_err();
         assert_eq!(err.code, ErrorCode::UnrarMissing);

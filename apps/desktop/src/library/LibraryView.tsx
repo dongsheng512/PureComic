@@ -1,9 +1,10 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { comicFileFilter } from "../formats";
 import type { Messages } from "../i18n";
 import type { LibraryEntry, LibraryScanPreview } from "../types";
-import { loadReaderPref } from "../reader/prefs";
+import { loadAllReaderPrefs, prefKey } from "../reader/prefs";
 import {
   loadImportSettings,
   loadLibraryFilter,
@@ -36,6 +37,8 @@ type Props = {
   onEnhance: (entry: LibraryEntry) => void;
   onRemove: (entry: LibraryEntry) => void;
   onImportSettingsChange?: (s: LibraryImportSettings) => void;
+  /** 阅读器关闭或偏好变更时递增，避免进度 memo 只跟 entries 走 */
+  prefsRev?: number;
 };
 
 function coverUrl(path?: string, cacheKey?: string): string | null {
@@ -69,12 +72,7 @@ function kindLabel(kind: string): string {
   }
 }
 
-function pageProgress(e: LibraryEntry): number {
-  const pref = loadReaderPref(e.path);
-  return e.lastReadPage || pref.pageIndex || 0;
-}
-
-export function LibraryView({
+function LibraryView({
   entries,
   dragOver,
   scanning,
@@ -91,6 +89,7 @@ export function LibraryView({
   onEnhance,
   onRemove,
   onImportSettingsChange,
+  prefsRev = 0,
 }: Props) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<LibrarySort>(loadLibrarySort);
@@ -162,6 +161,18 @@ export function LibraryView({
     });
   };
 
+  /** 一次性解析全部阅读偏好，避免排序比较器/过滤/渲染中反复 JSON.parse */
+  const progressMap = useMemo(() => {
+    void prefsRev;
+    const all = loadAllReaderPrefs();
+    const map = new Map<string, number>();
+    for (const e of entries) {
+      map.set(e.path, e.lastReadPage || all.get(prefKey(e.path))?.pageIndex || 0);
+    }
+    return map;
+  }, [entries, prefsRev]);
+  const progressOf = (e: LibraryEntry): number => progressMap.get(e.path) ?? 0;
+
   const processed = useMemo(() => {
     let list = [...entries];
     const q = query.trim().toLowerCase();
@@ -169,23 +180,24 @@ export function LibraryView({
       list = list.filter((e) => e.title.toLowerCase().includes(q) || e.path.toLowerCase().includes(q));
     }
     if (filter === "reading") {
-      list = list.filter((e) => pageProgress(e) > 0 && !e.missing);
+      list = list.filter((e) => progressOf(e) > 0 && !e.missing);
     } else if (filter === "unread") {
-      list = list.filter((e) => pageProgress(e) <= 0 && !e.missing);
+      list = list.filter((e) => progressOf(e) <= 0 && !e.missing);
     } else if (filter === "missing") {
       list = list.filter((e) => e.missing);
     }
     list.sort((a, b) => {
       if (sort === "title") return a.title.localeCompare(b.title, "zh");
       if (sort === "added") return (b.addedAt || "").localeCompare(a.addedAt || "");
-      if (sort === "progress") return pageProgress(b) - pageProgress(a);
+      if (sort === "progress") return progressOf(b) - progressOf(a);
       // recent: lastOpenedAt then addedAt
       const ao = a.lastOpenedAt || a.addedAt || "";
       const bo = b.lastOpenedAt || b.addedAt || "";
       return bo.localeCompare(ao);
     });
     return list;
-  }, [entries, query, filter, sort]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, query, filter, sort, progressMap]);
 
   const hasBooks = entries.length > 0;
   const emptyFiltered = processed.length === 0;
@@ -487,7 +499,7 @@ export function LibraryView({
         <ul className="min-h-0 flex-1 space-y-1 overflow-auto pb-4">
           {processed.map((e) => {
             const cover = coverUrl(e.coverPath, e.id);
-            const page = pageProgress(e);
+            const page = progressOf(e);
             return (
               <li key={e.id}>
                 <div
@@ -504,6 +516,7 @@ export function LibraryView({
                         <img
                           src={cover}
                           alt=""
+                          loading="lazy"
                           className="h-full w-full object-cover"
                           onError={(ev) => {
                             (ev.target as HTMLImageElement).style.display = "none";
@@ -544,7 +557,7 @@ export function LibraryView({
         <ul className="grid grid-cols-3 gap-3 overflow-auto pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
           {processed.map((e) => {
             const cover = coverUrl(e.coverPath, e.id);
-            const page = pageProgress(e);
+            const page = progressOf(e);
             return (
               <li key={e.id}>
                 <article className={`card group relative overflow-hidden ${e.missing ? "opacity-70" : ""}`}>
@@ -559,6 +572,7 @@ export function LibraryView({
                         <img
                           src={cover}
                           alt=""
+                          loading="lazy"
                           decoding="async"
                           className="h-full w-full object-cover"
                           onError={(ev) => {
@@ -799,6 +813,10 @@ function ScanPicker({
   );
 }
 
+/** memo：App 侧回调保持引用稳定时，轮询刷新不再导致整屏书库重渲染 */
+const LibraryViewMemo = memo(LibraryView);
+export { LibraryViewMemo as LibraryView };
+
 export async function pickComicFile(): Promise<string | null> {
   const files = await pickComicFiles();
   return files[0] ?? null;
@@ -808,12 +826,7 @@ export async function pickComicFiles(): Promise<string[]> {
   const selected = await open({
     multiple: true,
     directory: false,
-    filters: [
-      {
-        name: "Comic / Ebook",
-        extensions: ["cbz", "cbr", "zip", "rar", "epub", "mobi", "azw", "azw3"],
-      },
-    ],
+    filters: [comicFileFilter("Comic / Ebook")],
   });
   if (Array.isArray(selected)) return selected.filter((p): p is string => typeof p === "string");
   if (typeof selected === "string") return [selected];

@@ -7,11 +7,22 @@ use crate::{
 use async_trait::async_trait;
 use image::RgbImage;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const SCALE: u32 = 4;
+
+/// Batch-job input cap: bigger pages are downscaled before inference so the
+/// 4× output buffer stays bounded (2560² → 10240² RGB8 ≈ 315MB).
+const ENGINE_INPUT_CAP: u32 = 2560;
+
+/// 串行化「load + 整批推理」：C 侧模型是进程级单例，
+/// 并发批次会把全局模型换掉，导致另一批结果错误。
+static COREML_BATCH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(target_os = "macos")]
 mod ffi {
@@ -71,10 +82,30 @@ fn open_rgb(input: &Path) -> Result<RgbImage, EngineError> {
         .map_err(|e| EngineError::Image(e.to_string()))?
         .decode()
         .map_err(|e| EngineError::Image(e.to_string()))?;
+    let dynimg = if dynimg.width().max(dynimg.height()) > ENGINE_INPUT_CAP {
+        dynimg.resize(
+            ENGINE_INPUT_CAP,
+            ENGINE_INPUT_CAP,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        dynimg
+    };
     Ok(dynimg.to_rgb8())
 }
 
-fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(), EngineError> {
+/// Output format decided by the request: PNG (lossless intermediate) unless
+/// the caller explicitly asked for JPEG (reader cache path).
+fn wants_png(params: &crate::EnhanceParams) -> bool {
+    !matches!(params.output_format.as_deref(), Some("jpg") | Some("jpeg"))
+}
+
+fn run_file(
+    input: &Path,
+    output: &Path,
+    png: bool,
+    cancel: &CancellationToken,
+) -> Result<(), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
@@ -91,13 +122,27 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         .checked_mul(out_h as usize)
         .and_then(|n| n.checked_mul(3))
         .ok_or_else(|| EngineError::Image("输出尺寸过大".into()))?;
+    let cap_i32 = i32::try_from(cap).map_err(|_| EngineError::Image("输出尺寸过大".into()))?;
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut out_buf = vec![0u8; cap];
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut ow = 0i32;
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut oh = 0i32;
-    let cancel_flag: i32 = if cancel.is_cancelled() { 1 } else { 0 };
+    // 共享取消标志：C 侧逐 tile 轮询读取，取消后由 watcher 置 1
+    let cancel_flag = Arc::new(AtomicI32::new(0));
+    if cancel.is_cancelled() {
+        cancel_flag.store(1, Ordering::Release);
+    }
+    let flag = cancel_flag.clone();
+    let token = cancel.clone();
+    let watcher = match tokio::runtime::Handle::try_current() {
+        Ok(_) => Some(tokio::spawn(async move {
+            token.cancelled().await;
+            flag.store(1, Ordering::Release);
+        })),
+        Err(_) => None,
+    };
 
     #[cfg(target_os = "macos")]
     let rc = unsafe {
@@ -106,10 +151,10 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
             src_w as i32,
             src_h as i32,
             out_buf.as_mut_ptr(),
-            cap as i32,
+            cap_i32,
             &mut ow,
             &mut oh,
-            &cancel_flag,
+            cancel_flag.as_ptr() as *const std::os::raw::c_int,
         )
     };
     #[cfg(not(target_os = "macos"))]
@@ -117,6 +162,9 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         let _ = (&out_buf, &ow, &oh, &cancel_flag, &rgb);
         -1
     };
+    if let Some(w) = watcher {
+        w.abort();
+    }
 
     if cancel.is_cancelled() || rc == -9 {
         return Err(EngineError::Cancelled);
@@ -128,6 +176,12 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
     }
     let ow = if ow > 0 { ow as u32 } else { out_w };
     let oh = if oh > 0 { oh as u32 } else { out_h };
+    // C 侧返回的尺寸必须落在预期缓冲内，否则按失败处理而非组装坏图
+    if ow > out_w || oh > out_h || (ow as u64).saturating_mul(oh as u64) * 3 > cap as u64 {
+        return Err(EngineError::Image(format!(
+            "Core ML 返回异常输出尺寸 {ow}x{oh}（预期 ≤ {out_w}x{out_h}）"
+        )));
+    }
     out_buf.truncate(ow as usize * oh as usize * 3);
     let cropped = RgbImage::from_raw(ow, oh, out_buf)
         .ok_or_else(|| EngineError::Image("无法组装输出".into()))?;
@@ -135,7 +189,11 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| EngineError::Io(e.to_string()))?;
     }
-    {
+    if png {
+        cropped
+            .save_with_format(output, image::ImageFormat::Png)
+            .map_err(|e| EngineError::Image(e.to_string()))?;
+    } else {
         use std::io::BufWriter;
         let file = std::fs::File::create(output).map_err(|e| EngineError::Io(e.to_string()))?;
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), 94);
@@ -152,6 +210,7 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         h = src_h,
         out_w = ow,
         out_h = oh,
+        png,
         ms = t0.elapsed().as_millis() as u64,
         "realesrgan-coreml page"
     );
@@ -219,13 +278,21 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
         req: EnhanceBatchRequest,
         cancel: CancellationToken,
     ) -> Result<EnhanceBatchResult, EngineError> {
+        let _guard = tokio::select! {
+            g = COREML_BATCH_LOCK.lock() => g,
+            _ = cancel.cancelled() => return Err(EngineError::Cancelled),
+        };
+        let png = match &req {
+            EnhanceBatchRequest::SingleFile { params, .. }
+            | EnhanceBatchRequest::Directory { params, .. } => wants_png(params),
+        };
         self.load()?;
         match req {
             EnhanceBatchRequest::SingleFile { input, output, .. } => {
                 let inp = input.clone();
                 let outp = output.clone();
                 let cancel2 = cancel.clone();
-                tokio::task::spawn_blocking(move || run_file(&inp, &outp, &cancel2))
+                tokio::task::spawn_blocking(move || run_file(&inp, &outp, png, &cancel2))
                     .await
                     .map_err(|e| EngineError::Process(e.to_string()))??;
                 Ok(EnhanceBatchResult {
@@ -248,6 +315,7 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
                     .filter(|p| p.is_file())
                     .collect();
                 entries.sort();
+                let out_ext = if png { "png" } else { "jpg" };
                 for path in entries {
                     if cancel.is_cancelled() {
                         return Err(EngineError::Cancelled);
@@ -256,11 +324,11 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
                         Some(n) => n.to_owned(),
                         None => continue,
                     };
-                    let dest = output_dir.join(name).with_extension("jpg");
+                    let dest = output_dir.join(name).with_extension(out_ext);
                     let p2 = path.clone();
                     let d2 = dest.clone();
                     let c2 = cancel.clone();
-                    match tokio::task::spawn_blocking(move || run_file(&p2, &d2, &c2)).await {
+                    match tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, &c2)).await {
                         Ok(Ok(())) => ok += 1,
                         Ok(Err(e)) => {
                             warn!(error = %e, file = %path.display(), "esrgan page failed");
@@ -272,7 +340,7 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
                         }
                     }
                 }
-                info!(ok, failed, "realesrgan-coreml directory done");
+                info!(ok, failed, png, "realesrgan-coreml directory done");
                 Ok(EnhanceBatchResult {
                     pages_ok: ok,
                     pages_failed: failed,
@@ -311,7 +379,7 @@ mod tests {
         image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
         let engine = RealEsrganCoreMlEngine::new(model);
         engine.load().unwrap();
-        run_file(&inp, &out, &CancellationToken::new()).unwrap();
+        run_file(&inp, &out, false, &CancellationToken::new()).unwrap();
         let got = image::open(&out).unwrap().to_rgb8();
         assert_eq!(got.dimensions(), (320, 400));
         let mut live = 0u32;
@@ -341,7 +409,7 @@ mod tests {
         let engine = RealEsrganCoreMlEngine::new(model);
         engine.load().unwrap();
         let t = Instant::now();
-        run_file(&small, &out, &CancellationToken::new()).unwrap();
+        run_file(&small, &out, false, &CancellationToken::new()).unwrap();
         eprintln!(
             "esrgan one-tile {}x{} -> {:?} {:?}",
             image::image_dimensions(&small).unwrap().0,
@@ -349,5 +417,114 @@ mod tests {
             image::image_dimensions(&out).unwrap(),
             t.elapsed()
         );
+    }
+
+    /// 接缝探针：600×600 高纹理页 → 2400×2400。tile 原点 0 与 88（输入空间），
+    /// 旧实现（pad 8 不裁边）接缝在输出 x=352（后写 tile 的低上下文带）；
+    /// 新实现（pad 10 裁 40px）在 352/392/2048 处都不应出现列差分尖峰。
+    #[test]
+    #[ignore]
+    fn seam_probe_600() {
+        let model = model_path();
+        if !model.is_file() {
+            return;
+        }
+        let tag = std::env::var("COMIC_ESR_PROBE_TAG").unwrap_or_else(|_| "run".into());
+        let dir = tempfile::tempdir().unwrap();
+        let inp = dir.path().join("in.png");
+        let mut img = RgbImage::new(600, 600);
+        let mut s: u32 = 0x243f6a88;
+        for y in 0..600u32 {
+            for x in 0..600u32 {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                let g = ((x * 3 + y * 5) % 173) as u8;
+                let check = if ((x / 3 + y / 3) & 1) == 0 {
+                    22u8
+                } else {
+                    0u8
+                };
+                let line = if x % 29 == 0 || y % 31 == 0 {
+                    40u8
+                } else {
+                    0u8
+                };
+                let r = g.saturating_add(check).saturating_sub(line);
+                let b = (255u32 - g as u32).min(255) as u8;
+                img.put_pixel(x, y, Rgb([r, g, b.saturating_add(check / 2)]));
+            }
+        }
+        image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
+        let out = dir.path().join("out.png");
+        let engine = RealEsrganCoreMlEngine::new(model);
+        engine.load().unwrap();
+        run_file(&inp, &out, true, &CancellationToken::new()).unwrap();
+        let got = image::open(&out).unwrap().to_rgb8();
+        assert_eq!(got.dimensions(), (2400, 2400));
+        let (w, h) = got.dimensions();
+        let mut col: Vec<f64> = vec![0.0; w as usize];
+        for x in 1..w {
+            let mut acc = 0u64;
+            for y in 0..h {
+                let p0 = got.get_pixel(x - 1, y);
+                let p1 = got.get_pixel(x, y);
+                for k in 0..3 {
+                    acc += ((p0.0[k] as i64) - (p1.0[k] as i64)).unsigned_abs();
+                }
+            }
+            col[x as usize] = acc as f64 / (h as f64 * 3.0);
+        }
+        let mut row: Vec<f64> = vec![0.0; h as usize];
+        for y in 1..h {
+            let mut acc = 0u64;
+            for x in 0..w {
+                let p0 = got.get_pixel(x, y - 1);
+                let p1 = got.get_pixel(x, y);
+                for k in 0..3 {
+                    acc += ((p0.0[k] as i64) - (p1.0[k] as i64)).unsigned_abs();
+                }
+            }
+            row[y as usize] = acc as f64 / (w as f64 * 3.0);
+        }
+        let median = |v: &[f64]| -> f64 {
+            let mut c: Vec<f64> = v.iter().copied().filter(|x| *x > 0.0).collect();
+            c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if c.is_empty() {
+                0.0
+            } else {
+                c[c.len() / 2]
+            }
+        };
+        let mc = median(&col);
+        let mr = median(&row);
+        for (x, label) in [
+            (352usize, "old_seam(352)"),
+            (392, "pad10_boundary(392)"),
+            (400, "pad12_boundary(400)"),
+            (2048, "old_tile0_edge(2048)"),
+            (2008, "new_crop_edge(2008)"),
+        ] {
+            eprintln!(
+                "[esr probe {tag}] col[{x}]={:.3} median={mc:.3} ratio={:.3} ({label})",
+                col[x],
+                col[x] / mc.max(1e-6)
+            );
+        }
+        for (y, label) in [
+            (352usize, "old_seam_row(352)"),
+            (392, "pad10_boundary_row(392)"),
+            (400, "pad12_boundary_row(400)"),
+        ] {
+            eprintln!(
+                "[esr probe {tag}] row[{y}]={:.3} median={mr:.3} ratio={:.3} ({label})",
+                row[y],
+                row[y] / mr.max(1e-6)
+            );
+        }
+        eprintln!(
+            "[esr probe {tag}] col_median={mc:.3} row_median={mr:.3} dims={}x{}",
+            w, h
+        );
+        got.save(PathBuf::from(format!("/tmp/esr_probe_out_{tag}.png")))
+            .ok();
     }
 }

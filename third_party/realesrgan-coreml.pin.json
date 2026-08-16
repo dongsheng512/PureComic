@@ -1,0 +1,11 @@
+{
+  "comment": "john-rocky Real-ESRGAN Anime 4× Core ML (fp32, Image I/O). Hash from local copy after fetch-realesrgan-coreml.sh. fp16 swap is R2-C and is not this file.",
+  "models": [
+    {
+      "name": "RealESRGAN_x4plus_anime_6B.mlmodel",
+      "url": "https://drive.google.com/uc?export=download&id=1qXdLx46Lpqya7Txc5Wvgkd2Dqlnqm3Qm",
+      "sha256": "77593412859ed6b869f78398acc150f51226df17445bf4b516119f781e8f2eab",
+      "bytes": 17888442
+    }
+  ]
+}

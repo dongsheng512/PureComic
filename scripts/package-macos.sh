@@ -23,7 +23,8 @@ fi
 
 cd "$DESKTOP"
 if [[ ! -d node_modules ]]; then
-  npm install
+  # lock 文件已入库：用 npm ci 保证可复现
+  npm ci
 fi
 
 echo "building $RUST_TARGET (app + dmg)"

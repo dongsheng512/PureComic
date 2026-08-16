@@ -7,11 +7,22 @@ use crate::{
 use async_trait::async_trait;
 use image::RgbImage;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const SCALE: u32 = 2;
+
+/// Batch-job input cap: bigger pages are downscaled before inference so the
+/// 2× output buffer stays bounded (4096² → 8192² RGB8 ≈ 201MB).
+const ENGINE_INPUT_CAP: u32 = 4096;
+
+/// 串行化「load + 整批推理」：C 侧模型是进程级单例，
+/// 并发批次用不同 noise 时后者会把全局模型换掉，导致前批结果错误。
+static COREML_BATCH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(target_os = "macos")]
 mod ffi {
@@ -74,10 +85,30 @@ fn open_rgb(input: &Path) -> Result<RgbImage, EngineError> {
         .map_err(|e| EngineError::Image(e.to_string()))?
         .decode()
         .map_err(|e| EngineError::Image(e.to_string()))?;
+    let dynimg = if dynimg.width().max(dynimg.height()) > ENGINE_INPUT_CAP {
+        dynimg.resize(
+            ENGINE_INPUT_CAP,
+            ENGINE_INPUT_CAP,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        dynimg
+    };
     Ok(dynimg.to_rgb8())
 }
 
-fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(), EngineError> {
+/// Output format decided by the request: PNG (lossless intermediate) unless
+/// the caller explicitly asked for JPEG (reader cache path).
+fn wants_png(params: &crate::EnhanceParams) -> bool {
+    !matches!(params.output_format.as_deref(), Some("jpg") | Some("jpeg"))
+}
+
+fn run_file(
+    input: &Path,
+    output: &Path,
+    png: bool,
+    cancel: &CancellationToken,
+) -> Result<(), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
@@ -95,13 +126,27 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         .checked_mul(out_h as usize)
         .and_then(|n| n.checked_mul(3))
         .ok_or_else(|| EngineError::Image("输出尺寸过大".into()))?;
+    let cap_i32 = i32::try_from(cap).map_err(|_| EngineError::Image("输出尺寸过大".into()))?;
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut out_buf = vec![0u8; cap];
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut ow = 0i32;
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut oh = 0i32;
-    let cancel_flag: i32 = if cancel.is_cancelled() { 1 } else { 0 };
+    // 共享取消标志：C 侧逐 tile 轮询读取，取消后由 watcher 置 1
+    let cancel_flag = Arc::new(AtomicI32::new(0));
+    if cancel.is_cancelled() {
+        cancel_flag.store(1, Ordering::Release);
+    }
+    let flag = cancel_flag.clone();
+    let token = cancel.clone();
+    let watcher = match tokio::runtime::Handle::try_current() {
+        Ok(_) => Some(tokio::spawn(async move {
+            token.cancelled().await;
+            flag.store(1, Ordering::Release);
+        })),
+        Err(_) => None,
+    };
 
     #[cfg(target_os = "macos")]
     let rc = unsafe {
@@ -110,10 +155,10 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
             src_w as i32,
             src_h as i32,
             out_buf.as_mut_ptr(),
-            cap as i32,
+            cap_i32,
             &mut ow,
             &mut oh,
-            &cancel_flag,
+            cancel_flag.as_ptr() as *const std::os::raw::c_int,
         )
     };
     #[cfg(not(target_os = "macos"))]
@@ -121,6 +166,9 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         let _ = (&out_buf, &ow, &oh, &cancel_flag, &rgb);
         -1
     };
+    if let Some(w) = watcher {
+        w.abort();
+    }
 
     if cancel.is_cancelled() || rc == -9 {
         return Err(EngineError::Cancelled);
@@ -130,6 +178,12 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
     }
     let ow = if ow > 0 { ow as u32 } else { out_w };
     let oh = if oh > 0 { oh as u32 } else { out_h };
+    // C 侧返回的尺寸必须落在预期缓冲内，否则按失败处理而非组装坏图
+    if ow > out_w || oh > out_h || (ow as u64).saturating_mul(oh as u64) * 3 > cap as u64 {
+        return Err(EngineError::Image(format!(
+            "Core ML 返回异常输出尺寸 {ow}x{oh}（预期 ≤ {out_w}x{out_h}）"
+        )));
+    }
     let expect = ow as usize * oh as usize * 3;
     out_buf.truncate(expect);
     let cropped = RgbImage::from_raw(ow, oh, out_buf)
@@ -138,7 +192,11 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| EngineError::Io(e.to_string()))?;
     }
-    {
+    if png {
+        cropped
+            .save_with_format(output, image::ImageFormat::Png)
+            .map_err(|e| EngineError::Image(e.to_string()))?;
+    } else {
         use std::io::BufWriter;
         let file = std::fs::File::create(output).map_err(|e| EngineError::Io(e.to_string()))?;
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), 96);
@@ -155,6 +213,7 @@ fn run_file(input: &Path, output: &Path, cancel: &CancellationToken) -> Result<(
         h = src_h,
         out_w = ow,
         out_h = oh,
+        png,
         ms = t0.elapsed().as_millis() as u64,
         "waifu2x-coreml page"
     );
@@ -220,9 +279,17 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
         req: EnhanceBatchRequest,
         cancel: CancellationToken,
     ) -> Result<EnhanceBatchResult, EngineError> {
+        let _guard = tokio::select! {
+            g = COREML_BATCH_LOCK.lock() => g,
+            _ = cancel.cancelled() => return Err(EngineError::Cancelled),
+        };
         let noise = match &req {
             EnhanceBatchRequest::SingleFile { params, .. }
             | EnhanceBatchRequest::Directory { params, .. } => params.noise_level,
+        };
+        let png = match &req {
+            EnhanceBatchRequest::SingleFile { params, .. }
+            | EnhanceBatchRequest::Directory { params, .. } => wants_png(params),
         };
         self.load_for_noise(noise)?;
         match req {
@@ -230,7 +297,7 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
                 let inp = input.clone();
                 let outp = output.clone();
                 let cancel2 = cancel.clone();
-                tokio::task::spawn_blocking(move || run_file(&inp, &outp, &cancel2))
+                tokio::task::spawn_blocking(move || run_file(&inp, &outp, png, &cancel2))
                     .await
                     .map_err(|e| EngineError::Process(e.to_string()))??;
                 Ok(EnhanceBatchResult {
@@ -253,6 +320,7 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
                     .filter(|p| p.is_file())
                     .collect();
                 entries.sort();
+                let out_ext = if png { "png" } else { "jpg" };
                 for path in entries {
                     if cancel.is_cancelled() {
                         return Err(EngineError::Cancelled);
@@ -261,11 +329,11 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
                         Some(n) => n.to_owned(),
                         None => continue,
                     };
-                    let dest = output_dir.join(name).with_extension("jpg");
+                    let dest = output_dir.join(name).with_extension(out_ext);
                     let p2 = path.clone();
                     let d2 = dest.clone();
                     let c2 = cancel.clone();
-                    match tokio::task::spawn_blocking(move || run_file(&p2, &d2, &c2)).await {
+                    match tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, &c2)).await {
                         Ok(Ok(())) => ok += 1,
                         Ok(Err(e)) => {
                             warn!(error = %e, file = %path.display(), "coreml page failed");
@@ -277,7 +345,7 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
                         }
                     }
                 }
-                info!(ok, failed, "waifu2x-coreml directory done");
+                info!(ok, failed, png, "waifu2x-coreml directory done");
                 Ok(EnhanceBatchResult {
                     pages_ok: ok,
                     pages_failed: failed,
@@ -316,7 +384,7 @@ mod tests {
         image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
         let engine = Waifu2xCoreMlEngine::new(model);
         engine.load_for_noise(2).unwrap();
-        run_file(&inp, &out, &CancellationToken::new()).unwrap();
+        run_file(&inp, &out, false, &CancellationToken::new()).unwrap();
         let got = image::open(&out).unwrap().to_rgb8();
         assert_eq!(got.dimensions(), (400, 560));
         let mut live = 0u32;
@@ -339,9 +407,183 @@ mod tests {
         let engine = Waifu2xCoreMlEngine::new(model);
         engine.load_for_noise(2).unwrap();
         let t = Instant::now();
-        run_file(&inp, &out, &CancellationToken::new()).unwrap();
+        run_file(&inp, &out, false, &CancellationToken::new()).unwrap();
         eprintln!("bench_real_page {:?}", t.elapsed());
         let got = image::open(&out).unwrap();
         eprintln!("bench_out {}x{}", got.width(), got.height());
+    }
+
+    /// A/B 支撑：合成 1200×1600 测试页（带渐变底、棋盘、细线、文字块），写 /tmp/w2x_ab_in.png。
+    fn ensure_ab_page() -> PathBuf {
+        let inp = PathBuf::from("/tmp/w2x_ab_in.png");
+        if inp.is_file() {
+            return inp;
+        }
+        let (w, h) = (1200u32, 1600u32);
+        let mut img = RgbImage::new(w, h);
+        let mut s: u32 = 0x9e3779b9;
+        for y in 0..h {
+            for x in 0..w {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                let n = (s >> 24) as u8;
+                let g = ((x * 97 + y * 61) / 7 % 200) as u8;
+                let check = if ((x / 4 + y / 4) & 1) == 0 {
+                    24u8
+                } else {
+                    0u8
+                };
+                let line = if x % 41 == 0 || y % 47 == 0 {
+                    46u8
+                } else {
+                    0u8
+                };
+                let text = if (x / 90 + y / 110) % 2 == 0 && (x % 12) < 9 && (y % 16) < 12 {
+                    38u8
+                } else {
+                    0u8
+                };
+                let r = g
+                    .saturating_add(check)
+                    .saturating_sub(line)
+                    .saturating_sub(text);
+                let gg = g.saturating_add(check / 2);
+                let b = (n / 4).saturating_add(60);
+                img.put_pixel(x, y, Rgb([r, gg, b]));
+            }
+        }
+        image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
+        inp
+    }
+
+    /// 仅测 C 侧推理耗时（不含解码/编码）。调用方需先 load。
+    fn infer_w2x(rgb: &RgbImage) -> std::time::Duration {
+        let (w, h) = rgb.dimensions();
+        let out_w = w * SCALE;
+        let out_h = h * SCALE;
+        let cap = (out_w as usize) * (out_h as usize) * 3;
+        let mut buf = vec![0u8; cap];
+        let mut ow = 0i32;
+        let mut oh = 0i32;
+        let t = Instant::now();
+        let rc = unsafe {
+            ffi::comic_w2x_coreml_enhance_rgb(
+                rgb.as_raw().as_ptr(),
+                w as i32,
+                h as i32,
+                buf.as_mut_ptr(),
+                cap as i32,
+                &mut ow,
+                &mut oh,
+                std::ptr::null(),
+            )
+        };
+        let d = t.elapsed();
+        assert_eq!(rc, 0, "infer failed rc={rc}");
+        assert_eq!((ow as u32, oh as u32), (out_w, out_h));
+        d
+    }
+
+    /// A/B：整页与每 tile 均摊耗时。配置由 .m 读环境变量（COMIC_W2X_FASTPRED /
+    /// COMIC_W2X_LOWPREC = 0 关闭），输出工件名由 COMIC_W2X_AB_TAG 决定。
+    #[test]
+    #[ignore]
+    fn ab_timed_page() {
+        let model = model_path();
+        if !model.is_file() {
+            return;
+        }
+        let tag = std::env::var("COMIC_W2X_AB_TAG").unwrap_or_else(|_| "run".into());
+        let inp = ensure_ab_page();
+        let out = PathBuf::from(format!("/tmp/w2x_ab_out_{tag}.png"));
+        let engine = Waifu2xCoreMlEngine::new(model);
+        let t0 = Instant::now();
+        engine.load_for_noise(2).unwrap();
+        eprintln!("[ab {tag}] load+compile {:?}", t0.elapsed());
+        // 先产出一张无损 PNG 工件供 ab_compare_outputs 比对
+        run_file(&inp, &out, true, &CancellationToken::new()).unwrap();
+        let rgb = image::open(&inp).unwrap().to_rgb8();
+        // 1200×1600：num_w=8 num_h=11 + 边条 11+8 + 角 1 = 108 tiles
+        const TILES: f64 = 108.0;
+        for i in 1..=3 {
+            let d = infer_w2x(&rgb);
+            eprintln!(
+                "[ab {tag}] infer{i} page_ms={} per_tile_ms={:.3}",
+                d.as_millis(),
+                d.as_secs_f64() * 1000.0 / TILES
+            );
+        }
+    }
+
+    /// 模型级对比支撑（R2-B 数值证据）：加载 COMIC_W2X_MODEL 指定模型
+    /// （直调 FFI，绕过路径解析），同一 1200×1600 页出图 + 计时。
+    #[test]
+    #[ignore]
+    fn ab_model_output() {
+        let Ok(model) = std::env::var("COMIC_W2X_MODEL") else {
+            return;
+        };
+        if !PathBuf::from(&model).exists() {
+            return;
+        }
+        let tag = std::env::var("COMIC_W2X_AB_TAG").unwrap_or_else(|_| "model".into());
+        use std::ffi::CString;
+        let c = CString::new(model).unwrap();
+        let rc = unsafe { ffi::comic_w2x_coreml_load(c.as_ptr()) };
+        assert_eq!(rc, 0, "ffi load failed rc={rc}");
+        let inp = ensure_ab_page();
+        let out = PathBuf::from(format!("/tmp/w2x_ab_out_{tag}.png"));
+        run_file(&inp, &out, true, &CancellationToken::new()).unwrap();
+        let rgb = image::open(&inp).unwrap().to_rgb8();
+        const TILES: f64 = 108.0;
+        for i in 1..=2 {
+            let d = infer_w2x(&rgb);
+            eprintln!(
+                "[model {tag}] infer{i} page_ms={} per_tile_ms={:.3}",
+                d.as_millis(),
+                d.as_secs_f64() * 1000.0 / TILES
+            );
+        }
+    }
+
+    /// A/B：基线 /tmp/w2x_ab_out_base.png 与 COMIC_W2X_AB_CMP 指定配置工件的
+    /// PSNR / 逐像素最大差 / 有差异像素占比。
+    #[test]
+    #[ignore]
+    fn ab_compare_outputs() {
+        let other = std::env::var("COMIC_W2X_AB_CMP").unwrap_or_else(|_| "full".into());
+        let base_tag = std::env::var("COMIC_W2X_AB_BASE").unwrap_or_else(|_| "base".into());
+        let base = PathBuf::from(format!("/tmp/w2x_ab_out_{base_tag}.png"));
+        let cand = PathBuf::from(format!("/tmp/w2x_ab_out_{other}.png"));
+        if !base.is_file() || !cand.is_file() {
+            return;
+        }
+        let a = image::open(&base).unwrap().to_rgb8();
+        let b = image::open(&cand).unwrap().to_rgb8();
+        assert_eq!(a.dimensions(), b.dimensions());
+        let n = (a.width() as u64) * (a.height() as u64) * 3;
+        let mut mse = 0f64;
+        let mut maxd = 0u32;
+        let mut ndiff = 0u64;
+        for (pa, pb) in a.pixels().zip(b.pixels()) {
+            for k in 0..3 {
+                let d = ((pa.0[k] as i64) - (pb.0[k] as i64)).unsigned_abs() as u32;
+                if d > 0 {
+                    ndiff += 1;
+                }
+                if d > maxd {
+                    maxd = d;
+                }
+                mse += (d as f64) * (d as f64);
+            }
+        }
+        let psnr = if mse == 0.0 {
+            f64::INFINITY
+        } else {
+            10.0 * (255.0 * 255.0 / (mse / n as f64)).log10()
+        };
+        eprintln!(
+            "[ab cmp base vs {other}] psnr={psnr:.2} dB max_diff={maxd} diff_frac={:.6}",
+            ndiff as f64 / n as f64
+        );
     }
 }

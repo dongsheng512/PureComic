@@ -257,7 +257,8 @@ impl UpscaleEngine for RealCuganEngine {
 
         let mut cmd = Command::new(&self.binary);
         cmd.args(&args)
-            .stdout(Stdio::piped())
+            // stdout 只打进度且无人消费，pipe 会在管道缓冲满后阻塞子进程（大书死锁）
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
@@ -288,8 +289,11 @@ impl UpscaleEngine for RealCuganEngine {
         });
         let stderr_abort = stderr_task.abort_handle();
         let timeout = if is_dir {
+            // 按输入页数估算整批耗时（同 waifu2x），固定 64 页预算会误杀慢 GPU 大书
+            let pages = count_files(&input).unwrap_or(0).max(1) as u32;
             self.page_timeout
-                .saturating_mul(64)
+                .saturating_mul((pages / 8).max(1))
+                .saturating_mul(2)
                 .max(Duration::from_secs(600))
         } else {
             self.page_timeout
@@ -384,6 +388,11 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // 找到不超过 max 的 UTF-8 字符边界，避免在多字节字符中间切片 panic
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 pub type ProgressCallback = Arc<dyn Fn(ProgressEvent) + Send + Sync>;
 
@@ -122,6 +123,16 @@ pub async fn run_job(
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ExtractTick>();
         let cfg_extract = cfg.clone();
 
+        // 解压是 spawn_blocking 同步代码，用 AtomicBool 传播取消（token 不可跨 await 等待）
+        let extract_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = extract_cancel.clone();
+        let token_extract = cancel.clone();
+        let cancel_watcher = tokio::spawn(async move {
+            token_extract.cancelled().await;
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let extract_cancel_worker = extract_cancel.clone();
         let extract_handle = tokio::task::spawn_blocking(move || {
             let tx_progress = tx.clone();
             let mut progress_cb = move |done: u32, total: u32, name: Option<&str>| {
@@ -135,6 +146,7 @@ pub async fn run_job(
                 &mut working,
                 &cfg_extract,
                 Some(&mut progress_cb as &mut archive::ExtractProgressCb<'_>),
+                Some(&extract_cancel_worker),
             )?;
             working.refresh_stats();
             let total = working.pages.len() as u32;
@@ -146,6 +158,8 @@ pub async fn run_job(
             Ok::<_, AppError>(working)
         });
 
+        // 进度 tick 只更新内存 stats；落盘节流到 500ms，避免每页全量序列化数 MB JSON
+        let mut last_save = std::time::Instant::now();
         while let Some(tick) = rx.recv().await {
             if cancel.is_cancelled() {
                 break;
@@ -153,9 +167,23 @@ pub async fn run_job(
             let mut m = manifest.write().await;
             m.stats.pages_done = tick.pages_done;
             m.stats.pages_total = tick.pages_total;
-            let _ = m.save();
+            if last_save.elapsed() >= std::time::Duration::from_millis(500) {
+                let _ = m.save();
+                last_save = std::time::Instant::now();
+            }
             emit(&m, "extract", tick.current);
         }
+
+        // 取消必须先置位 AtomicBool 再 abort watcher：否则 abort 可能抢在
+        // store(true) 之前，解压循环看不到取消并继续写盘。
+        // 再 join blocking 任务，避免 remove_job 删掉工作目录时解压还在写。
+        if cancel.is_cancelled() {
+            extract_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            cancel_watcher.abort();
+            let _ = extract_handle.await;
+            return mark_cancelled(&manifest).await;
+        }
+        cancel_watcher.abort();
 
         let extract_result = extract_handle
             .await
@@ -193,7 +221,7 @@ pub async fn run_job(
         emit(&m, "enhance", None);
     }
 
-    let _guard = gpu.lock().await;
+    // GPU 锁不再整本持有：enhance_directory_batch 按组持锁，组间让出给阅读器增强
     if cancel.is_cancelled() {
         return mark_cancelled(&manifest).await;
     }
@@ -202,7 +230,6 @@ pub async fn run_job(
         let m = manifest.read().await;
         m.pages.len()
     };
-
     if page_count == 0 {
         let mut m = manifest.write().await;
         m.state = JobState::Failed;
@@ -223,9 +250,24 @@ pub async fn run_job(
             crate::job::ImageFormat::Jpeg => Some("jpg".into()),
             crate::job::ImageFormat::Png => Some("png".into()),
             crate::job::ImageFormat::Webp => Some("webp".into()),
-            crate::job::ImageFormat::Same => None,
+            // Same: 按源页主流扩展名推断，避免 sidecar 默认 PNG 输出引入二次转码
+            crate::job::ImageFormat::Same => m
+                .pages
+                .first()
+                .and_then(|p| Path::new(&p.name).extension())
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .filter(|e| matches!(e.as_str(), "jpg" | "jpeg" | "png" | "webp"))
+                .map(|e| if e == "jpeg" { "jpg".to_string() } else { e }),
         }
     };
+    // CoreML 引擎输出无损中间 PNG，导出阶段统一按 output_format / quality 重编码
+    if matches!(
+        params.engine,
+        comic_engines::EngineKind::Waifu2xCoreMl | comic_engines::EngineKind::RealEsrganCoreMl
+    ) {
+        params.output_format = Some("png".into());
+    }
 
     {
         let mut m = manifest.write().await;
@@ -249,6 +291,8 @@ pub async fn run_job(
             &manifest,
             engine.as_ref(),
             &params,
+            gpu.clone(),
+            cfg.engine_input_max_side,
             cancel.clone(),
             on_progress.clone(),
         )
@@ -263,13 +307,13 @@ pub async fn run_job(
             engine.as_ref(),
             &params,
             cfg.enhance_concurrency.max(1),
+            gpu.clone(),
+            cfg.engine_input_max_side,
             cancel.clone(),
             on_progress.clone(),
         )
         .await
     };
-    drop(_guard);
-
     match enhance_res {
         Ok(()) => {}
         Err(e) if e.code == crate::error::ErrorCode::Cancelled || cancel.is_cancelled() => {
@@ -391,20 +435,37 @@ pub async fn run_job(
     }
 }
 
-/// One waifu2x process for entire `in/` → `out/`, poll progress by counting output files.
+/// One waifu2x process per group of pages (`in/` → `out/`), poll progress by
+/// counting output files. GPU 锁按组持有、组间让出，阅读器单页增强可插队。
 async fn enhance_directory_batch(
     manifest: &Arc<RwLock<JobManifest>>,
     engine: &dyn UpscaleEngine,
     params: &comic_engines::EnhanceParams,
+    gpu: GpuLock,
+    input_cap: u32,
     cancel: CancellationToken,
     on_progress: Option<ProgressCallback>,
 ) -> AppResult<()> {
-    let (in_dir, out_dir) = {
+    const GROUP_SIZE: usize = 20;
+
+    let out_dir = {
         let m = manifest.read().await;
-        (stage_pending_inputs(&m)?, m.out_dir())
+        m.out_dir()
     };
     std::fs::create_dir_all(&out_dir)?;
-    if !in_dir.is_dir() {
+
+    // 收集待增强页（快照到普通 Vec，供 spawn_blocking 使用）
+    let pending: Vec<(usize, PathBuf)> = {
+        let m = manifest.read().await;
+        m.pages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.status != PageStatus::Done)
+            .filter_map(|(i, p)| p.in_path.clone().map(|inp| (i, inp)))
+            .filter(|(_, inp)| inp.is_file())
+            .collect()
+    };
+    if pending.is_empty() {
         return Ok(());
     }
 
@@ -439,78 +500,154 @@ async fn enhance_directory_batch(
         }
     });
 
-    let result = engine
-        .enhance_batch(
-            EnhanceBatchRequest::Directory {
-                input_dir: in_dir,
-                output_dir: out_dir,
-                params: params.clone(),
-            },
-            cancel.clone(),
-        )
-        .await;
+    let mut first_err: Option<AppError> = None;
+    for group in pending.chunks(GROUP_SIZE) {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let stage_dir = {
+            let m = manifest.read().await;
+            m.workdir.join(format!("in_group_{}", Uuid::new_v4()))
+        };
+        // 解码/缩放在 blocking 线程执行，避免卡住 tokio worker
+        let group_owned: Vec<(usize, PathBuf)> = group.to_vec();
+        let staged_dir = stage_dir.clone();
+        let staged = tokio::task::spawn_blocking(move || {
+            stage_group_inputs(&group_owned, &staged_dir, input_cap)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("stage join: {e}")))?;
+        if let Err(e) = staged {
+            first_err = Some(e);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            break;
+        }
+        if !stage_dir.is_dir() {
+            continue;
+        }
+
+        // 组级持锁：一组跑完即释放，让阅读器单页增强有机会拿到 GPU
+        let guard = gpu.lock().await;
+        if cancel.is_cancelled() {
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            break;
+        }
+        let result = engine
+            .enhance_batch(
+                EnhanceBatchRequest::Directory {
+                    input_dir: stage_dir.clone(),
+                    output_dir: out_dir.clone(),
+                    params: params.clone(),
+                },
+                cancel.clone(),
+            )
+            .await;
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        if let Err(e) = result {
+            first_err = Some(e.into());
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
 
     poller.abort();
     let _ = poller.await;
 
-    match result {
-        Ok(_) => {
-            let mut m = manifest.write().await;
-            let out_dir = m.out_dir();
-            for page in &mut m.pages {
-                if let Some(found) = scan_match_output(&out_dir, page) {
-                    page.out_path = Some(found);
-                    page.status = PageStatus::Done;
-                    continue;
-                }
-                remap_out_path(page);
-                if page_output_ready(page) {
-                    page.status = PageStatus::Done;
-                } else if page.status != PageStatus::Done {
-                    page.status = PageStatus::Failed;
-                    page.error = Some("输出缺失".into());
-                }
+    if cancel.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+
+    // 统一后处理：扫描/重映射输出，标记 Done / Failed
+    {
+        let mut m = manifest.write().await;
+        let out_dir = m.out_dir();
+        for page in &mut m.pages {
+            if let Some(found) = scan_match_output(&out_dir, page) {
+                page.out_path = Some(found);
+                page.status = PageStatus::Done;
+                continue;
             }
-            m.refresh_stats();
-            m.save()?;
-            if let Some(cb) = &on_progress {
-                cb(ProgressEvent::from_manifest(&m, "enhance", None));
+            remap_out_path(page);
+            if page_output_ready(page) {
+                page.status = PageStatus::Done;
+            } else if page.status != PageStatus::Done {
+                page.status = PageStatus::Failed;
+                page.error = Some("输出缺失".into());
             }
-            Ok(())
         }
-        Err(e) => {
-            let app_err: AppError = e.into();
-            if app_err.code == crate::error::ErrorCode::Cancelled || cancel.is_cancelled() {
-                return Err(AppError::cancelled());
-            }
+        m.refresh_stats();
+        m.save()?;
+        if let Some(cb) = &on_progress {
+            cb(ProgressEvent::from_manifest(&m, "enhance", None));
+        }
+    }
+
+    match first_err {
+        None => Ok(()),
+        Some(e) => {
             let mut m = manifest.write().await;
-            for page in &mut m.pages {
-                if page.out_path.as_ref().map(|p| p.is_file()).unwrap_or(false) {
-                    page.status = PageStatus::Done;
-                }
-            }
-            m.refresh_stats();
             let done = m.stats.pages_done;
             if done == 0 {
                 m.state = JobState::Failed;
-                m.error = Some(app_err.clone());
+                m.error = Some(e.clone());
                 m.stats.finished_at = Some(Utc::now());
                 m.save()?;
-                return Err(app_err);
+                return Err(e);
             }
             m.save()?;
-            warn!(error = %app_err, done, "directory enhance partial; exporting done pages");
+            warn!(error = %e, done, "directory enhance partial; exporting done pages");
             Ok(())
         }
     }
 }
 
+/// Stage one group of engine inputs: native files within the cap are
+/// symlinked/copied as-is; oversized or exotic formats are decoded,
+/// downscaled (aspect preserved) and written as 8-bit PNG.
+fn stage_group_inputs(
+    group: &[(usize, PathBuf)],
+    dest_dir: &Path,
+    input_cap: u32,
+) -> AppResult<()> {
+    std::fs::create_dir_all(dest_dir)?;
+    for (_, src) in group {
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
+        let native = crate::image_io::is_engine_native_path(src);
+        let within_cap = crate::image_io::image_dimensions(src)
+            .map(|(w, h)| w.max(h) <= input_cap)
+            .unwrap_or(false);
+        if native && within_cap {
+            let dst = dest_dir.join(name);
+            // 不能用 symlink：waifu2x 的目录扫描会跳过符号链接，输出为空且静默成功
+            std::fs::hard_link(src, &dst).or_else(|_| std::fs::copy(src, &dst).map(|_| ()))?;
+        } else {
+            let img = crate::image_io::prepare_for_engine(crate::image_io::load_image(src)?);
+            let img = if img.width().max(img.height()) > input_cap {
+                img.resize(input_cap, input_cap, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+            crate::image_io::write_engine_png(&img, &dest_dir.join(format!("{stem}.png")))?;
+        }
+    }
+    Ok(())
+}
+
 /// Sequential single-page enhance (fallback / mock). Prefer directory mode for speed.
+/// 每页独立持 GPU 锁，页间让出给阅读器增强；输入超过 cap 时先等比缩小。
+#[allow(clippy::too_many_arguments)]
 async fn enhance_parallel_pages(
     manifest: &Arc<RwLock<JobManifest>>,
     engine: &dyn UpscaleEngine,
     params: &comic_engines::EnhanceParams,
     _concurrency: usize,
+    gpu: GpuLock,
+    input_cap: u32,
     cancel: CancellationToken,
     on_progress: Option<ProgressCallback>,
 ) -> AppResult<()> {
@@ -518,6 +655,8 @@ async fn enhance_parallel_pages(
         let m = manifest.read().await;
         m.pages.len()
     };
+    // 引擎输出扩展名：output_format 显式指定时遵从，否则默认 png
+    let out_ext = params.output_format.as_deref().unwrap_or("png");
     for idx in 0..page_count {
         if cancel.is_cancelled() {
             return Err(AppError::cancelled());
@@ -530,8 +669,10 @@ async fn enhance_parallel_pages(
         let (Some(input), Some(output)) = (input, output) else {
             continue;
         };
+        let output = output.with_extension(out_ext);
         if output.is_file() {
             let mut m = manifest.write().await;
+            m.pages[idx].out_path = Some(output);
             m.pages[idx].status = PageStatus::Done;
             m.refresh_stats();
             m.save()?;
@@ -539,6 +680,40 @@ async fn enhance_parallel_pages(
                 cb(ProgressEvent::from_manifest(&m, "enhance", Some(name)));
             }
             continue;
+        }
+        // 超大输入：blocking 线程等比缩小到 cap 再送引擎
+        let input = {
+            let over = crate::image_io::image_dimensions(&input)
+                .map(|(w, h)| w.max(h) > input_cap)
+                .unwrap_or(false);
+            if !over {
+                input
+            } else {
+                let workdir = {
+                    let m = manifest.read().await;
+                    m.workdir.join(".capped")
+                };
+                let stem = format!("{idx:04}");
+                let src = input.clone();
+                let dest = workdir.join(format!("{stem}.png"));
+                tokio::task::spawn_blocking(move || -> AppResult<PathBuf> {
+                    let img =
+                        crate::image_io::prepare_for_engine(crate::image_io::load_image(&src)?);
+                    let img =
+                        img.resize(input_cap, input_cap, image::imageops::FilterType::Lanczos3);
+                    crate::image_io::write_engine_png(&img, &dest)?;
+                    Ok(dest)
+                })
+                .await
+                .map_err(|e| AppError::internal(format!("cap join: {e}")))??
+            }
+        };
+
+        // 页级持锁，页间让出
+        let guard = gpu.lock().await;
+        if cancel.is_cancelled() {
+            drop(guard);
+            return Err(AppError::cancelled());
         }
         match engine
             .enhance_batch(
@@ -553,11 +728,12 @@ async fn enhance_parallel_pages(
         {
             Ok(_) => {
                 let mut m = manifest.write().await;
-                m.pages[idx].status = if output.is_file() {
-                    PageStatus::Done
+                if output.is_file() {
+                    m.pages[idx].out_path = Some(output);
+                    m.pages[idx].status = PageStatus::Done;
                 } else {
-                    PageStatus::Failed
-                };
+                    m.pages[idx].status = PageStatus::Failed;
+                }
                 m.refresh_stats();
                 m.save()?;
                 if let Some(cb) = &on_progress {
@@ -567,6 +743,7 @@ async fn enhance_parallel_pages(
             Err(e) => {
                 let app_err: AppError = e.into();
                 if app_err.code == crate::error::ErrorCode::Cancelled {
+                    drop(guard);
                     return Err(app_err);
                 }
                 let mut m = manifest.write().await;
@@ -576,48 +753,10 @@ async fn enhance_parallel_pages(
                 m.save()?;
             }
         }
+        drop(guard);
+        tokio::task::yield_now().await;
     }
     Ok(())
-}
-
-fn stage_pending_inputs(m: &JobManifest) -> AppResult<PathBuf> {
-    let pending: Vec<&PageRecord> = m
-        .pages
-        .iter()
-        .filter(|p| p.status != PageStatus::Done)
-        .collect();
-    if pending.is_empty() {
-        return Ok(m.workdir.join("in_resume_empty"));
-    }
-    if pending.len() == m.pages.len() {
-        return Ok(m.in_dir());
-    }
-    let dest = m.workdir.join("in_resume");
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::create_dir_all(&dest)?;
-    for p in pending {
-        let Some(src) = &p.in_path else {
-            continue;
-        };
-        if !src.is_file() {
-            continue;
-        }
-        let Some(name) = src.file_name() else {
-            continue;
-        };
-        let dst = dest.join(name);
-        #[cfg(unix)]
-        {
-            if std::os::unix::fs::symlink(src, &dst).is_err() {
-                std::fs::copy(src, &dst)?;
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::copy(src, &dst)?;
-        }
-    }
-    Ok(dest)
 }
 
 pub(crate) fn recover_pages_from_indir(m: &mut JobManifest) {

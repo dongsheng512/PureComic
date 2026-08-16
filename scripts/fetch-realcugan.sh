@@ -65,11 +65,12 @@ binary="$(json_get "assets.${TARGET}.binary")"
 mkdir -p "$CACHE" "$BIN_ROOT/$TARGET"
 zip_path="$CACHE/${tag}-${name}"
 primary="https://github.com/nihui/realcugan-ncnn-vulkan/releases/download/${tag}/${name}"
+# 镜像只能显式 opt-in（COMIC_GITHUB_MIRROR），不做默认第三方镜像回退：
+# 默认镜像不可审计，下载的内容没有与官方 release asset 的哈希比对就被打进安装包
 mirrors=()
 if [[ -n "${COMIC_GITHUB_MIRROR:-}" ]]; then
   mirrors+=("${COMIC_GITHUB_MIRROR}")
 fi
-mirrors+=("https://ghfast.top/" "https://ghproxy.net/")
 
 echo "==> realcugan [${TARGET}] tag=${tag} asset=${name}"
 if [[ ! -f "$zip_path" ]]; then
@@ -89,6 +90,29 @@ if [[ ! -f "$zip_path" ]]; then
     echo "下载失败: $primary" >&2
     exit 1
   fi
+fi
+
+# 供应链完整性（对齐 waifu2x 链路）：优先比对 pin.json 记录的 sha256；
+# 首次下载（pin 未记录）时写入 TOFU 记录并提示人工复核后提交。
+expect="$(json_get "assets.${TARGET}.sha256" 2>/dev/null || true)"
+got="$(shasum -a 256 "$zip_path" | awk '{print $1}')"
+if [[ -n "$expect" && "$expect" != "null" ]]; then
+  if [[ "$expect" != "$got" ]]; then
+    echo "sha256 校验失败（与 pin.json 不符，拒绝使用）" >&2
+    echo "  expect: $expect" >&2
+    echo "  got:    $got" >&2
+    rm -f "$zip_path"
+    exit 1
+  fi
+  echo "sha256 校验通过: $got"
+else
+  echo "pin.json 未记录 ${TARGET} 的 sha256（首次下载）——已写入 TOFU 记录，请复核后随仓库提交"
+  python3 - "$PIN_FILE" "$TARGET" "$got" <<'PY'
+import json, sys
+pin = json.load(open(sys.argv[1]))
+pin["assets"][sys.argv[2]]["sha256"] = sys.argv[3]
+json.dump(pin, open(sys.argv[1], "w"), ensure_ascii=False, indent=2)
+PY
 fi
 
 extract_dir="$CACHE/extract-${TARGET}-${tag}"

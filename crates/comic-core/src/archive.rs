@@ -170,6 +170,7 @@ fn validate_zip(path: &Path, cfg: &AppConfig) -> AppResult<ValidateResult> {
 }
 
 /// Copy one ZIP/CBZ entry to `dest` without decode/re-encode.
+/// 写 tmp + 原子 rename：并发同页或崩溃都不会留下半截文件。
 pub fn extract_zip_entry_raw(source: &Path, name: &str, dest: &Path) -> AppResult<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -178,12 +179,20 @@ pub fn extract_zip_entry_raw(source: &Path, name: &str, dest: &Path) -> AppResul
     let mut archive =
         ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开压缩包: {e}")))?;
     let want = name.replace('\\', "/");
+    let tmp = unique_tmp_sibling(dest);
     if archive.by_name(&want).is_ok() {
         let mut entry = archive
             .by_name(&want)
             .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
-        let mut f = File::create(dest)?;
-        std::io::copy(&mut entry, &mut f)?;
+        let declared = entry.size();
+        let mut f = File::create(&tmp)?;
+        if let Err(e) = copy_limited(&mut entry, &mut f, declared) {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        drop(f);
+        std::fs::rename(&tmp, dest)?;
         return Ok(());
     }
     let mut found = None;
@@ -201,12 +210,32 @@ pub fn extract_zip_entry_raw(source: &Path, name: &str, dest: &Path) -> AppResul
     let mut entry = archive
         .by_index(idx)
         .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
-    let mut f = File::create(dest)?;
-    std::io::copy(&mut entry, &mut f)?;
+    let declared = entry.size();
+    let tmp = unique_tmp_sibling(dest);
+    let mut f = File::create(&tmp)?;
+    if let Err(e) = copy_limited(&mut entry, &mut f, declared) {
+        drop(f);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(f);
+    std::fs::rename(&tmp, dest)?;
     Ok(())
 }
 
+/// 带上限的流拷贝：条目声明的未压缩大小与真实流不符（zip 炸弹）时拒绝。
+fn copy_limited<R: Read, W: Write>(reader: R, writer: &mut W, declared: u64) -> AppResult<u64> {
+    let copied = std::io::copy(&mut reader.take(declared.saturating_add(1)), writer)?;
+    if copied > declared {
+        return Err(AppError::invalid(
+            "压缩包条目实际大小超过声明值，已中止解压",
+        ));
+    }
+    Ok(copied)
+}
+
 /// Extract one page as original bytes (jpg/png/webp stay as-is) for the reader.
+/// 统一写 tmp + 原子 rename：半截文件不会成为命中缓存，并发同页也不会交错损坏。
 pub fn extract_page_native(
     source: &Path,
     kind: SourceKind,
@@ -215,37 +244,46 @@ pub fn extract_page_native(
     dest: &Path,
     cfg: &AppConfig,
 ) -> AppResult<()> {
-    if dest.is_file() {
+    if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
         return Ok(());
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match kind {
-        SourceKind::Folder => {
-            let src = source.join(page_name);
-            if image_io::is_engine_native_path(&src) {
-                std::fs::copy(&src, dest)?;
-            } else {
-                image_io::convert_file_to_engine_png(&src, dest)?;
+    let tmp = unique_tmp_sibling(dest);
+    let result = (|| -> AppResult<()> {
+        match kind {
+            SourceKind::Folder => {
+                let src = source.join(page_name);
+                if image_io::is_engine_native_path(&src) {
+                    std::fs::copy(&src, &tmp)?;
+                } else {
+                    image_io::convert_file_to_engine_png(&src, &tmp)?;
+                }
+            }
+            SourceKind::Zip | SourceKind::Cbz => {
+                extract_zip_entry_raw(source, page_name, &tmp)?;
+            }
+            SourceKind::Epub => {
+                crate::ebook::extract_epub_page_raw(source, page_name, &tmp)?;
+            }
+            SourceKind::Cbr => {
+                crate::unrar::extract_rar_file(cfg, source, page_name, &tmp)?;
+            }
+            SourceKind::Mobi => {
+                crate::ebook::extract_mobi_page_index(source, page_index as usize, &tmp, cfg)?;
+            }
+            other => {
+                return Err(AppError::unsupported(format!("无法抽取原图: {other:?}")));
             }
         }
-        SourceKind::Zip | SourceKind::Cbz => {
-            extract_zip_entry_raw(source, page_name, dest)?;
-        }
-        SourceKind::Epub => {
-            crate::ebook::extract_epub_page_raw(source, page_name, dest)?;
-        }
-        SourceKind::Cbr => {
-            crate::unrar::extract_rar_file(cfg, source, page_name, dest)?;
-        }
-        SourceKind::Mobi => {
-            crate::ebook::extract_mobi_page_index(source, page_index as usize, dest)?;
-        }
-        other => {
-            return Err(AppError::unsupported(format!("无法抽取原图: {other:?}")));
-        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    std::fs::rename(&tmp, dest)?;
     Ok(())
 }
 
@@ -279,7 +317,7 @@ pub fn extract_page_to_png(
             crate::ebook::extract_epub_page(source, name, dest_png)?;
         }
         SourceKind::Mobi => {
-            crate::ebook::extract_mobi_page_index(source, page_index as usize, dest_png)?;
+            crate::ebook::extract_mobi_page_index(source, page_index as usize, dest_png, cfg)?;
         }
         SourceKind::Cbr => {
             let name = &v.page_names[page_index as usize];
@@ -331,9 +369,10 @@ fn extract_zip_entry_to_png(source: &Path, name: &str, dest_png: &Path) -> AppRe
     if let Some(parent) = tmp.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let declared = entry.size();
     {
         let mut f = File::create(&tmp)?;
-        std::io::copy(&mut entry, &mut f)?;
+        copy_limited(&mut entry, &mut f, declared)?;
     }
     image_io::convert_file_to_engine_png(&tmp, dest_png)?;
     let _ = std::fs::remove_file(&tmp);
@@ -344,23 +383,31 @@ fn extract_zip_entry_to_png(source: &Path, name: &str, dest_png: &Path) -> AppRe
 /// `pages_done` here means **extracted** count (not yet enhanced).
 pub type ExtractProgressCb<'a> = dyn FnMut(u32, u32, Option<&str>) + Send + 'a;
 
+/// 取消时各提取循环尽快退出（不等待整本解压完）。
+pub fn extract_cancelled(cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
+    cancel
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
 /// Extract pages into `manifest.in_dir()` as sequential PNGs for the engine.
 /// Invokes `on_progress` after total is known and after each page is written.
 pub fn extract_to_workdir(
     manifest: &mut JobManifest,
     cfg: &AppConfig,
     on_progress: Option<&mut ExtractProgressCb<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<()> {
     std::fs::create_dir_all(manifest.in_dir())?;
     std::fs::create_dir_all(manifest.out_dir())?;
     std::fs::create_dir_all(manifest.meta_dir())?;
 
     match manifest.source.kind {
-        SourceKind::Folder => extract_folder(manifest, on_progress)?,
-        SourceKind::Zip | SourceKind::Cbz => extract_zip(manifest, cfg, on_progress)?,
-        SourceKind::Epub => extract_epub(manifest, cfg, on_progress)?,
-        SourceKind::Mobi => extract_mobi(manifest, on_progress)?,
-        SourceKind::Cbr => extract_cbr(manifest, cfg, on_progress)?,
+        SourceKind::Folder => extract_folder(manifest, on_progress, cancel)?,
+        SourceKind::Zip | SourceKind::Cbz => extract_zip(manifest, cfg, on_progress, cancel)?,
+        SourceKind::Epub => extract_epub(manifest, cfg, on_progress, cancel)?,
+        SourceKind::Mobi => extract_mobi(manifest, on_progress, cancel)?,
+        SourceKind::Cbr => extract_cbr(manifest, cfg, on_progress, cancel)?,
         other => {
             return Err(AppError::unsupported(format!("无法解压: {other:?}")));
         }
@@ -389,6 +436,7 @@ fn extract_epub(
     manifest: &mut JobManifest,
     cfg: &AppConfig,
     mut on_progress: Option<&mut ExtractProgressCb<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<()> {
     let (names, _warnings) = crate::ebook::list_epub_images(&manifest.source.path, cfg)?;
     let total = names.len() as u32;
@@ -397,6 +445,9 @@ fn extract_epub(
     let out_dir = manifest.out_dir();
     let mut pages = Vec::with_capacity(names.len());
     for (idx, name) in names.iter().enumerate() {
+        if extract_cancelled(cancel) {
+            return Err(AppError::cancelled());
+        }
         let orig_ext = Path::new(name)
             .extension()
             .and_then(|e| e.to_str())
@@ -419,7 +470,6 @@ fn extract_epub(
             out_path: Some(out_path),
             error: None,
         });
-        manifest.pages = pages.clone();
         report_extract(
             on_progress.as_deref_mut(),
             (idx + 1) as u32,
@@ -435,6 +485,7 @@ fn extract_epub(
 fn extract_mobi(
     manifest: &mut JobManifest,
     mut on_progress: Option<&mut ExtractProgressCb<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<()> {
     use rayon::prelude::*;
 
@@ -456,6 +507,9 @@ fn extract_mobi(
         .zip(blobs.par_iter())
         .enumerate()
         .map(|(idx, (name, bytes))| {
+            if extract_cancelled(cancel) {
+                return Err(AppError::cancelled());
+            }
             let (in_path, out_path) =
                 engine_page_paths(&in_dir, &out_dir, idx, name, manifest.output.image_format);
             crate::ebook::write_mobi_engine_input(bytes, &in_path)?;
@@ -474,7 +528,6 @@ fn extract_mobi(
     for (i, r) in results.into_iter().enumerate() {
         let p = r?;
         pages.push(p);
-        manifest.pages = pages.clone();
         report_extract(
             on_progress.as_deref_mut(),
             (i + 1) as u32,
@@ -482,6 +535,9 @@ fn extract_mobi(
             Some(&names[i]),
             manifest,
         );
+    }
+    if extract_cancelled(cancel) {
+        return Err(AppError::cancelled());
     }
     manifest.pages = pages;
     Ok(())
@@ -491,6 +547,7 @@ fn extract_cbr(
     manifest: &mut JobManifest,
     cfg: &AppConfig,
     mut on_progress: Option<&mut ExtractProgressCb<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<()> {
     use rayon::prelude::*;
 
@@ -540,6 +597,9 @@ fn extract_cbr(
         .par_iter()
         .enumerate()
         .map(|(idx, name)| {
+            if extract_cancelled(cancel) {
+                return Err(AppError::cancelled());
+            }
             let src = raw.join(name);
             let (in_path, out_path) =
                 engine_page_paths(&in_dir, &out_dir, idx, name, manifest.output.image_format);
@@ -584,7 +644,6 @@ fn extract_cbr(
         let (idx, page) = r?;
         pages[idx] = Some(page);
         done += 1;
-        manifest.pages = pages.iter().filter_map(|p| p.clone()).collect();
         report_extract(
             on_progress.as_deref_mut(),
             done,
@@ -592,6 +651,9 @@ fn extract_cbr(
             Some(&names[idx]),
             manifest,
         );
+    }
+    if extract_cancelled(cancel) {
+        return Err(AppError::cancelled());
     }
     manifest.pages = pages.into_iter().flatten().collect();
     let _ = std::fs::remove_dir_all(&raw_dir);
@@ -601,6 +663,7 @@ fn extract_cbr(
 fn extract_folder(
     manifest: &mut JobManifest,
     mut on_progress: Option<&mut ExtractProgressCb<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<()> {
     use rayon::prelude::*;
 
@@ -622,6 +685,9 @@ fn extract_folder(
         .par_iter()
         .enumerate()
         .map(|(idx, name)| {
+            if extract_cancelled(cancel) {
+                return Err(AppError::cancelled());
+            }
             let src = root.join(name);
             let (in_path, out_path) =
                 engine_page_paths(&in_dir, &out_dir, idx, name, manifest.output.image_format);
@@ -655,6 +721,9 @@ fn extract_folder(
             manifest,
         );
     }
+    if extract_cancelled(cancel) {
+        return Err(AppError::cancelled());
+    }
     manifest.pages = pages.into_iter().flatten().collect();
     Ok(())
 }
@@ -663,6 +732,7 @@ fn extract_zip(
     manifest: &mut JobManifest,
     cfg: &AppConfig,
     mut on_progress: Option<&mut ExtractProgressCb<'_>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> AppResult<()> {
     let file = File::open(&manifest.source.path)?;
     let mut archive =
@@ -673,6 +743,9 @@ fn extract_zip(
     let mut total_uncomp = 0u64;
 
     for i in 0..archive.len() {
+        if extract_cancelled(cancel) {
+            return Err(AppError::cancelled());
+        }
         let entry = archive
             .by_index(i)
             .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
@@ -680,23 +753,35 @@ fn extract_zip(
         if name.ends_with('/') {
             continue;
         }
-        let safe = sanitize_entry_path(&name)?;
+        // 与 validate_source 的语义保持一致：恶意/超限条目跳过（警告），
+        // 而不是让整包任务失败（否则「校验通过、解压失败」）
+        let safe = match sanitize_entry_path(&name) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         let safe_str = safe.to_string_lossy().replace('\\', "/");
-        check_entry_limits(
+        if check_entry_limits(
             cfg,
             i as u32,
             entry.compressed_size(),
             entry.size(),
             total_uncomp,
-        )?;
+        )
+        .is_err()
+        {
+            continue;
+        }
         total_uncomp = total_uncomp.saturating_add(entry.size());
 
         if safe_str.eq_ignore_ascii_case("ComicInfo.xml") || safe_str.ends_with("/ComicInfo.xml") {
             drop(entry);
-            let mut e = archive.by_index(i).unwrap();
+            let Ok(mut e) = archive.by_index(i) else {
+                continue;
+            };
+            let declared = e.size();
             let dest = manifest.meta_dir().join("ComicInfo.xml");
             let mut out = File::create(&dest)?;
-            std::io::copy(&mut e, &mut out)?;
+            copy_limited(&mut e, &mut out, declared)?;
             manifest.metadata.comic_info_src = Some(dest);
             continue;
         }
@@ -719,6 +804,9 @@ fn extract_zip(
     // without a PNG re-encode — that was the extract bottleneck.
     let mut pages = Vec::with_capacity(image_entries.len());
     for (idx, (zip_idx, name)) in image_entries.iter().enumerate() {
+        if extract_cancelled(cancel) {
+            return Err(AppError::cancelled());
+        }
         let mut entry = archive
             .by_index(*zip_idx)
             .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
@@ -728,14 +816,15 @@ fn extract_zip(
             .unwrap_or("bin");
         let (in_path, out_path) =
             engine_page_paths(&in_dir, &out_dir, idx, name, manifest.output.image_format);
+        let declared = entry.size();
         if image_io::is_engine_native_ext(orig_ext) {
             let mut f = File::create(&in_path)?;
-            std::io::copy(&mut entry, &mut f)?;
+            copy_limited(&mut entry, &mut f, declared)?;
         } else {
             let tmp = in_dir.join(format!("_raw_{idx:05}.{orig_ext}"));
             {
                 let mut f = File::create(&tmp)?;
-                std::io::copy(&mut entry, &mut f)?;
+                copy_limited(&mut entry, &mut f, declared)?;
             }
             image_io::convert_file_to_engine_png(&tmp, &in_path)?;
             let _ = std::fs::remove_file(&tmp);
@@ -748,7 +837,6 @@ fn extract_zip(
             out_path: Some(out_path),
             error: None,
         });
-        manifest.pages = pages.clone();
         report_extract(
             on_progress.as_deref_mut(),
             (idx + 1) as u32,
@@ -799,11 +887,19 @@ pub fn expected_output_path(manifest: &JobManifest) -> PathBuf {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("comic");
-    let name = manifest
+    let mut name = manifest
         .output
         .naming
         .replace("{stem}", stem)
         .replace("{scale}", &scale.to_string());
+    // 消毒：命名模板可注入路径分隔符/上级目录，防止写到输出目录外
+    name = name.replace(['/', '\\'], "_");
+    while name.starts_with('.') {
+        name.remove(0);
+    }
+    if name.trim().is_empty() {
+        name = stem.to_string();
+    }
     match manifest.output.container {
         OutputContainer::Folder => manifest.output.dir.join(&name),
         OutputContainer::Cbz => manifest.output.dir.join(format!("{name}.cbz")),
@@ -813,6 +909,52 @@ pub fn expected_output_path(manifest: &JobManifest) -> PathBuf {
 
 /// Pack progress: (done, total, note).
 pub type ExportProgressCb<'a> = dyn FnMut(u32, u32, &str) + Send + 'a;
+
+/// 同目录下的临时路径（写完后原子 rename 到最终路径）。
+/// 导出用确定性名字：同一目标同时只有一个 writer。
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| format!("{}.tmp", n.to_string_lossy()))
+        .unwrap_or_else(|| "output.tmp".into());
+    path.with_file_name(name)
+}
+
+/// 抽取用唯一临时名，避免并发同页交错写同一个 `.tmp`。
+fn unique_tmp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".into());
+    path.with_file_name(format!("{name}.{}.tmp", uuid::Uuid::new_v4().simple()))
+}
+
+/// 校验 zip 可正常打开且条目数不少于预期（只读中央目录，毫秒级）。
+pub(crate) fn zip_is_complete(path: &Path, min_entries: usize) -> bool {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    match zip::ZipArchive::new(file) {
+        Ok(archive) => archive.len() >= min_entries,
+        Err(_) => false,
+    }
+}
+
+/// Folder 导出完整性：页文件数不少于预期（崩溃遗留的空/半截目录不算成功）。
+pub(crate) fn folder_export_complete(dir: &Path, done_pages: usize) -> bool {
+    if done_pages == 0 {
+        return false;
+    }
+    let count = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .count()
+        })
+        .unwrap_or(0);
+    count >= done_pages
+}
 
 /// Pack enhanced pages to output path using fixed defaults / options.
 pub fn export_job(manifest: &JobManifest) -> AppResult<PathBuf> {
@@ -825,21 +967,36 @@ pub fn export_job_with_progress(
 ) -> AppResult<PathBuf> {
     std::fs::create_dir_all(&manifest.output.dir)?;
     let out_path = expected_output_path(manifest);
+    let done_count = manifest
+        .pages
+        .iter()
+        .filter(|p| p.status == PageStatus::Done)
+        .count();
 
-    // Idempotent: if a previous attempt already produced output, treat as success.
-    // (Avoids stuck "打包中" when file exists but state never flipped to completed.)
+    // Idempotent: if a previous attempt already produced a *complete* output,
+    // treat as success. (Avoids stuck "打包中" when file exists but state never
+    // flipped to completed. Half-written output from a crash is NOT accepted.)
     match manifest.output.container {
         OutputContainer::Folder => {
-            if out_path.is_dir() {
+            if out_path.is_dir() && folder_export_complete(&out_path, done_count) {
                 return Ok(out_path);
+            }
+            if out_path.is_dir() {
+                std::fs::remove_dir_all(&out_path)?;
+            } else if out_path.exists() {
+                return Err(AppError::invalid(format!(
+                    "目标路径已存在且不是目录: {}",
+                    out_path.display()
+                )));
             }
             export_folder(manifest, &out_path, on_progress)?;
         }
         OutputContainer::Cbz | OutputContainer::Zip => {
-            if out_path.is_file() && out_path.metadata().map(|m| m.len() > 1024).unwrap_or(false) {
+            if out_path.is_file() && zip_is_complete(&out_path, done_count) {
                 return Ok(out_path);
             }
-            // Remove incomplete partial from crashed prior attempt
+            // Remove incomplete partial from crashed prior attempt (tmp+rename
+            // guarantees out_path only ever appears atomically once complete).
             if out_path.is_file() {
                 let _ = std::fs::remove_file(&out_path);
             }
@@ -864,7 +1021,12 @@ fn export_folder(
             dir.display()
         )));
     }
-    std::fs::create_dir_all(dir)?;
+    // 先写临时目录再原子 rename，崩溃不会留下「看似成功」的半截目录
+    let tmp_dir = tmp_sibling(dir);
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)?;
+    }
+    std::fs::create_dir_all(&tmp_dir)?;
     let done_pages: Vec<_> = manifest
         .pages
         .iter()
@@ -876,32 +1038,38 @@ fn export_folder(
     }
     let counter = AtomicU32::new(0);
     let progress = Mutex::new(on_progress);
-    let results: Vec<AppResult<()>> = done_pages
-        .par_iter()
-        .map(|page| {
-            let src = page
-                .out_path
-                .as_ref()
-                .ok_or_else(|| AppError::internal("缺少输出路径"))?;
-            let orig_ext = Path::new(&page.name).extension().and_then(|e| e.to_str());
-            let out_name = export_page_filename(page, &manifest.output.image_format);
-            let dest = dir.join(&out_name);
-            encode_or_copy_page(manifest, page, src, orig_ext, &dest)?;
-            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Ok(mut g) = progress.lock() {
-                if let Some(cb) = g.as_deref_mut() {
-                    cb(n, total, "encode");
+    // 峰值内存 ≈ EXPORT_CHUNK × 单页：rayon 全量并行时 8 核 × 300MB ≈ 2.4GB，
+    // 大页漫画导出 OOM。按组串行、组内并行。
+    const EXPORT_CHUNK: usize = 4;
+    for chunk in done_pages.chunks(EXPORT_CHUNK) {
+        let results: Vec<AppResult<()>> = chunk
+            .par_iter()
+            .map(|page| {
+                let src = page
+                    .out_path
+                    .as_ref()
+                    .ok_or_else(|| AppError::internal("缺少输出路径"))?;
+                let orig_ext = Path::new(&page.name).extension().and_then(|e| e.to_str());
+                let out_name = export_page_filename(page, &manifest.output.image_format);
+                let dest = tmp_dir.join(&out_name);
+                encode_or_copy_page(manifest, page, src, orig_ext, &dest)?;
+                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Ok(mut g) = progress.lock() {
+                    if let Some(cb) = g.as_deref_mut() {
+                        cb(n, total, "encode");
+                    }
                 }
-            }
-            Ok(())
-        })
-        .collect();
-    for r in results {
-        r?;
+                Ok(())
+            })
+            .collect();
+        for r in results {
+            r?;
+        }
     }
     if let Some(ci) = &manifest.metadata.comic_info_src {
-        std::fs::copy(ci, dir.join("ComicInfo.xml"))?;
+        std::fs::copy(ci, tmp_dir.join("ComicInfo.xml"))?;
     }
+    std::fs::rename(&tmp_dir, dir)?;
     Ok(())
 }
 
@@ -967,49 +1135,56 @@ fn export_zip(
         cb(0, total.max(1), "encode");
     }
 
-    // Parallel encode/copy into memory, then sequential zip write.
+    // 按 CHUNK 编码后立刻写入 zip，峰值内存 ≈ CHUNK × 单页，而不是整本。
     let counter = AtomicU32::new(0);
     let progress = Mutex::new(on_progress);
-    let encoded: Vec<AppResult<(u32, String, Vec<u8>)>> = done_pages
-        .par_iter()
-        .map(|page| {
-            let src = page
-                .out_path
-                .as_ref()
-                .ok_or_else(|| AppError::internal("缺少输出路径"))?;
-            let orig_ext = Path::new(&page.name).extension().and_then(|e| e.to_str());
-            let out_name = export_page_filename(page, &manifest.output.image_format);
-            let data = encode_or_copy_bytes(manifest, src, orig_ext)?;
-            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Ok(mut g) = progress.lock() {
-                if let Some(cb) = g.as_deref_mut() {
-                    cb(n, total.max(1), "encode");
-                }
-            }
-            Ok((page.index, out_name, data))
-        })
-        .collect();
+    const CHUNK: usize = 8;
 
-    let mut items = Vec::with_capacity(encoded.len());
-    for item in encoded {
-        items.push(item?);
-    }
-    items.sort_by_key(|(idx, _, _)| *idx);
-
-    let file = File::create(path)?;
+    let tmp_path = tmp_sibling(path);
+    let file = File::create(&tmp_path)?;
     let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
     // Images are already compressed (JPEG/PNG/WebP). STORE is the CBZ convention
     // and avoids a second Deflate pass that barely shrinks but costs a lot of CPU.
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
-    let pack_total = items.len() as u32;
-    for (i, (_idx, out_name, data)) in items.into_iter().enumerate() {
-        zip.start_file(out_name, opts)
-            .map_err(|e| AppError::internal(format!("zip 写入: {e}")))?;
-        zip.write_all(&data)?;
-        if let Ok(mut g) = progress.lock() {
-            if let Some(cb) = g.as_deref_mut() {
-                cb((i as u32) + 1, pack_total.max(1), "pack");
+    let pack_total = total.max(1);
+    let mut packed = 0u32;
+    for chunk in done_pages.chunks(CHUNK) {
+        let encoded: Vec<AppResult<(u32, String, Vec<u8>)>> = chunk
+            .par_iter()
+            .map(|page| {
+                let src = page
+                    .out_path
+                    .as_ref()
+                    .ok_or_else(|| AppError::internal("缺少输出路径"))?;
+                let orig_ext = Path::new(&page.name).extension().and_then(|e| e.to_str());
+                let out_name = export_page_filename(page, &manifest.output.image_format);
+                let data = encode_or_copy_bytes(manifest, src, orig_ext)?;
+                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Ok(mut g) = progress.lock() {
+                    if let Some(cb) = g.as_deref_mut() {
+                        cb(n, pack_total, "encode");
+                    }
+                }
+                Ok((page.index, out_name, data))
+            })
+            .collect();
+        for item in encoded {
+            let (_idx, out_name, data) = match item {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+            };
+            zip.start_file(out_name, opts)
+                .map_err(|e| AppError::internal(format!("zip 写入: {e}")))?;
+            zip.write_all(&data)?;
+            packed += 1;
+            if let Ok(mut g) = progress.lock() {
+                if let Some(cb) = g.as_deref_mut() {
+                    cb(packed, pack_total, "pack");
+                }
             }
         }
     }
@@ -1024,6 +1199,8 @@ fn export_zip(
 
     zip.finish()
         .map_err(|e| AppError::internal(format!("zip 完成: {e}")))?;
+    // 原子落盘：目标路径只会在完整写入后出现
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -1117,8 +1294,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cbr = dir.path().join("book.cbr");
         std::fs::write(&cbr, b"Rar!\x1A\x07\x00not-a-real-rar").unwrap();
-        let mut cfg = AppConfig::default();
-        cfg.unrar_bin = Some(PathBuf::from("/no/such/unrar-binary"));
+        let cfg = AppConfig {
+            unrar_bin: Some(PathBuf::from("/no/such/unrar-binary")),
+            ..Default::default()
+        };
         let err = validate_source(&cbr, &cfg).unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::UnrarMissing);
         assert!(err

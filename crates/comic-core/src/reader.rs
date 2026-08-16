@@ -51,6 +51,47 @@ pub fn title_from_source(source: &Path) -> String {
 pub fn source_cache_key(source: &Path) -> String {
     let mut h = Sha256::new();
     h.update(source.to_string_lossy().as_bytes());
+    // 内容指纹：同路径被替换（新文件）时不得命中旧增强缓存
+    let meta = std::fs::metadata(source).ok();
+    if let Some(m) = meta {
+        if m.is_file() {
+            h.update(b"|f");
+            h.update(m.len().to_le_bytes());
+            if let Ok(t) = m.modified() {
+                h.update(
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos().to_le_bytes())
+                        .unwrap_or_default(),
+                );
+            }
+        } else if m.is_dir() {
+            // 目录：条目数 + 最新子项 mtime 近似指纹
+            h.update(b"|d");
+            if let Ok(rd) = std::fs::read_dir(source) {
+                let mut newest: Option<(u64, u32)> = None;
+                let mut count = 0u32;
+                for e in rd.flatten() {
+                    count += 1;
+                    if let Ok(em) = e.metadata() {
+                        if let Ok(t) = em.modified() {
+                            let secs = t
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            if newest.map(|(s, _)| secs > s).unwrap_or(true) {
+                                newest = Some((secs, em.len() as u32));
+                            }
+                        }
+                    }
+                }
+                h.update(count.to_le_bytes());
+                if let Some((s, l)) = newest {
+                    h.update(s.to_le_bytes());
+                    h.update(l.to_le_bytes());
+                }
+            }
+        }
+    }
     hex::encode(&h.finalize()[..8])
 }
 
@@ -393,6 +434,7 @@ mod tests {
             error: None,
             workdir: dir.to_path_buf(),
             last_message: None,
+            abandoned: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -462,8 +504,10 @@ mod tests {
             w.write_all(b"FAKEJPEG-BYTES").unwrap();
             w.finish().unwrap();
         }
-        let mut cfg = AppConfig::default();
-        cfg.work_root = tmp.path().join("work");
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            ..Default::default()
+        };
         let file = resolve_source_page(&cbz, 0, &cfg).unwrap();
         assert_eq!(file.kind, "original");
         assert!(
