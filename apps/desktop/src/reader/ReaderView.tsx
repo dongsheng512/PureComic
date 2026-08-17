@@ -22,7 +22,7 @@ import type {
   ReaderPageFile,
   ReaderState,
 } from "../types";
-import { startWindowDrag } from "../windowDrag";
+import { setNativeWindowBg, startWindowDrag } from "../windowDrag";
 import {
   isReaderEngine,
   loadEnhanceNoise,
@@ -31,6 +31,11 @@ import {
   saveEnhanceNoise,
   saveReaderEngine,
   saveReaderPref,
+  loadReaderBg,
+  readerBgPreset,
+  READER_BG_PRESETS,
+  saveReaderBg,
+  type ReaderBgId,
   type FitMode,
   type ReadDirection,
   type SpreadMode,
@@ -117,6 +122,8 @@ export function ReaderView({
   const [busy, setBusy] = useState(false);
   const [barHidden, setBarHidden] = useState(readBarHidden);
   const [fullscreen, setFullscreen] = useState(false);
+  const [canvasBg, setCanvasBg] = useState<ReaderBgId>(loadReaderBg);
+  const canvasPreset = readerBgPreset(canvasBg);
   const [progressHud, setProgressHud] = useState(false);
   /** 悬停滑杆拖动中的暂存值：拖动不 align，松手再对齐（避免 double 模式 thumb 回弹） */
   const [sliderDragValue, setSliderDragValue] = useState<number | null>(null);
@@ -194,6 +201,21 @@ export function ReaderView({
     onImmersiveChange?.(immersive);
     return () => onImmersiveChange?.(false);
   }, [immersive, onImmersiveChange]);
+
+  // The reader owns the native window surface while mounted so macOS rounded
+  // corners follow the canvas preset instead of the application theme.
+  useEffect(() => {
+    document.documentElement.setAttribute("data-reader-open", "");
+    return () => {
+      document.documentElement.removeAttribute("data-reader-open");
+      const appBg = localStorage.getItem("comic.theme") === "light" ? "#FFFFFF" : "#212121";
+      setNativeWindowBg(appBg);
+    };
+  }, []);
+
+  useEffect(() => {
+    setNativeWindowBg(canvasPreset.hex);
+  }, [canvasPreset.hex]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -316,15 +338,18 @@ export function ReaderView({
     saveReaderPref(state.source, { pageIndex, spread, direction, fit });
   }, [state?.source, pageIndex, spread, direction, fit]);
 
+  // 只依赖页数而不是整个 ReaderState：任务进度轮询会创建新的 state 对象，
+  // 但不会改变可见页。保持数组引用稳定，避免预加载 effect 被无意义地重启。
+  const pageCount = state?.pageCount ?? 0;
   const visibleIndexes = useMemo(() => {
-    if (!state || state.pageCount <= 0) return [] as number[];
-    const i = alignIndex(pageIndex, spread, state.pageCount);
-    if (spread === "double" && i + 1 < state.pageCount) return [i, i + 1];
+    if (pageCount <= 0) return [] as number[];
+    const i = alignIndex(pageIndex, spread, pageCount);
+    if (spread === "double" && i + 1 < pageCount) return [i, i + 1];
     return [i];
-  }, [state, pageIndex, spread]);
+  }, [pageCount, pageIndex, spread]);
 
   const prefetchIndexes = useMemo(() => {
-    if (!state) return visibleIndexes;
+    if (pageCount <= 0) return visibleIndexes;
     const extra: number[] = [];
     const origin =
       direction === "rtl"
@@ -333,7 +358,7 @@ export function ReaderView({
     const step = direction === "rtl" ? -1 : 1;
     for (let d = 1; d <= 4; d++) {
       const n = origin + step * d;
-      if (n < 0 || n >= state.pageCount) break;
+      if (n < 0 || n >= pageCount) break;
       if (!visibleIndexes.includes(n)) extra.push(n);
     }
     const back =
@@ -342,14 +367,14 @@ export function ReaderView({
         : (visibleIndexes[0] ?? 0) - 1;
     if (
       back >= 0 &&
-      back < state.pageCount &&
+      back < pageCount &&
       !visibleIndexes.includes(back) &&
       !extra.includes(back)
     ) {
       extra.push(back);
     }
     return [...visibleIndexes, ...extra];
-  }, [state, visibleIndexes, direction]);
+  }, [pageCount, visibleIndexes, direction]);
 
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
@@ -552,16 +577,16 @@ export function ReaderView({
     };
   }, [
     enhanceOn,
-    visibleIndexes.join(","),
+    visibleIndexes,
     direction,
-    engineId,
-    noiseLevel,
+    enhanceOpts,
     state?.source,
     state?.jobId,
     state?.pageCount,
     source,
     jobId,
-    // applyAiFiles / onError 用 ref，避免父组件重渲打断预热
+    onError,
+    refreshCacheStats,
   ]);
 
   useEffect(() => {
@@ -630,7 +655,16 @@ export function ReaderView({
     return () => {
       cancelled = true;
     };
-  }, [prefetchIndexes.join(","), state?.jobId, state?.pagesDone, jobId, source]);
+  }, [
+    visibleIndexes,
+    prefetchIndexes,
+    state?.source,
+    state?.jobId,
+    state?.pagesDone,
+    jobId,
+    source,
+    onError,
+  ]);
 
   useEffect(() => {
     if (!state?.jobId) return;
@@ -1006,7 +1040,13 @@ export function ReaderView({
 
   return (
     <div
-      className="relative flex h-full min-h-0 flex-col bg-black"
+      className="relative flex h-full min-h-0 flex-col"
+      data-reader-open=""
+      data-reader-fg={canvasPreset.onDark ? "light" : "dark"}
+      style={{
+        backgroundColor: canvasPreset.hex,
+        ["--reader-canvas" as string]: canvasPreset.hex,
+      }}
       onMouseDownCapture={(e) => {
         if (e.button !== 0) return;
         /* WebKit：点击 user-select:none 的内容不会收起既有选区，
@@ -1306,7 +1346,7 @@ export function ReaderView({
                         <IconSparkles className="h-3 w-3" />
                         {i18n.readerAiLabel}
                       </p>
-                      {/* AI 关闭时设置整体降透明并禁用交互，但保持可见 */}
+                      {/* AI 关闭时只禁用引擎和降噪选项；缓存管理始终可用 */}
                       <div className={`mt-2 flex flex-col gap-3 ${enhanceOn ? "" : "pointer-events-none opacity-40"}`}>
                         {/* 引擎 */}
                         <div>
@@ -1365,37 +1405,91 @@ export function ReaderView({
                             ))}
                           </div>
                         </div>
-                        {/* 缓存信息 */}
-                        <div>
-                          <p className="ai-block-title">{i18n.readerAiCache}</p>
-                          <div className="mt-1.5 flex items-baseline justify-between gap-2">
-                            <span className="text-[12px] text-ink-500 dark:text-fg-muted">
-                              {i18n.readerAiCacheLabel}
-                            </span>
-                            <span className="text-[12px] tabular-nums text-ink-800 dark:text-fg">
-                              {cacheLine}
-                            </span>
-                          </div>
-                          <div className="reader-cache-bar mt-1.5" aria-hidden="true">
-                            <span style={{ width: `${cachePct}%` }} />
-                          </div>
-                          <button
-                            type="button"
-                            className={`ai-clear-btn ${clearConfirming ? "is-confirm" : ""}`}
-                            onClick={() => void handleClearClick()}
-                          >
-                            {clearingCache ? (
-                              <>
-                                <span className="reader-ai-spin" aria-hidden="true" />
-                                {i18n.readerAiClearing}
-                              </>
-                            ) : clearConfirming ? (
-                              i18n.readerAiClearConfirm.replace("{size}", cacheSizeText(cacheStats))
-                            ) : (
-                              i18n.readerAiCacheClear
-                            )}
-                          </button>
+                      </div>
+                      {/* 缓存信息：不依赖 AI 开关，关闭 AI 时也可以清理历史缓存 */}
+                      <div className="mt-3">
+                        <p className="ai-block-title">{i18n.readerAiCache}</p>
+                        <div className="mt-1.5 flex items-baseline justify-between gap-2">
+                          <span className="text-[12px] text-ink-500 dark:text-fg-muted">
+                            {i18n.readerAiCacheLabel}
+                          </span>
+                          <span className="text-[12px] tabular-nums text-ink-800 dark:text-fg">
+                            {cacheLine}
+                          </span>
                         </div>
+                        <div className="reader-cache-bar mt-1.5" aria-hidden="true">
+                          <span style={{ width: `${cachePct}%` }} />
+                        </div>
+                        <button
+                          type="button"
+                          className={`ai-clear-btn ${clearConfirming ? "is-confirm" : ""}`}
+                          onClick={() => void handleClearClick()}
+                        >
+                          {clearingCache ? (
+                            <>
+                              <span className="reader-ai-spin" aria-hidden="true" />
+                              {i18n.readerAiClearing}
+                            </>
+                          ) : clearConfirming ? (
+                            i18n.readerAiClearConfirm.replace("{size}", cacheSizeText(cacheStats))
+                          ) : (
+                            i18n.readerAiCacheClear
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-3 border-t border-ink-100 px-3 pt-3 dark:border-white/[0.08]">
+                      <p className="px-0 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
+                        {i18n.readerBg}
+                      </p>
+                      <div className="mt-1.5 flex items-center gap-2" role="radiogroup" aria-label={i18n.readerBg}>
+                        {READER_BG_PRESETS.map((preset) => {
+                          const active = canvasBg === preset.id;
+                          const label =
+                            preset.id === "black"
+                              ? i18n.readerBgBlack
+                              : preset.id === "dark"
+                                ? i18n.readerBgDark
+                                : preset.id === "white"
+                                  ? i18n.readerBgWhite
+                                  : i18n.readerBgSepia;
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={active}
+                              aria-label={label}
+                              title={label}
+                              className={`relative h-6 w-6 rounded-full border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1 dark:focus-visible:ring-offset-surface-raised ${
+                                preset.onDark ? "border-white/25" : "border-ink-300"
+                              }`}
+                              style={{ backgroundColor: preset.hex }}
+                              onClick={() => {
+                                setCanvasBg(preset.id);
+                                saveReaderBg(preset.id);
+                                setNativeWindowBg(preset.hex);
+                              }}
+                            >
+                              {active && (
+                                <svg
+                                  viewBox="0 0 20 20"
+                                  className={`absolute inset-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 ${
+                                    preset.onDark ? "text-white" : "text-ink-900"
+                                  }`}
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2.4"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="m5.2 10.2 3.1 3.1 6.5-6.6" />
+                                </svg>
+                              )}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                     <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
@@ -1544,16 +1638,16 @@ export function ReaderView({
 
       <div
         ref={viewportRef}
-        className="relative min-h-0 flex-1 select-none overflow-auto bg-black"
+        className="relative min-h-0 flex-1 select-none overflow-auto"
         onClick={(e) => clickNav(e.clientX, e.currentTarget.getBoundingClientRect())}
       >
         {!state && (
-          <div className="grid h-full place-items-center px-6 text-center text-sm text-ink-400">
+          <div className={`grid h-full place-items-center px-6 text-center text-sm ${canvasPreset.onDark ? "text-white/45" : "text-ink-500"}`}>
             {i18n.readerHint}
           </div>
         )}
         {state && displayPages.length === 0 && (
-          <div className="grid h-full place-items-center text-sm text-ink-400">
+          <div className={`grid h-full place-items-center text-sm ${canvasPreset.onDark ? "text-white/45" : "text-ink-500"}`}>
             {busy ? i18n.readerLoading : i18n.readerWaitingExtract}
           </div>
         )}

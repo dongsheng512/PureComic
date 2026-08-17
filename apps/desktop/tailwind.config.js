@@ -5,43 +5,42 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 浅色：Apple 系炭灰字 + 浅灰底（避免纯黑/爆白）
+        // ChatGPT-like light surfaces: sidebar/header gray, main content white
         ink: {
           50: "#ffffff",
-          100: "#f5f5f7",
-          200: "#e8e8ed",
-          300: "#d2d2d7",
-          400: "#a1a1a6",
-          500: "#6e6e73",
-          600: "#6e6e73",
-          700: "#424245",
-          800: "#1d1d1f",
-          900: "#1d1d1f",
-          950: "#1d1d1f",
+          100: "#f7f7f8",
+          200: "#e5e5e5",
+          300: "#d9d9e0",
+          400: "#8e8e8e",
+          500: "#6e6e6e",
+          600: "#6e6e6e",
+          700: "#424242",
+          800: "#2f2f2f",
+          900: "#2f2f2f",
+          950: "#2f2f2f",
         },
-        // 深色模式表面：冷调石墨青灰（略抬 B 通道，避免黄暖）
+        // Dark surfaces: main content #212121, sidebar/header #171717
         surface: {
-          DEFAULT: "#16171C",
-          panel: "#1C1D24",
-          raised: "#2A2C36",
-          high: "#323440",
+          DEFAULT: "#212121",
+          panel: "#171717",
+          raised: "#2f2f2f",
+          high: "#3a3a3a",
         },
-        // 深色文字：冷灰实色（不用半透明纯白，避免抗锯齿发黄）
         fg: {
-          DEFAULT: "#E8EAEF",
-          label: "#C2C7D1",
-          muted: "#9399A5",
+          DEFAULT: "#ececec",
+          label: "#c5c5c5",
+          muted: "#9b9b9b",
         },
-        // 唯一高亮 · 主操作（淡天蓝）
+        // 唯一主色：系统蓝
         accent: {
-          DEFAULT: "#6bb6ff",
-          dim: "#4aa3f5",
-          soft: "#eaf6ff",
+          DEFAULT: "#007aff",
+          dim: "#0066d6",
+          soft: "#eaf3ff",
         },
-        // 完成态语义（非营销高亮）
+        // 语义成功色：提高文字可读性，视觉仍保持原生绿
         success: {
-          DEFAULT: "#0f766e",
-          soft: "#ecfdf8",
+          DEFAULT: "#248a3d",
+          soft: "#effaf1",
         },
       },
       fontFamily: {
@@ -58,7 +57,7 @@ export default {
       },
       boxShadow: {
         // 白卡片浮于浅灰底
-        panel: "0 2px 10px rgba(0, 0, 0, 0.04)",
+        panel: "0 8px 24px rgba(35, 35, 45, 0.07)",
         cover: "inset 0 0 0 1px rgba(0, 0, 0, 0.08)",
       },
       borderRadius: {

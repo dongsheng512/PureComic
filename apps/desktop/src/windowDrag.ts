@@ -20,3 +20,11 @@ export function startWindowDrag(e: ReactMouseEvent | MouseEvent) {
     .startDragging()
     .catch(() => undefined);
 }
+
+
+/** Sync the native window surface with a reader canvas preset. No-op in Vite/browser. */
+export function setNativeWindowBg(hex: string) {
+  void import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) => getCurrentWindow().setBackgroundColor(hex))
+    .catch(() => undefined);
+}

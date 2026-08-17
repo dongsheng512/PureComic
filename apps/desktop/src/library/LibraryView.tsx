@@ -102,6 +102,30 @@ function LibraryView({
   const addRef = useRef<HTMLDivElement>(null);
   const sortRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const addTipTimer = useRef<number | null>(null);
+  const [addTip, setAddTip] = useState<{ text: string; x: number; y: number } | null>(null);
+
+  const showAddTip = (e: React.MouseEvent | React.FocusEvent) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (addTipTimer.current != null) window.clearTimeout(addTipTimer.current);
+    addTipTimer.current = window.setTimeout(() => {
+      setAddTip({
+        text: i18n.libraryHint,
+        x: Math.min(Math.max(rect.left + rect.width / 2, 140), window.innerWidth - 140),
+        y: rect.bottom,
+      });
+    }, 120);
+  };
+  const hideAddTip = () => {
+    if (addTipTimer.current != null) window.clearTimeout(addTipTimer.current);
+    setAddTip(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (addTipTimer.current != null) window.clearTimeout(addTipTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     saveLibrarySort(sort);
@@ -207,8 +231,19 @@ function LibraryView({
       {/* 工具栏：左添加 · 中搜索 · 右排序/过滤/视图 */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative shrink-0" ref={addRef}>
-          <div className="inline-flex h-9 overflow-hidden rounded-full shadow-sm shadow-[0_2px_8px_rgba(107,182,255,0.35)]">
-            <button type="button" className="btn-add-books" onClick={onAddFile}>
+          <div className="btn-add-books-group">
+            <button
+              type="button"
+              className="btn-add-books"
+              onMouseEnter={showAddTip}
+              onMouseLeave={hideAddTip}
+              onFocus={showAddTip}
+              onBlur={hideAddTip}
+              onClick={() => {
+                hideAddTip();
+                onAddFile();
+              }}
+            >
               <span aria-hidden="true">＋</span>
               {i18n.libraryAdd}
             </button>
@@ -218,6 +253,7 @@ function LibraryView({
               aria-expanded={addOpen}
               aria-haspopup="menu"
               title={i18n.libraryAddMenu}
+              aria-label={i18n.libraryAddMenu}
               onClick={() => {
                 setAddOpen((v) => !v);
                 setSettingsOpen(false);
@@ -311,21 +347,6 @@ function LibraryView({
           )}
         </div>
 
-        {!hasBooks && (
-          <button
-            type="button"
-            className="reader-icon-btn !h-9 !w-9"
-            title={i18n.libraryHint}
-            aria-label={i18n.libraryHint}
-          >
-            ?
-          </button>
-        )}
-        {hasBooks && (
-          <button type="button" className="reader-icon-btn !h-9 !w-9" title={i18n.libraryHint} aria-label={i18n.libraryHint}>
-            ?
-          </button>
-        )}
 
         <div className="relative mx-auto w-full max-w-[360px] min-w-[12rem] flex-1 sm:flex-none sm:w-[320px]">
           <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-400" aria-hidden="true">
@@ -638,6 +659,15 @@ function LibraryView({
           onConfirm={onConfirmScan}
           onCancel={onCancelScan}
         />
+      )}
+      {addTip && (
+        <div
+          className="reader-tip library-tip"
+          role="tooltip"
+          style={{ left: addTip.x, top: addTip.y }}
+        >
+          {addTip.text}
+        </div>
       )}
     </div>
   );

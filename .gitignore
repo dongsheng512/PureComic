@@ -75,3 +75,6 @@ third_party/models-cunet/**
 # Working notes (local only, not part of releases)
 docs/
 FIX_PLAN.md
+
+# UI tooling artifacts
+.mimosa/

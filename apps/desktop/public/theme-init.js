@@ -5,9 +5,9 @@
     var light = localStorage.getItem("comic.theme") === "light";
     if (light) {
       document.documentElement.classList.remove("dark");
-      document.documentElement.style.backgroundColor = "#F5F5F7";
+      document.documentElement.style.backgroundColor = "#FFFFFF";
     } else {
-      document.documentElement.style.backgroundColor = "#16171C";
+      document.documentElement.style.backgroundColor = "#212121";
     }
   } catch (_) {}
 })();

@@ -57,7 +57,7 @@ export function ComicReader({
           : i18n.readerBackLibrary;
 
   return (
-    <div className="relative flex h-full min-h-0 w-full flex-1 flex-col bg-black">
+    <div className="relative flex h-full min-h-0 w-full flex-1 flex-col bg-transparent">
       <ReaderView
         jobs={jobs}
         source={source}

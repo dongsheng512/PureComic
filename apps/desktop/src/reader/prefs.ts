@@ -119,3 +119,47 @@ export function saveEnhanceNoise(noise: 0 | 1 | 2 | 3) {
     /* ignore */
   }
 }
+
+export type ReaderBgId = "black" | "dark" | "white" | "sepia";
+
+export type ReaderBgPreset = {
+  id: ReaderBgId;
+  hex: string;
+  /** true: canvas is dark and overlays should use light text */
+  onDark: boolean;
+};
+
+export const READER_BG_PRESETS: readonly ReaderBgPreset[] = [
+  { id: "black", hex: "#000000", onDark: true },
+  { id: "dark", hex: "#212121", onDark: true },
+  { id: "white", hex: "#FFFFFF", onDark: false },
+  { id: "sepia", hex: "#F3E6C8", onDark: false },
+] as const;
+
+export const DEFAULT_READER_BG: ReaderBgId = "black";
+const READER_BG_KEY = "comic.reader.bg";
+
+export function isReaderBgId(value: string): value is ReaderBgId {
+  return READER_BG_PRESETS.some((preset) => preset.id === value);
+}
+
+export function loadReaderBg(): ReaderBgId {
+  try {
+    const saved = localStorage.getItem(READER_BG_KEY);
+    return saved && isReaderBgId(saved) ? saved : DEFAULT_READER_BG;
+  } catch {
+    return DEFAULT_READER_BG;
+  }
+}
+
+export function saveReaderBg(id: ReaderBgId): void {
+  try {
+    localStorage.setItem(READER_BG_KEY, id);
+  } catch {
+    /* ignore storage quota / privacy errors */
+  }
+}
+
+export function readerBgPreset(id: ReaderBgId = loadReaderBg()): ReaderBgPreset {
+  return READER_BG_PRESETS.find((preset) => preset.id === id) ?? READER_BG_PRESETS[0];
+}

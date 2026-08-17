@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -32,11 +32,19 @@ import {
   titleFromPath,
 } from "./externalOpen";
 import { stateLabel, t } from "./i18n";
+import { loadReaderBg, readerBgPreset } from "./reader/prefs";
+import { EnhanceView } from "./enhance/EnhanceView";
+import {
+  formatBytes,
+  type Container,
+  type ImgFmt,
+  type Preset,
+} from "./enhance/enhanceViewModel";
 import { LibraryView, pickComicFiles, pickFolder } from "./library/LibraryView";
 import { loadImportSettings, saveImportSettings } from "./library/prefs";
 import { ComicReader, type ReaderSession } from "./reader/ComicReader";
 import { rememberMainWindowGeometry, restoreMainWindowGeometry } from "./reader/smartFit";
-import { startWindowDrag } from "./windowDrag";
+import { setNativeWindowBg, startWindowDrag } from "./windowDrag";
 import type {
   DiskEstimate,
   DoctorReport,
@@ -50,10 +58,7 @@ import type {
   ValidateResult,
 } from "./types";
 
-type Preset = "fast" | "balanced" | "quality";
 type Tab = "library" | "enhance" | "doctor";
-type Container = "cbz" | "folder" | "zip";
-type ImgFmt = "jpeg" | "png" | "webp" | "same";
 type Theme = "dark" | "light";
 
 const THEME_KEY = "comic.theme";
@@ -66,11 +71,14 @@ function readTheme(): Theme {
   }
 }
 
-const THEME_BG = { light: "#F5F5F7", dark: "#16171C" } as const;
+const THEME_BG = { light: "#FFFFFF", dark: "#212121" } as const;
 
 function applyTheme(theme: Theme) {
   const bg = THEME_BG[theme];
+  const reading = document.documentElement.hasAttribute("data-reader-open");
+  const nativeBg = reading ? readerBgPreset(loadReaderBg()).hex : bg;
   document.documentElement.classList.toggle("dark", theme === "dark");
+  // html/body remain on the application theme; the reader root owns its canvas color.
   document.documentElement.style.backgroundColor = bg;
   if (document.body) document.body.style.backgroundColor = bg;
   try {
@@ -78,17 +86,7 @@ function applyTheme(theme: Theme) {
   } catch {
     /* ignore */
   }
-  // 与 WKWebView 底层对齐，避免 macOS 圆角边缘露出黑边
-  void import("@tauri-apps/api/window")
-    .then(({ getCurrentWindow }) => getCurrentWindow().setBackgroundColor(bg))
-    .catch(() => undefined);
-}
-
-function formatBytes(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
-  return `${n} B`;
+  setNativeWindowBg(nativeBg);
 }
 
 function errMsg(e: unknown): string {
@@ -128,38 +126,24 @@ function jobsEqual(a: JobStatus[], b: JobStatus[]): boolean {
   return true;
 }
 
-function accelLabel(
-  catalog: EngineInfo[],
-  engineId: string,
-  cuganModel: string,
-  fallback: EngineStatus | null,
-): string {
-  const selected = catalog.find((e) => e.id === engineId);
-  const blob = `${selected?.detail ?? ""} ${fallback?.detail ?? ""}`;
-  const jobs = blob.match(/线程 -j \S+/)?.[0] ?? "";
-  const mode = /目录批处理/.test(blob) ? "目录批处理" : /逐页并行/.test(blob) ? "逐页并行" : "";
-  const ready =
-    selected && !selected.available
-      ? selected.detail || `${selected.label} 未安装`
-      : engineId === "realcugan"
-        ? "realcugan-ncnn-vulkan 就绪"
-        : engineId === "waifu2x"
-          ? "waifu2x-ncnn-vulkan 就绪"
-          : selected?.label || fallback?.detail || engineId;
-  const parts = [ready];
-  if (engineId === "realcugan" && selected?.available !== false) {
-    parts.push(`当前 ${cuganModel.toUpperCase()}`);
-  }
-  if (mode) parts.push(mode);
-  if (jobs) parts.push(jobs);
-  return parts.join(" · ");
-}
-
 export default function App() {
   const i18n = t();
   const [tab, setTab] = useState<Tab>("library");
   const [source, setSource] = useState<string | null>(null);
-  const [outputDir, setOutputDir] = useState<string | null>(null);
+  /** 源文件对应的书库条目：紧凑信息卡展示封面 / 标题用 */
+  const [sourceEntry, setSourceEntry] = useState<LibraryEntry | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const sourceRequestRef = useRef(0);
+  /** 任务创建成功的轻反馈时间戳（底部栏显示 3s「增强任务已创建」） */
+  const [taskCreatedAt, setTaskCreatedAt] = useState(0);
+  // 记忆上次输出目录，避免每次重启重选
+  const [outputDir, setOutputDir] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("comic.outputDir");
+    } catch {
+      return null;
+    }
+  });
   const [preset, setPreset] = useState<Preset>("balanced");
   const [engineId, setEngineId] = useState("realcugan");
   const [cuganModel, setCuganModel] = useState("se");
@@ -171,6 +155,7 @@ export default function App() {
   const [imageFormat, setImageFormat] = useState<ImgFmt>("jpeg");
   const [validation, setValidation] = useState<ValidateResult | null>(null);
   const [estimate, setEstimate] = useState<DiskEstimate | null>(null);
+  const [estimateLoading, setEstimateLoading] = useState(false);
   const [resumeHint, setResumeHint] = useState<ResumeHint | null>(null);
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
@@ -278,12 +263,13 @@ export default function App() {
   }, [finishCloseReader, pathInLibrary, refreshLibrary]);
 
   const ingestPath = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<LibraryEntry | null> => {
       setError(null);
       try {
-        await addLibraryPath(path);
+        const entry = await addLibraryPath(path);
         await refreshLibrary();
         setLibraryNotice(null);
+        return entry;
       } catch {
         try {
           setLibraryScan(true);
@@ -295,6 +281,7 @@ export default function App() {
         } finally {
           setLibraryScan(false);
         }
+        return null;
       }
     },
     [refreshLibrary],
@@ -476,23 +463,60 @@ export default function App() {
   }, [queueOpen]);
 
   const applySource = useCallback(async (path: string) => {
+    const requestId = ++sourceRequestRef.current;
     setError(null);
     setSource(path);
-    void ingestPath(path);
+    setSourceEntry(null);
+    // 立即清掉上一本的校验/预估，避免新书短暂显示旧数据
+    setValidation(null);
+    setEstimate(null);
+    setEstimateLoading(false);
+    setResumeHint(null);
+    setSourceLoading(true);
+    void ingestPath(path).then((entry) => {
+      // 快速切换文件时，旧请求不能覆盖当前源文件的信息卡
+      if (requestId === sourceRequestRef.current) setSourceEntry(entry);
+    });
     try {
       const v = await validateSource(path);
+      if (requestId !== sourceRequestRef.current) return;
       setValidation(v);
-      const e = await estimateDisk(path, scale);
-      setEstimate(e);
       const hint = await probeResume(path).catch(() => null);
-      setResumeHint(hint);
+      if (requestId === sourceRequestRef.current) setResumeHint(hint);
     } catch (e) {
-      setValidation(null);
-      setEstimate(null);
-      setResumeHint(null);
-      setError(errMsg(e));
+      if (requestId === sourceRequestRef.current) setError(errMsg(e));
+    } finally {
+      if (requestId === sourceRequestRef.current) setSourceLoading(false);
     }
-  }, [scale, ingestPath]);
+  }, [ingestPath]);
+
+  // 磁盘预估：源文件或倍率变化后（去抖）重新计算
+  useEffect(() => {
+    if (!source) {
+      setEstimate(null);
+      setEstimateLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setEstimateLoading(true);
+    const timer = setTimeout(() => {
+      estimateDisk(source, scale)
+        .then((e) => {
+          if (cancelled) return;
+          setEstimate(e);
+          setEstimateLoading(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setEstimate(null);
+          setEstimateLoading(false);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [source, scale]);
 
   /** Prefer CBZ/ZIP files over random paths; accept directories. */
   const pickDroppedPath = (paths: string[]): string | null => {
@@ -575,12 +599,122 @@ export default function App() {
 
   const pickOutput = async () => {
     const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") setOutputDir(selected);
+    if (typeof selected === "string") {
+      setOutputDir(selected);
+      try {
+        localStorage.setItem("comic.outputDir", selected);
+      } catch {
+        /* ignore */
+      }
+    }
   };
 
+  // 「增强任务已创建」反馈 3 秒后自动消失
+  useEffect(() => {
+    if (!taskCreatedAt) return;
+    const timer = setTimeout(() => setTaskCreatedAt(0), 3000);
+    return () => clearTimeout(timer);
+  }, [taskCreatedAt]);
+
+  /** 当前源文件对应的进行中任务：底部操作栏切换为进度模式 */
+  const activeSourceJob = useMemo(
+    () =>
+      source
+        ? ([...jobs]
+            .reverse()
+            .find(
+              (j) => j.source === source && ACTIVE_JOB_STATES.includes(j.state),
+            ) ?? null)
+        : null,
+    [jobs, source],
+  );
+
+  const engineReady = catalog.length
+    ? (catalog.find((e) => e.id === engineId)?.available ?? false)
+    : true;
+
   const canStart = useMemo(
-    () => !!source && !!outputDir && !!validation && !busy && (estimate?.ok ?? true),
-    [source, outputDir, validation, busy, estimate],
+    () =>
+      !!source &&
+      !!outputDir &&
+      !!validation &&
+      !busy &&
+      engineReady &&
+      !estimateLoading &&
+      !!estimate?.ok,
+    [source, outputDir, validation, busy, engineReady, estimateLoading, estimate],
+  );
+
+  const onPresetChange = useCallback((p: Preset) => {
+    setPreset(p);
+    if (p === "fast") {
+      setNoise(0);
+      setTta(false);
+    } else if (p === "quality") {
+      setNoise(2);
+      setTta(false);
+    } else {
+      setNoise(1);
+      setTta(false);
+    }
+  }, []);
+
+  const onEngineChange = useCallback(
+    (id: string) => {
+      const info = catalog.find((e) => e.id === id);
+      setEngineId(id);
+      try {
+        localStorage.setItem("comic.engine", id);
+      } catch {
+        /* ignore */
+      }
+      const scales = info?.scales ?? [1, 2];
+      setScale((prev) =>
+        scales.includes(prev) ? prev : scales.includes(2) ? 2 : scales[0] ?? 2,
+      );
+      if (id === "realcugan") {
+        const mid =
+          info?.models.find((m) => m.id === "nose")?.id ??
+          info?.models[0]?.id ??
+          "nose";
+        const keep = info?.models.some((m) => m.id === cuganModel);
+        const next = keep ? cuganModel : mid;
+        setCuganModel(next);
+        try {
+          localStorage.setItem("comic.cuganModel", next);
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [catalog, cuganModel],
+  );
+
+  const onCuganModelChange = useCallback((id: string) => {
+    setCuganModel(id);
+    try {
+      localStorage.setItem("comic.cuganModel", id);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const openSourceReader = useCallback(() => {
+    if (!source) return;
+    openReader({
+      source,
+      jobId: jobs.find((j) => j.source === source)?.jobId ?? null,
+      from: "enhance",
+    });
+  }, [openReader, source, jobs]);
+
+  const onCancelJob = useCallback(
+    (id: string) => {
+      cancelJob(id)
+        .then(refreshJobs)
+        .catch((e) => setError(`取消失败: ${errMsg(e)}`));
+    },
+    [refreshJobs],
   );
 
   const start = async () => {
@@ -618,7 +752,8 @@ export default function App() {
       }
       await refreshJobs();
       setTab("enhance");
-      setQueueOpen(true);
+      setTaskCreatedAt(Date.now());
+      // 提交后留在增强页：底部操作栏切换为轻量进度条，用户可随时打开队列
       if (created.resumed && created.nextPage) {
         setResumeHint(null);
       }
@@ -642,30 +777,9 @@ export default function App() {
   const tabs: { id: Tab; label: string }[] = [
     { id: "library", label: i18n.tabLibrary },
     { id: "enhance", label: i18n.tabEnhance },
-    { id: "doctor", label: i18n.tabDoctor },
   ];
   const runningJobCount = jobs.filter((j) => canShowCancel(j.state)).length;
-  const readyModels = catalog.filter(
-    (e) => e.available && (e.id === "realcugan" || e.id === "waifu2x"),
-  );
-  const readyModelLabel =
-    readyModels.length > 0
-      ? readyModels
-          .map((e) =>
-            e.id === "waifu2x" ? "Waifu2x" : e.id === "realcugan" ? "Real-CUGAN" : e.label.split("（")[0],
-          )
-          .join(" · ")
-      : catalog.length > 0
-        ? "无可用模型"
-        : engine?.available && engine.id !== "mock"
-          ? engine.id === "waifu2x"
-            ? "Waifu2x"
-            : engine.id
-          : "检测中…";
-  const readyModelHint =
-    readyModels.length > 0
-      ? readyModels.map((e) => `${e.label}${e.detail ? ` · ${e.detail}` : ""}`).join("\n")
-      : (engine?.detail ?? "");
+
   const onLibAddFile = useCallback(async () => {
     const paths = await pickComicFiles();
     if (paths.length === 0) return;
@@ -703,9 +817,9 @@ export default function App() {
       const p = await pickFolder();
       if (!p) return;
       if (opts?.addToWatch) {
-        const s = loadImportSettings();
-        if (!s.watchFolders.includes(p)) {
-          saveImportSettings({ ...s, watchFolders: [...s.watchFolders, p] });
+        const settings = loadImportSettings();
+        if (!settings.watchFolders.includes(p)) {
+          saveImportSettings({ ...settings, watchFolders: [...settings.watchFolders, p] });
         }
       }
       setLibraryScan(true);
@@ -730,16 +844,13 @@ export default function App() {
       setLibraryImportProgress({ done: 0, total: paths.length });
       setError(null);
       try {
-        // 分批导入以更新进度提示
         const batch = 8;
-        let done = 0;
         let lastMsg = "";
         for (let i = 0; i < paths.length; i += batch) {
           const slice = paths.slice(i, i + batch);
           const r = await importLibraryPaths(slice);
           lastMsg = r.message;
-          done = Math.min(paths.length, i + slice.length);
-          setLibraryImportProgress({ done, total: paths.length });
+          setLibraryImportProgress({ done: Math.min(paths.length, i + slice.length), total: paths.length });
         }
         setLibraryNotice(lastMsg || `已导入 ${paths.length} 本`);
         setScanPreview(null);
@@ -811,16 +922,14 @@ export default function App() {
     setImportRemember(false);
   }, []);
 
-  const accel = accelLabel(catalog, engineId, cuganModel, engine);
-
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <header
-        className={`sticky top-0 z-10 shrink-0 border-b border-ink-300/80 bg-ink-100/85 backdrop-blur-md dark:border-white/[0.08] dark:bg-surface/90 ${
+        className={`app-topbar sticky top-0 z-10 shrink-0 ${
           hideAppChrome ? "hidden" : ""
         }`}
       >
-        <div className="flex h-[52px] items-center">
+        <div className="relative flex h-[52px] items-center">
           <div
             data-tauri-drag-region
             className="h-full w-[84px] shrink-0"
@@ -828,32 +937,69 @@ export default function App() {
           />
           <div
             data-tauri-drag-region
-            className="flex min-w-0 flex-1 items-center gap-2.5 h-full pr-3"
+            className="flex min-w-0 items-center gap-2.5 pr-3"
             onMouseDown={startWindowDrag}
           >
-            <h1 className="shrink-0 text-[15px] font-semibold tracking-tight text-ink-900 dark:text-fg pointer-events-none">
+            <h1 className="pointer-events-none shrink-0 text-[15px] font-semibold tracking-tight text-ink-900 dark:text-fg">
               {i18n.appName}
             </h1>
-            <span
-              className="min-w-0 truncate rounded-full border border-ink-300 bg-white px-2.5 py-0.5 text-[11px] text-ink-500 dark:border-white/[0.08] dark:bg-surface-high dark:text-fg-muted pointer-events-none"
-              title={readyModelHint}
-            >
-              {readyModelLabel}
-            </span>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0 pr-3">
+
+          <nav
+            aria-label="Primary"
+            className="absolute left-1/2 flex h-full -translate-x-1/2 items-stretch gap-0.5 px-1"
+          >
+            {tabs.map((x) => {
+              const active = tab === x.id;
+              return (
+                <button
+                  key={x.id}
+                  type="button"
+                  onClick={() => setTab(x.id)}
+                  className={`relative px-3 py-2 text-sm transition ${
+                    active
+                      ? "font-semibold text-ink-900 dark:text-fg"
+                      : "font-normal text-ink-500 hover:text-ink-800 dark:text-fg-muted dark:hover:text-fg"
+                  }`}
+                >
+                  {x.label}
+                  {active && (
+                    <span className="absolute inset-x-3 bottom-0.5 h-0.5 rounded-full bg-accent dark:bg-fg" />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 pr-3">
+            <button
+              type="button"
+              onClick={() => setTab("doctor")}
+              title={i18n.statusMenu}
+              aria-label={i18n.statusMenu}
+              aria-pressed={tab === "doctor"}
+              className={`btn-soft !h-[34px] !w-[34px] !p-0 ${
+                tab === "doctor" ? "!bg-ink-200 !text-ink-800 dark:!bg-surface-high dark:!text-fg" : ""
+              }`}
+            >
+              <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
+                <circle cx="10" cy="10" r="7.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+                <path d="M10 9.1v4.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                <circle cx="10" cy="6.2" r=".9" fill="currentColor" />
+              </svg>
+            </button>
             <button
               type="button"
               onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
               title={i18n.themeToggle}
               aria-label={i18n.themeToggle}
-              className="btn-soft !h-[34px] !px-2.5 !text-sm"
+              className="btn-soft !h-[34px] !w-[34px] !p-0"
             >
               {theme === "dark" ? (
                 <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
                   <path
                     fill="currentColor"
-                    d="M10 3.2a.8.8 0 0 1 .8.8v1.2a.8.8 0 1 1-1.6 0V4a.8.8 0 0 1 .8-.8Zm0 10.2a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Zm6-3.4a.8.8 0 0 1 .8.8.8.8 0 0 1-.8.8h-1.2a.8.8 0 1 1 0-1.6H16ZM5.2 10a.8.8 0 0 1-.8.8H3.2a.8.8 0 1 1 0-1.6H4.4A.8.8 0 0 1 5.2 10Zm9.33 4.53a.8.8 0 0 1 0 1.13l-.85.85a.8.8 0 1 1-1.13-1.13l.85-.85a.8.8 0 0 1 1.13 0ZM7.45 4.34a.8.8 0 0 1 0 1.13l-.85.85A.8.8 0 1 1 5.47 5.2l.85-.85a.8.8 0 0 1 1.13 0Zm7.08.85a.8.8 0 0 1 1.13 0 .8.8 0 0 1 0 1.13l-.85.85a.8.8 0 1 1-1.13-1.13l.85-.85ZM6.6 14.53a.8.8 0 0 1 0 1.13l-.85.85A.8.8 0 1 1 4.62 15.4l.85-.85a.8.8 0 0 1 1.13 0ZM10 14.8a.8.8 0 0 1 .8.8V16.8a.8.8 0 1 1-1.6 0V15.6a.8.8 0 0 1 .8-.8Z"
+                    d="M10 3.2a.8.8 0 0 1 .8.8v1.2a.8.8 0 1 1-1.6 0V4a.8.8 0 0 1 .8-.8Zm0 10.2a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Zm6-3.4a.8.8 0 0 1 .8.8.8.8 0 0 1-.8.8h-1.2a.8.8 0 1 1 0-1.6H16ZM5.2 10a.8.8 0 0 1-.8.8H3.2a.8.8 0 1 1 0-1.6H4.4A.8.8 0 0 1 5.2 10Zm9.33 4.53a.8.8 0 0 1 0 1.13l-.85.85a.8.8 0 1 1-1.13-1.13l.85-.85a.8.8 0 0 1 1.13 0ZM7.45 4.34a.8.8 0 0 1 0 1.13l-.85.85A.8.8 0 1 1 5.47 5.2l.85-.85a.8.8 0 0 1 1.13 0Zm7.08.85a.8.8 0 0 1 1.13 0 .8.8 0 0 1 0 1.13l-.85.85a.8.8 0 1 1-1.13-1.13l.85-.85ZM6.6 14.53a.8.8 0 0 1 0 1.13.8.8 0 1 1-1.13-1.13l.85-.85a.8.8 0 0 1 1.13 0ZM10 14.8a.8.8 0 0 1 .8.8V16.8a.8.8 0 1 1-1.6 0V15.6a.8.8 0 0 1 .8-.8Z"
                   />
                 </svg>
               ) : (
@@ -864,49 +1010,32 @@ export default function App() {
                   />
                 </svg>
               )}
-              <span className="hidden sm:inline">{theme === "dark" ? i18n.themeLight : i18n.themeDark}</span>
             </button>
-            <nav className="flex items-stretch gap-0.5 px-1">
-              {tabs.map((x) => {
-                const active = tab === x.id;
-                return (
-                  <button
-                    key={x.id}
-                    type="button"
-                    onClick={() => setTab(x.id)}
-                    className={`relative px-3 py-2 text-sm transition ${
-                      active
-                        ? "font-semibold text-ink-900 dark:text-fg"
-                        : "font-normal text-ink-500 hover:text-ink-800 dark:text-fg-muted dark:hover:text-fg"
-                    }`}
-                  >
-                    {x.label}
-                    {active && (
-                      <span className="absolute inset-x-3 bottom-0.5 h-0.5 rounded-full bg-ink-900 dark:bg-fg" />
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
             <button
               type="button"
               onClick={() => setQueueOpen(true)}
               title={i18n.showQueue}
-              className={`btn-soft !h-[34px] !px-3 !text-sm ${
+              aria-label={i18n.showQueue}
+              className={`btn-soft relative !h-[34px] !w-[34px] !p-0 ${
                 runningJobCount > 0
-                  ? "!bg-amber-400/90 !text-ink-950 font-medium"
+                  ? "!border-amber-400/70 !bg-amber-50 !text-amber-700 dark:!border-amber-400/40 dark:!bg-amber-400/15 dark:!text-amber-200"
                   : queueOpen
-                    ? "!bg-ink-300 !text-ink-800 dark:!bg-surface-high dark:!text-fg"
+                    ? "!bg-ink-200 !text-ink-800 dark:!bg-surface-high dark:!text-fg"
                     : ""
               }`}
             >
-              {i18n.queue}
+              <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M4 5.2A1.2 1.2 0 0 1 5.2 4h9.6A1.2 1.2 0 0 1 16 5.2v9.6a1.2 1.2 0 0 1-1.2 1.2H5.2A1.2 1.2 0 0 1 4 14.8V5.2Zm2.4 1.3a.7.7 0 1 0 0 1.4h7.2a.7.7 0 1 0 0-1.4H6.4Zm0 3a.7.7 0 1 0 0 1.4h7.2a.7.7 0 1 0 0-1.4H6.4Zm0 3a.7.7 0 1 0 0 1.4h4.6a.7.7 0 1 0 0-1.4H6.4Z"
+                />
+              </svg>
               {jobs.length > 0 && (
                 <span
-                  className={`ml-0.5 inline-flex min-w-[1.15rem] h-[1.15rem] items-center justify-center rounded-full px-1 text-[11px] font-semibold leading-none ${
+                  className={`absolute -right-1 -top-1 inline-flex min-h-[17px] min-w-[17px] items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none ${
                     runningJobCount > 0
-                      ? "bg-ink-950/15 text-ink-950"
-                      : "bg-ink-300/80 text-ink-800 dark:bg-surface-high dark:text-fg"
+                      ? "bg-amber-500 text-white"
+                      : "bg-ink-300 text-ink-800 dark:bg-surface-high dark:text-fg"
                   }`}
                 >
                   {runningJobCount || jobs.length}
@@ -944,7 +1073,7 @@ export default function App() {
         className={
           reading
             ? "flex min-h-0 w-full flex-1 flex-col"
-            : tab === "library"
+            : tab === "library" || tab === "enhance"
               ? "mx-auto flex w-full max-w-6xl min-h-0 flex-1 flex-col px-6 py-4"
               : "mx-auto w-full max-w-6xl flex-1 px-6 py-4"
         }
@@ -1015,356 +1144,147 @@ export default function App() {
         )}
 
         {!reading && tab === "enhance" && (
-          <div className="grid lg:grid-cols-2 gap-5 items-stretch">
-            <section
-              className={`card p-5 h-full flex flex-col ${
-                dragOver ? "ring-2 ring-ink-950 border-ink-950 bg-ink-200/40 dark:ring-fg dark:border-fg" : ""
-              }`}
-            >
-              <div className="flex items-center justify-between mb-3">
-                <p className="label">{i18n.import}</p>
-                <div className="flex gap-1.5">
-                  <button type="button" className="btn-ghost !px-2.5 !py-1 text-xs" onClick={pickSource}>
-                    文件
-                  </button>
-                  <button type="button" className="btn-ghost !px-2.5 !py-1 text-xs" onClick={pickSourceFolder}>
-                    文件夹
-                  </button>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={pickSource}
-                className="w-full flex-1 min-h-[8rem] rounded-xl border border-dashed border-ink-300 bg-ink-100 px-5 py-10 text-center hover:border-ink-500 hover:bg-ink-200/50 transition grid place-items-center dark:border-white/[0.08] dark:bg-surface-panel"
-              >
-                <div>
-                  <p className="text-sm text-ink-800 dark:text-fg">
-                    <span className="mr-2 opacity-80">📚</span>
-                    {i18n.dropCompact}
-                  </p>
-                  {source && (
-                    <p className="mt-2 text-xs text-ink-600 break-all font-mono dark:text-fg-muted">{source}</p>
-                  )}
-                </div>
-              </button>
-              <div className="mt-4">
-                <p className="label mb-1.5">{i18n.outputDir}</p>
-                <div className="flex gap-2">
-                  <div className="flex-1 min-w-0 rounded-xl bg-ink-100 border border-ink-200 px-3 py-2 text-sm font-mono text-ink-700 truncate dark:bg-surface-raised dark:border-white/[0.08] dark:text-fg">
-                    {outputDir ?? "—"}
-                  </div>
-                  <button type="button" className="btn-ghost shrink-0" onClick={pickOutput}>
-                    {i18n.chooseOutput}
-                  </button>
-                </div>
-              </div>
-              {(validation || estimate || resumeHint) && (
-                <div className="mt-4 flex flex-wrap gap-2 text-xs">
-                  {validation && (
-                    <span className="rounded-lg bg-success/12 border border-success/30 px-2.5 py-1 text-success dark:text-emerald-100">
-                      {i18n.validateOk} · {validation.pageCount} {i18n.pages}
-                      {validation.hasComicInfo ? " · ComicInfo" : ""}
-                    </span>
-                  )}
-                  {estimate && (
-                    <span
-                      className={`rounded-lg px-2.5 py-1 border ${
-                        estimate.ok
-                          ? "bg-ink-100 border-ink-200 text-ink-700 dark:bg-surface-raised dark:border-white/[0.08] dark:text-fg"
-                          : "bg-rose-500/10 border-rose-500/30 text-rose-800 dark:text-rose-100"
-                      }`}
-                    >
-                      {i18n.estimate}: ~{formatBytes(estimate.estimateBytes)} /{" "}
-                      {formatBytes(estimate.freeBytes)}
-                      {estimate.message ? ` — ${estimate.message}` : ""}
-                    </span>
-                  )}
-                  {resumeHint && (
-                    <span className="w-full rounded-lg bg-amber-500/15 border border-amber-400/40 px-2.5 py-1.5 text-sm font-medium text-amber-900 dark:text-amber-50">
-                      {i18n.resumeTitle}：{resumeHint.message}
-                    </span>
-                  )}
-                </div>
-              )}
-            </section>
-
-            <section className="card p-5 h-full flex flex-col">
-              <p className="label mb-4">{i18n.settings}</p>
-              <div className="flex-1 space-y-4">
-              <Field label={i18n.preset}>
-                <Segmented
-                  value={preset}
-                  onChange={(p) => {
-                    setPreset(p);
-                    if (p === "fast") {
-                      setNoise(0);
-                      setTta(false);
-                    } else if (p === "quality") {
-                      setNoise(2);
-                      setTta(false);
-                    } else {
-                      setNoise(1);
-                      setTta(false);
-                    }
-                  }}
-                  options={[
-                    { id: "fast", label: i18n.presetFast },
-                    { id: "balanced", label: i18n.presetBalanced },
-                    { id: "quality", label: i18n.presetQuality },
-                  ]}
-                />
-              </Field>
-              <div className="grid grid-cols-2 gap-4">
-                <Field label={i18n.engine}>
-                  <SelectBox
-                    value={engineId}
-                    onChange={(id) => {
-                      const info = catalog.find((e) => e.id === id);
-                      setEngineId(id);
-                      localStorage.setItem("comic.engine", id);
-                      const scales = info?.scales ?? [1, 2];
-                      if (!scales.includes(scale)) {
-                        setScale(scales.includes(2) ? 2 : scales[0] ?? 2);
-                      }
-                      const mid =
-                        info?.models.find((m) => m.id === "nose")?.id ??
-                        info?.models[0]?.id ??
-                        "nose";
-                      if (id === "realcugan") {
-                        const keep = info?.models.some((m) => m.id === cuganModel);
-                        const next = keep ? cuganModel : mid;
-                        setCuganModel(next);
-                        localStorage.setItem("comic.cuganModel", next);
-                      }
-                    }}
-                    options={(catalog.length
-                      ? catalog.filter((e) => e.id === "realcugan" || e.id === "waifu2x")
-                      : [
-                          { id: "realcugan", label: i18n.engineCugan, available: true },
-                          { id: "waifu2x", label: i18n.engineWaifu2x, available: true },
-                        ]
-                    ).map((e) => ({
-                      id: e.id,
-                      label: e.available ? e.label : `${e.label}（未安装）`,
-                    }))}
-                  />
-                </Field>
-                <Field label={i18n.scale} hint={i18n.scaleHint}>
-                  <Segmented
-                    value={String(scale)}
-                    onChange={(v) => setScale(Number(v))}
-                    options={(catalog.find((e) => e.id === engineId)?.scales ?? [1, 2]).map((s) => ({
-                      id: String(s),
-                      label: `${s}×`,
-                    }))}
-                  />
-                </Field>
-              </div>
-              <Field
-                label={engineId === "realcugan" ? i18n.cuganPack : i18n.model}
-                hint={engineId === "realcugan" ? i18n.cuganPackHint : i18n.modelHintWaifu}
-              >
-                <SelectBox
-                  value={
-                    engineId === "realcugan"
-                      ? cuganModel
-                      : catalog.find((e) => e.id === engineId)?.models[0]?.id ?? "cunet"
-                  }
-                  onChange={(id) => {
-                    if (engineId !== "realcugan") return;
-                    setCuganModel(id);
-                    localStorage.setItem("comic.cuganModel", id);
-                  }}
-                  options={(
-                    catalog.find((e) => e.id === engineId)?.models ??
-                    (engineId === "realcugan"
-                      ? [{ id: "se", label: "SE" }]
-                      : [{ id: "cunet", label: "CUnet" }])
-                  ).map((m) => ({ id: m.id, label: m.label }))}
-                />
-              </Field>
-              <div className="grid grid-cols-2 gap-4 items-end">
-                <Field
-                  label={i18n.noise}
-                  hint={engineId === "realcugan" ? i18n.noiseHintCugan : i18n.noiseHint}
-                >
-                  <SelectBox
-                    value={String(noise)}
-                    onChange={(v) => setNoise(Number(v) as -1 | 0 | 1 | 2 | 3)}
-                    options={[
-                      {
-                        id: "-1",
-                        label:
-                          engineId === "realcugan" ? i18n.noiseConservative : i18n.noiseOff,
-                      },
-                      { id: "0", label: i18n.noise0 },
-                      { id: "1", label: i18n.noise1 },
-                      { id: "2", label: i18n.noise2 },
-                      { id: "3", label: i18n.noise3 },
-                    ]}
-                  />
-                </Field>
-                <Field label={i18n.tta} hint={i18n.ttaHint}>
-                  <SelectBox
-                    value={tta ? "on" : "off"}
-                    onChange={(v) => setTta(v === "on")}
-                    options={[
-                      { id: "off", label: i18n.ttaOff },
-                      { id: "on", label: i18n.ttaOn },
-                    ]}
-                  />
-                </Field>
-              </div>
-              {accel && (
-                <Field label={i18n.threads}>
-                  <p className="min-h-[2.5rem] text-xs font-mono leading-5 text-success dark:text-emerald-200 break-all">
-                    {accel}
-                  </p>
-                </Field>
-              )}
-              <div className="grid grid-cols-2 gap-4">
-                <Field label={i18n.container} hint={i18n.containerHint}>
-                  <SelectBox
-                    value={container}
-                    onChange={setContainer}
-                    options={[
-                      { id: "cbz", label: i18n.containerCbz },
-                      { id: "zip", label: i18n.containerZip },
-                      { id: "folder", label: i18n.containerFolder },
-                    ]}
-                  />
-                </Field>
-                <Field
-                  label={i18n.imageFormat}
-                  hint={imageFormat === "png" ? i18n.formatHintPng : i18n.formatHintJpeg}
-                >
-                  <SelectBox
-                    value={imageFormat}
-                    onChange={setImageFormat}
-                    options={[
-                      { id: "jpeg", label: i18n.formatJpeg },
-                      { id: "png", label: i18n.formatPng },
-                      { id: "webp", label: i18n.formatWebp },
-                      { id: "same", label: i18n.formatSame },
-                    ]}
-                  />
-                </Field>
-              </div>
-              </div>
-              <div className="mt-4 flex gap-2">
-                <button
-                  type="button"
-                  className="btn-accent flex-1 py-2.5 text-base"
-                  disabled={!canStart}
-                  onClick={start}
-                >
-                  {busy ? "…" : i18n.start}
-                </button>
-                <button
-                  type="button"
-                  className="btn-ghost py-2.5 px-4"
-                  disabled={!source}
-                  onClick={() => {
-                    if (!source) return;
-                    openReader({
-                      source,
-                      jobId: jobs.find((j) => j.source === source)?.jobId ?? null,
-                      from: "enhance",
-                    });
-                  }}
-                >
-                  {i18n.readerRead}
-                </button>
-              </div>
-            </section>
-          </div>
+          <EnhanceView
+            i18n={i18n}
+            source={source}
+            sourceEntry={sourceEntry}
+            sourceLoading={sourceLoading}
+            validation={validation}
+            estimate={estimate}
+            estimateLoading={estimateLoading}
+            resumeHint={resumeHint}
+            dragOver={dragOver}
+            outputDir={outputDir}
+            container={container}
+            imageFormat={imageFormat}
+            preset={preset}
+            engineId={engineId}
+            cuganModel={cuganModel}
+            catalog={catalog}
+            scale={scale}
+            noise={noise}
+            tta={tta}
+            engine={engine}
+            busy={busy}
+            activeJob={activeSourceJob}
+            canStart={canStart}
+            engineReady={engineReady}
+            taskCreated={taskCreatedAt > 0}
+            onPickFile={pickSource}
+            onPickFolder={pickSourceFolder}
+            onPickOutput={pickOutput}
+            onOpenReader={openSourceReader}
+            onPresetChange={onPresetChange}
+            onEngineChange={onEngineChange}
+            onCuganModelChange={onCuganModelChange}
+            onScaleChange={setScale}
+            onNoiseChange={setNoise}
+            onTtaChange={setTta}
+            onContainerChange={setContainer}
+            onImageFormatChange={setImageFormat}
+            onStart={start}
+            onOpenQueue={() => setQueueOpen(true)}
+            onCancelJob={onCancelJob}
+          />
         )}
 
+
         {!reading && tab === "doctor" && (
-          <div className="space-y-6">
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className="btn-ghost" onClick={refreshDoctor}>
-                {i18n.refreshDoctor}
-              </button>
-              <button type="button" className="btn-primary" onClick={onExportDiag}>
-                {i18n.exportDiag}
-              </button>
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-ink-900 dark:text-fg">{i18n.statusTitle}</h2>
+                <p className="mt-1 text-sm text-ink-500 dark:text-fg-muted">{i18n.statusSubtitle}</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className="btn-ghost" onClick={refreshDoctor}>
+                  {i18n.refreshDoctor}
+                </button>
+                <button type="button" className="btn-primary" onClick={onExportDiag}>
+                  {i18n.exportDiag}
+                </button>
+              </div>
             </div>
             {diagPath && (
-              <div className="rounded-xl bg-success/10 border border-success/25 px-4 py-3 text-sm text-success dark:text-emerald-100 font-mono break-all">
+              <div className="rounded-xl border border-success/25 bg-success/10 px-4 py-3 font-mono text-sm text-success dark:text-emerald-100">
                 {diagPath}
               </div>
             )}
             {doctorReport && (
-              <div className="card p-6 space-y-4 text-sm">
-                <div className="grid sm:grid-cols-2 gap-3">
-                  <Info label="Version" value={doctorReport.appVersion} />
-                  <Info label="OS" value={`${doctorReport.os}/${doctorReport.arch}`} />
-                  <Info label="Engine" value={`${doctorReport.engine.id} · ${doctorReport.engine.detail}`} />
-                  <Info label="Mock" value={String(doctorReport.useMockEngine)} />
-                  <Info label="Host target" value={doctorReport.hostTarget} />
-                  <Info
-                    label="Waifu2x bundle"
-                    value={
-                      doctorReport.waifu2xBundleFound
-                        ? "found"
-                        : "missing (run scripts/fetch-waifu2x.sh)"
-                    }
-                  />
-                  <Info
-                    label="Waifu2x binary"
-                    value={doctorReport.waifu2xBinary ?? "—"}
-                  />
-                  <Info
-                    label="Models"
-                    value={doctorReport.waifu2xModels ?? "—"}
-                  />
-                  <Info label="Work root" value={doctorReport.workRoot} />
-                  <Info
-                    label="Free space"
-                    value={
-                      doctorReport.freeWorkBytes != null
-                        ? formatBytes(doctorReport.freeWorkBytes)
-                        : "—"
-                    }
-                  />
-                  <Info label="Jobs on disk" value={String(doctorReport.jobsOnDisk)} />
-                  <Info
-                    label="Enhance mode"
-                    value={doctorReport.enhanceMode ?? "directory"}
-                  />
-                  <Info
-                    label="Waifu2x -j threads"
-                    value={doctorReport.waifu2xJobs ?? "auto"}
-                  />
-                  <Info
-                    label="Extract threads"
-                    value={String(doctorReport.extractConcurrency ?? "—")}
-                  />
-                  <Info
-                    label="UnRAR (CBR)"
-                    value={
-                      doctorReport.unrarFound
-                        ? doctorReport.unrarBinary ?? "found"
-                        : "missing — brew install unrar"
-                    }
-                  />
-                  <Info label="Timestamp" value={doctorReport.timestamp} />
-                </div>
-                <div>
-                  <p className="label mb-2">GPUs</p>
-                  <ul className="space-y-1">
-                    {doctorReport.gpus.map((g) => (
-                      <li
-                        key={`${g.id}-${g.name}`}
-                        className="rounded-lg border border-ink-200 bg-ink-100 px-3 py-2 font-mono text-xs dark:bg-surface-raised dark:border-white/[0.08]"
-                      >
-                        [{g.id}] {g.name}
-                        {g.is_cpu ? " (CPU)" : ""}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+              <div className="space-y-4">
+                <section className="card p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="label">{i18n.statusTitle}</p>
+                      <p className="mt-1 text-sm text-ink-600 dark:text-fg-muted">
+                        {doctorReport.engine.detail}
+                      </p>
+                    </div>
+                    <span
+                      className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
+                        doctorReport.engine.available
+                          ? "border-success/30 bg-success/10 text-success dark:text-emerald-100"
+                          : "border-amber-400/40 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                      }`}
+                    >
+                      {doctorReport.engine.available ? i18n.statusReady : i18n.statusUnavailable}
+                    </span>
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <Info label={i18n.statusEngine} value={doctorReport.engine.id} />
+                    <Info
+                      label={i18n.statusDisk}
+                      value={
+                        doctorReport.freeWorkBytes != null
+                          ? formatBytes(doctorReport.freeWorkBytes)
+                          : "—"
+                      }
+                    />
+                    <Info
+                      label={i18n.statusUnrar}
+                      value={doctorReport.unrarFound ? i18n.statusAvailable : i18n.statusUnavailableValue}
+                    />
+                    <Info
+                      label={i18n.statusMock}
+                      value={doctorReport.useMockEngine ? i18n.statusAvailable : i18n.statusUnavailableValue}
+                    />
+                  </div>
+                </section>
+                <details className="card group">
+                  <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-medium text-ink-800 marker:hidden dark:text-fg">
+                    <span>{i18n.statusAdvanced}</span>
+                    <span className="text-ink-400 transition-transform group-open:rotate-180 dark:text-fg-muted">⌄</span>
+                  </summary>
+                  <div className="space-y-4 border-t border-ink-200 px-5 py-5 text-sm dark:border-white/[0.08]">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Info label="Version" value={doctorReport.appVersion} />
+                      <Info label="OS" value={`${doctorReport.os}/${doctorReport.arch}`} />
+                      <Info label="Host target" value={doctorReport.hostTarget} />
+                      <Info label="Jobs on disk" value={String(doctorReport.jobsOnDisk)} />
+                      <Info label="Enhance mode" value={doctorReport.enhanceMode ?? "directory"} />
+                      <Info label="Waifu2x -j threads" value={doctorReport.waifu2xJobs ?? "auto"} />
+                      <Info label="Extract threads" value={String(doctorReport.extractConcurrency ?? "—")} />
+                      <Info label="Timestamp" value={doctorReport.timestamp} />
+                      <Info label="Waifu2x bundle" value={doctorReport.waifu2xBundleFound ? "found" : "missing"} />
+                      <Info label="Waifu2x binary" value={doctorReport.waifu2xBinary ?? "—"} />
+                      <Info label="Models" value={doctorReport.waifu2xModels ?? "—"} />
+                      <Info label="Work root" value={doctorReport.workRoot} />
+                    </div>
+                    <div>
+                      <p className="label mb-2">GPUs</p>
+                      <ul className="space-y-1">
+                        {doctorReport.gpus.map((g) => (
+                          <li
+                            key={`${g.id}-${g.name}`}
+                            className="rounded-lg border border-ink-200 bg-ink-100 px-3 py-2 font-mono text-xs dark:border-white/[0.08] dark:bg-surface-raised"
+                          >
+                            [{g.id}] {g.name}{g.is_cpu ? " (CPU)" : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </details>
               </div>
             )}
           </div>
@@ -1486,159 +1406,6 @@ function ExternalImportModal({
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="min-w-0">
-      <div className="mb-2 flex min-h-4 items-center justify-between gap-3">
-        <p className="label shrink-0">{label}</p>
-        {hint && (
-          <p className="field-hint min-w-0 truncate text-right" title={hint}>
-            {hint}
-          </p>
-        )}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Segmented<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: { id: T; label: string }[];
-}) {
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {options.map((opt) => (
-        <button
-          key={opt.id}
-          type="button"
-          onClick={() => onChange(opt.id)}
-          className={`rounded-full px-3 py-2 text-sm border transition ${
-            value === opt.id
-              ? "border-ink-400 bg-ink-300 text-ink-800 dark:border-white/20 dark:bg-surface-high dark:text-fg"
-              : "border-ink-300 bg-ink-200/80 text-ink-700 hover:bg-ink-300 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg dark:hover:bg-surface-high"
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function SelectBox<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: { id: T; label: string }[];
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const selected = options.find((o) => o.id === value) ?? options[0];
-  const single = options.length <= 1;
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  return (
-    <div className="relative" ref={rootRef}>
-      <button
-        type="button"
-        disabled={single}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => {
-          if (!single) setOpen((v) => !v);
-        }}
-        className={`w-full h-10 flex items-center justify-between gap-2 rounded-full border px-3 text-sm text-left transition ${
-          open
-            ? "border-ink-950 bg-white text-ink-950 dark:border-fg dark:bg-surface-raised dark:text-fg"
-            : "border-ink-300 bg-white text-ink-800 hover:border-ink-500 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg dark:hover:border-white/20"
-        } disabled:opacity-80 disabled:cursor-default`}
-      >
-        <span className="truncate">{selected?.label ?? "—"}</span>
-        <svg
-          viewBox="0 0 20 20"
-          className={`h-4 w-4 shrink-0 text-ink-400 transition ${open ? "rotate-180 text-ink-950 dark:text-fg" : ""}`}
-          aria-hidden="true"
-        >
-          <path
-            fill="currentColor"
-            d="M5.3 7.3a1 1 0 0 1 1.4 0L10 10.58l3.3-3.3a1 1 0 1 1 1.4 1.42l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 0 1 0-1.42Z"
-          />
-        </svg>
-      </button>
-      {open && !single && (
-        <ul
-          role="listbox"
-          className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised/95 dark:backdrop-blur-md"
-        >
-          {options.map((opt) => {
-            const active = opt.id === value;
-            return (
-              <li key={opt.id}>
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={active}
-                  className={`flex w-full items-center justify-between px-3 py-2 text-sm text-left transition ${
-                    active
-                      ? "bg-ink-200 text-ink-950 dark:bg-surface-high dark:text-fg"
-                      : "text-ink-700 hover:bg-ink-100 hover:text-ink-950 dark:text-fg dark:hover:bg-surface-high dark:hover:text-fg"
-                  }`}
-                  onClick={() => {
-                    onChange(opt.id);
-                    setOpen(false);
-                  }}
-                >
-                  <span className="truncate">{opt.label}</span>
-                  {active && (
-                    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 shrink-0 text-ink-950 dark:text-fg" aria-hidden="true">
-                      <path
-                        fill="currentColor"
-                        d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.2 7.2a1 1 0 0 1-1.4 0L3.3 9.1a1 1 0 1 1 1.4-1.4l4.1 4.08 6.5-6.48a1 1 0 0 1 1.4 0Z"
-                      />
-                    </svg>
-                  )}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
     </div>
   );
 }
