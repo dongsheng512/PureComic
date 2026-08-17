@@ -170,7 +170,9 @@ int comic_esrgan_coreml_load(const char *model_path) {
         }
         /* FastPrediction 在 MLOptimizationHints.specializationStrategy（macOS 15+）。 */
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
-        if (@available(macOS 15.0, *)) {
+        /* 不用 @available：见 waifu2x_coreml.m（___isPlatformVersionAtLeast 链接失败）。 */
+        if ([[NSProcessInfo processInfo]
+                isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){15, 0, 0}]) {
             MLOptimizationHints *hints = cfg.optimizationHints;
             hints.specializationStrategy = MLSpecializationStrategyFastPrediction;
             cfg.optimizationHints = hints;

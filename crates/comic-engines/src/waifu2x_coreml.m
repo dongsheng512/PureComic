@@ -147,7 +147,10 @@ int comic_w2x_coreml_load(const char *model_path) {
         env = getenv("COMIC_W2X_FASTPRED");
         const BOOL use_fastpred = env && strcmp(env, "1") == 0;
         if (use_fastpred) {
-            if (@available(macOS 15.0, *)) {
+            /* 不用 @available：rustc 链 cc 目标文件时不带 clang_rt，
+               会留下未定义的 ___isPlatformVersionAtLeast。 */
+            if ([[NSProcessInfo processInfo]
+                    isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){15, 0, 0}]) {
                 MLOptimizationHints *hints = cfg.optimizationHints;
                 hints.specializationStrategy = MLSpecializationStrategyFastPrediction;
                 cfg.optimizationHints = hints;
