@@ -33,6 +33,11 @@
   "libraryDropHint": "CBZ / CBR / ZIP / folders supported",
   "libraryImporting": "Importing…",
   "libraryImportProgress": "Imported {done}/{total}",
+  "libraryNoticeAdded": "Added {title} · {pages} pages",
+  "libraryNoticeUpdated": "Refreshed {title} · {from} → {to} pages",
+  "libraryNoticeExists": "{title} is already in the library · {pages} pages",
+  "libraryNoticeDismiss": "Dismiss",
+  "libraryAlreadyHint": "Already in library — check to refresh page count and cover",
   "libraryTopLevelOnly": "top level only",
   "libraryRemove": "Remove",
   "libraryRemoveHint": "Removes the record only, not the file",
@@ -104,6 +109,7 @@
   "readerFullscreen": "Fullscreen",
   "readerExitFullscreen": "Exit fullscreen",
   "readerMore": "More",
+  "readerMode": "Reading mode",
   "readerJumpHint": "Type a page number and press Enter",
   "readerPageOf": "/",
   "import": "Import",
@@ -260,5 +266,11 @@
   "readerBgBlack": "Black",
   "readerBgDark": "Dark gray",
   "readerBgWhite": "White",
-  "readerBgSepia": "Sepia"
+  "readerBgSepia": "Sepia",
+  "readerWebtoon": "Vertical",
+  "readerWebtoonHint": "Fit width and scroll down",
+  "readerWebtoonNoDouble": "Double page is off in vertical mode",
+  "readerWebtoonNoRtl": "Vertical mode is top-to-bottom",
+  "readerWebtoonFitLocked": "Vertical mode fits width and does not resize the window",
+  "readerChapter": "Ch. {n}"
 }

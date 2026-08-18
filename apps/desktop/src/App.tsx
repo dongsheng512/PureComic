@@ -31,7 +31,7 @@ import {
   saveExternalOpenRemember,
   titleFromPath,
 } from "./externalOpen";
-import { stateLabel, t } from "./i18n";
+import { stateLabel, t, type Messages } from "./i18n";
 import { loadReaderBg, readerBgPreset } from "./reader/prefs";
 import { EnhanceView } from "./enhance/EnhanceView";
 import {
@@ -72,6 +72,36 @@ function readTheme(): Theme {
 }
 
 const THEME_BG = { light: "#FFFFFF", dark: "#212121" } as const;
+
+function yieldToPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
+function fillMsg(tpl: string, vars: Record<string, string | number>): string {
+  return tpl.replace(/\{(\w+)\}/g, (_, k: string) => String(vars[k] ?? ""));
+}
+
+function findLibraryByPath(list: LibraryEntry[], path: string): LibraryEntry | undefined {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const n = norm(path);
+  return list.find((e) => norm(e.path) === n);
+}
+
+function noticeForUpsert(i18n: Messages, before: LibraryEntry | undefined, entry: LibraryEntry): string {
+  if (!before) {
+    return fillMsg(i18n.libraryNoticeAdded, { title: entry.title, pages: entry.pageCount });
+  }
+  if (before.pageCount !== entry.pageCount) {
+    return fillMsg(i18n.libraryNoticeUpdated, {
+      title: entry.title,
+      from: before.pageCount,
+      to: entry.pageCount,
+    });
+  }
+  return fillMsg(i18n.libraryNoticeExists, { title: entry.title, pages: entry.pageCount });
+}
 
 function applyTheme(theme: Theme) {
   const bg = THEME_BG[theme];
@@ -221,6 +251,12 @@ export default function App() {
   const [libraryNotice, setLibraryNotice] = useState<string | null>(null);
   const [scanPreview, setScanPreview] = useState<LibraryScanPreview | null>(null);
 
+  useEffect(() => {
+    if (!libraryNotice || libraryImporting) return;
+    const timer = window.setTimeout(() => setLibraryNotice(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [libraryNotice, libraryImporting]);
+
   const refreshLibrary = useCallback(async () => {
     try {
       const list = await listLibrary();
@@ -265,10 +301,14 @@ export default function App() {
   const ingestPath = useCallback(
     async (path: string): Promise<LibraryEntry | null> => {
       setError(null);
+      setLibraryImporting(true);
+      setLibraryImportProgress(null);
+      await yieldToPaint();
       try {
+        const before = findLibraryByPath(libraryRef.current, path);
         const entry = await addLibraryPath(path);
         await refreshLibrary();
-        setLibraryNotice(null);
+        setLibraryNotice(noticeForUpsert(i18n, before, entry));
         return entry;
       } catch {
         try {
@@ -282,9 +322,11 @@ export default function App() {
           setLibraryScan(false);
         }
         return null;
+      } finally {
+        setLibraryImporting(false);
       }
     },
-    [refreshLibrary],
+    [i18n, refreshLibrary],
   );
 
   const refreshJobs = useCallback(async () => {
@@ -786,11 +828,16 @@ export default function App() {
     setLibraryImporting(true);
     setLibraryImportProgress({ done: 0, total: paths.length });
     setError(null);
+    await yieldToPaint();
     try {
       let done = 0;
+      let lastNotice: string | null = null;
+      const prior = libraryRef.current;
       for (const p of paths) {
         try {
-          await addLibraryPath(p);
+          const before = findLibraryByPath(prior, p);
+          const entry = await addLibraryPath(p);
+          lastNotice = noticeForUpsert(i18n, before, entry);
         } catch {
           /* single fail continues */
         }
@@ -798,14 +845,14 @@ export default function App() {
         setLibraryImportProgress({ done, total: paths.length });
       }
       await refreshLibrary();
-      setLibraryNotice(paths.length === 1 ? null : `已处理 ${paths.length} 个文件`);
+      setLibraryNotice(paths.length === 1 ? lastNotice : `已处理 ${paths.length} 个文件`);
     } catch (e) {
       setError(errMsg(e));
     } finally {
       setLibraryImporting(false);
       setLibraryImportProgress(null);
     }
-  }, [refreshLibrary]);
+  }, [i18n, refreshLibrary]);
 
   const onLibAddFolder = useCallback(async () => {
     const p = await pickFolder();
@@ -1118,8 +1165,16 @@ export default function App() {
         {!reading && tab === "library" && (
           <div className="flex min-h-0 flex-1 flex-col">
             {libraryNotice && (
-              <div className="mb-3 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:text-emerald-100">
-                {libraryNotice}
+              <div className="mb-3 flex items-start gap-2 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:text-emerald-100">
+                <p className="min-w-0 flex-1">{libraryNotice}</p>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md px-1.5 text-base leading-none text-success/80 hover:bg-success/15 hover:text-success"
+                  aria-label={i18n.libraryNoticeDismiss}
+                  onClick={() => setLibraryNotice(null)}
+                >
+                  ×
+                </button>
               </div>
             )}
             <LibraryView

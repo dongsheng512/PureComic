@@ -31,8 +31,8 @@ pub fn list_epub_images(path: &Path, cfg: &AppConfig) -> AppResult<(Vec<String>,
         let entry = archive
             .by_index(i)
             .map_err(|e| AppError::internal(format!("EPUB 条目: {e}")))?;
-        let name = entry.name().to_string();
-        if name.ends_with('/') {
+        let name = crate::archive::decode_zip_name(entry.name_raw());
+        if name.ends_with('/') || crate::archive::is_ignored_archive_entry(&name) {
             continue;
         }
         let safe = sanitize_entry_path(&name)?;

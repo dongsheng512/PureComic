@@ -124,6 +124,16 @@ export async function restoreDefaultWindowMinSize() {
   }
 }
 
+/** 竖读：允许把窗口缩到比书库默认更窄，图片才能跟着变小、一页能看全。 */
+export async function allowCompactWindowMinSize() {
+  try {
+    const win = getCurrentWindow();
+    await win.setMinSize(new LogicalSize(SMART_MIN.width, SMART_MIN.height));
+  } catch {
+    /* ignore */
+  }
+}
+
 /** 根据已加载页 URL 列表量尺寸并贴合窗口 */
 export async function fitWindowToPageUrls(
   urls: string[],

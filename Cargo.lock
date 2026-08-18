@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "comic-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -611,13 +611,14 @@ dependencies = [
 
 [[package]]
 name = "comic-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "comic-engines",
+ "encoding_rs",
  "fs2",
  "hex",
  "image",
@@ -640,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "comic-engines"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "cc",
@@ -1167,6 +1168,15 @@ name = "encoding_index_tests"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a246d82be1c9d791c5dfde9a2bd045fc3cbba3fa2b11ad558f27d01712f00569"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
 
 [[package]]
 name = "endi"
@@ -3068,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "purecomic"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "comic-core",
  "comic-engines",

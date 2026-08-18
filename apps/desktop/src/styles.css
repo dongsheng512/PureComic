@@ -224,11 +224,11 @@ html.dark .app-topbar {
   /* —— 书库卡片悬浮操作 —— */
   .card-action-scrim {
     @apply pointer-events-none absolute inset-x-0 top-0 z-[3] h-14 opacity-0 transition-opacity duration-200;
-    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.38) 0%, transparent 100%);
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.12) 0%, transparent 100%);
   }
 
   .card-action-bar {
-    @apply absolute right-1.5 top-1.5 z-10 flex items-center gap-1.5 opacity-0 transition-all duration-200;
+    @apply absolute right-2 top-2 z-10 flex items-center gap-1.5 opacity-0 transition-all duration-200;
   }
 
   .group:hover .card-action-scrim,
@@ -239,59 +239,59 @@ html.dark .app-topbar {
   }
 
   .btn-card-enhance {
-    @apply inline-flex h-7 items-center justify-center rounded-full px-2.5 text-[11px] font-medium text-white
-      disabled:pointer-events-none disabled:opacity-40;
-    background-color: var(--accent-cta);
-    border: 1px solid rgba(0, 122, 255, 0.35);
-    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.18);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    transition:
-      transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-      background-color 0.15s ease,
-      box-shadow 0.15s ease;
-  }
-
-  .btn-card-enhance:hover:not(:disabled) {
-    background-color: var(--accent-cta-hover);
-    transform: translateY(-1px);
-    box-shadow: 0 3px 10px rgba(0, 122, 255, 0.22);
-  }
-
-  .btn-card-enhance:active:not(:disabled) {
-    transform: translateY(0);
-  }
-
-  /* 破坏性次操作：图标按钮，降低误触与抢焦 */
-  .btn-card-remove {
-    @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full;
-    color: #ff3b30;
-    background-color: rgba(255, 255, 255, 0.88);
+    @apply inline-flex h-8 items-center justify-center rounded-lg px-2.5 text-[11px] font-medium
+      text-ink-800 transition disabled:pointer-events-none disabled:opacity-40;
+    background: rgba(255, 255, 255, 0.9);
     border: 1px solid rgba(0, 0, 0, 0.1);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition:
-      transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
-      background-color 0.15s ease,
-      color 0.15s ease,
-      border-color 0.15s ease;
   }
 
-  .btn-card-remove:hover {
-    background-color: #ff3b30;
-    border-color: #ff3b30;
-    color: #ffffff;
+  .btn-card-enhance:hover:not(:disabled),
+  .btn-card-enhance:focus-visible:not(:disabled) {
+    background: #eaf3ff;
+    border-color: #b8d7ff;
+    color: #0066d6;
+    transform: translateY(-1px);
+    box-shadow: 0 3px 9px rgba(0, 122, 255, 0.14);
+  }
+
+  .btn-card-enhance:active:not(:disabled),
+  .btn-card-remove:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  /* 破坏性次操作：默认中性，悬停时才变为系统红 */
+  .btn-card-remove {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition;
+    color: #6e6e73;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+
+  .btn-card-remove:hover:not(:disabled),
+  .btn-card-remove:focus-visible:not(:disabled) {
+    background: #fff1f0;
+    border-color: #ffb8b3;
+    color: #ff3b30;
     transform: translateY(-1px);
   }
 
-  .btn-card-remove:active {
-    transform: translateY(0);
+  .btn-card-remove:focus-visible,
+  .btn-card-enhance:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.35), 0 2px 6px rgba(0, 0, 0, 0.08);
   }
 
   .btn-card-remove svg {
-    @apply h-3.5 w-3.5;
+    width: 15px;
+    height: 15px;
   }
+
 }
 
 /* 深色模式：组件层 */
@@ -401,31 +401,36 @@ html.dark .cover-scrim {
 }
 
 html.dark .card-action-scrim {
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.5) 0%, transparent 100%);
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.22) 0%, transparent 100%);
 }
 
 html.dark .btn-card-enhance {
-  background-color: var(--accent-cta);
-  border-color: rgba(255, 255, 255, 0.14);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  color: var(--ink-soft);
+  background: rgba(47, 47, 47, 0.92);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
 }
 
-html.dark .btn-card-enhance:hover:not(:disabled) {
-  background-color: var(--accent-action-hover);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+html.dark .btn-card-enhance:hover:not(:disabled),
+html.dark .btn-card-enhance:focus-visible:not(:disabled) {
+  color: #72b7ff;
+  background: rgba(0, 122, 255, 0.18);
+  border-color: rgba(114, 183, 255, 0.42);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.34);
 }
 
 html.dark .btn-card-remove {
-  color: #ff453a;
-  background-color: rgba(35, 37, 45, 0.78);
+  color: #b0b0b5;
+  background: rgba(47, 47, 47, 0.92);
   border-color: rgba(255, 255, 255, 0.12);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
 }
 
-html.dark .btn-card-remove:hover {
-  background-color: rgba(255, 69, 58, 0.9);
-  border-color: rgba(255, 69, 58, 0.95);
-  color: #ffffff;
+html.dark .btn-card-remove:hover:not(:disabled),
+html.dark .btn-card-remove:focus-visible:not(:disabled) {
+  background: rgba(255, 59, 48, 0.14);
+  border-color: rgba(255, 120, 113, 0.42);
+  color: #ff8179;
 }
 
 /* —— 阅读器顶栏：弱边框 ghost，选中高亮 —— */
@@ -467,6 +472,10 @@ html.dark .btn-card-remove:hover {
     text-ink-600 transition dark:text-fg-muted;
 }
 
+.reader-seg-item + .reader-seg-item {
+  margin-left: 0.25rem;
+}
+
 .reader-seg-item:hover:not(.is-active) {
   @apply text-ink-900 dark:text-fg;
 }
@@ -483,6 +492,10 @@ html.dark .btn-card-remove:hover {
     hover:bg-ink-200/80 dark:text-fg dark:hover:bg-white/[0.08];
 }
 
+.reader-page-chip-sm {
+  @apply w-[5.25rem] px-1 text-[11px];
+}
+
 .reader-menu {
   @apply absolute top-full right-0 z-[80] mt-1.5 min-w-[11rem] overflow-hidden rounded-xl
     border border-ink-200 bg-white py-1 shadow-panel
@@ -494,9 +507,7 @@ html.dark .btn-card-remove:hover {
   @apply w-[300px];
 }
 
-/* —— AI 画质：28×28 纯图标开关按钮 —— */
-/* 品牌绿降饱和（HSB S−10pp / B−5pp，仅用于 accent 场景）：
-   亮色取 emerald-600 #059669 → #128A64；暗色取 emerald-500 #10b981 → #21AD7F */
+/* —— AI 画质：与旁边阅读模式组同高、同层级 —— */
 :root {
   --ai-accent: #128a64;
   --ai-accent-soft: rgba(18, 138, 100, 0.16);
@@ -508,18 +519,22 @@ html.dark {
   --ai-dot-halo: rgba(22, 23, 28, 0.95);
 }
 
-/* 入口按钮：默认次级灰；开启染 accent 绿 + 右下角小圆点；增强中呼吸微光 */
+/* 默认使用与 reader-seg 相同的浅灰底，避免白色按钮显得发虚 */
 .reader-ai-trigger {
   @apply relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent
-    text-ink-700 transition dark:text-fg-muted;
+    text-ink-700 transition dark:bg-white/[0.06] dark:text-fg-muted;
+  background: rgba(0, 0, 0, 0.08);
+  box-shadow: none;
 }
 
 .reader-ai-trigger:hover:not(:disabled) {
-  @apply bg-black/[0.08] dark:bg-white/[0.08];
+  @apply bg-black/[0.12] dark:bg-white/[0.1];
+  box-shadow: none;
 }
 
 .reader-ai-trigger:active:not(:disabled) {
-  @apply bg-black/[0.12] dark:bg-white/[0.12];
+  @apply bg-black/[0.16] dark:bg-white/[0.14];
+  box-shadow: none;
 }
 
 .reader-ai-trigger:disabled {
@@ -528,6 +543,8 @@ html.dark {
 
 .reader-ai-trigger.is-on {
   color: var(--ai-accent);
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
 .reader-ai-trigger.is-busy {
@@ -542,6 +559,11 @@ html.dark {
   50% {
     box-shadow: 0 0 0 5px transparent;
   }
+}
+
+html.dark .reader-ai-trigger.is-on {
+  background: var(--surface-high);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
 }
 
 .reader-ai-dot {
@@ -798,6 +820,39 @@ html.dark .reader-range::-webkit-slider-thumb {
 
 .reader-page-img {
   transition: opacity 0.28s ease;
+}
+
+/* Strip pages must not fade: remount/decode would flash the canvas. */
+.reader-viewport {
+  overflow-anchor: none;
+}
+
+.reader-strip,
+.reader-strip-page {
+  overflow-anchor: none;
+}
+
+.reader-strip .reader-page-img {
+  display: block;
+  opacity: 1;
+  transition: none;
+  background: var(--reader-canvas, #000);
+}
+
+.reader-strip-page {
+  background: var(--reader-canvas, #000);
+}
+
+/* 书库列表可滚，但不画右侧滚动条 */
+.lib-scroll {
+  overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.lib-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* 书库工具条：排序 / 过滤 / 视图 — 统一轻量胶囊 */

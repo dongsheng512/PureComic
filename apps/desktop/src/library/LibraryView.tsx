@@ -46,7 +46,9 @@ function coverUrl(path?: string, cacheKey?: string): string | null {
   try {
     // 空格等字符由 convertFileSrc 处理；附加 cacheKey 避免重生成后仍用旧缓存
     const src = convertFileSrc(path);
-    const bust = cacheKey ? encodeURIComponent(cacheKey) : encodeURIComponent(path);
+    const bust = cacheKey
+      ? encodeURIComponent(cacheKey)
+      : encodeURIComponent(path);
     return `${src}${src.includes("?") ? "&" : "?"}v=${bust}`;
   } catch {
     return null;
@@ -517,9 +519,9 @@ function LibraryView({
           <p className="mt-2 max-w-md text-xs text-ink-500 dark:text-fg-muted">{i18n.libraryHint}</p>
         </button>
       ) : view === "list" ? (
-        <ul className="min-h-0 flex-1 space-y-1 overflow-auto pb-4">
+        <ul className="lib-scroll min-h-0 flex-1 space-y-1 pb-4">
           {processed.map((e) => {
-            const cover = coverUrl(e.coverPath, e.id);
+            const cover = coverUrl(e.coverPath, `${e.id}:${e.pageCount}:${e.coverPath ?? ""}`);
             const page = progressOf(e);
             return (
               <li key={e.id}>
@@ -575,9 +577,9 @@ function LibraryView({
           })}
         </ul>
       ) : (
-        <ul className="grid grid-cols-3 gap-3 overflow-auto pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
+        <ul className="lib-scroll grid min-h-0 flex-1 grid-cols-3 gap-3 pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
           {processed.map((e) => {
-            const cover = coverUrl(e.coverPath, e.id);
+            const cover = coverUrl(e.coverPath, `${e.id}:${e.pageCount}:${e.coverPath ?? ""}`);
             const page = progressOf(e);
             return (
               <li key={e.id}>
@@ -781,6 +783,9 @@ function ScanPicker({
             {preview.root}
             {!includeSubfolders ? ` · ${i18n.libraryTopLevelOnly}` : ""}
           </p>
+          {candidates.some((c) => c.alreadyInLibrary) && (
+            <p className="mt-1 text-[11px] text-ink-400">{i18n.libraryAlreadyHint}</p>
+          )}
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
           {candidates.length === 0 && (
@@ -789,24 +794,22 @@ function ScanPicker({
           {candidates.map((c) => (
             <label
               key={c.path}
-              className={`flex cursor-pointer items-start gap-2 rounded-xl px-2 py-2 text-sm ${
-                c.alreadyInLibrary ? "opacity-50" : "hover:bg-ink-50 dark:hover:bg-surface-raised"
-              }`}
+              className="flex cursor-pointer items-start gap-2 rounded-xl px-2 py-2 text-sm hover:bg-ink-50 dark:hover:bg-surface-raised"
             >
               <input
                 type="checkbox"
                 className="mt-1"
-                disabled={c.alreadyInLibrary}
-                checked={c.alreadyInLibrary || picked.has(c.path)}
-                onChange={() => {
-                  if (!c.alreadyInLibrary) toggle(c.path);
-                }}
+                checked={picked.has(c.path)}
+                onChange={() => toggle(c.path)}
               />
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium text-ink-900 dark:text-fg">{c.title}</span>
                 <span className="block truncate text-[11px] text-ink-500">{c.path}</span>
               </span>
-              <span className="shrink-0 text-[11px] text-ink-400">
+              <span
+                className="shrink-0 text-[11px] text-ink-400"
+                title={c.alreadyInLibrary ? i18n.libraryAlreadyHint : undefined}
+              >
                 {c.alreadyInLibrary ? i18n.libraryAlready : c.kind.toUpperCase()}
               </span>
             </label>
@@ -834,7 +837,7 @@ function ScanPicker({
               disabled={importing || picked.size === 0}
               onClick={() => onConfirm([...picked])}
             >
-              {importing ? i18n.libraryScanning : `${i18n.libraryImportSelected} (${picked.size})`}
+              {importing ? i18n.libraryImporting : `${i18n.libraryImportSelected} (${picked.size})`}
             </button>
           </div>
         </div>

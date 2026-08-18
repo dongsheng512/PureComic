@@ -131,6 +131,7 @@ export type LibraryScanPreview = {
 
 export type LibraryScanResult = {
   added: number;
+  updated?: number;
   existed: number;
   skipped: number;
   failed: number;

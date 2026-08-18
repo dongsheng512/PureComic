@@ -33,6 +33,11 @@
   "libraryDropHint": "支持 CBZ / CBR / ZIP / 文件夹",
   "libraryImporting": "正在导入…",
   "libraryImportProgress": "已导入 {done}/{total}",
+  "libraryNoticeAdded": "已导入 {title} · {pages} 页",
+  "libraryNoticeUpdated": "已刷新 {title} · {from} → {to} 页",
+  "libraryNoticeExists": "{title} 已在书库 · {pages} 页",
+  "libraryNoticeDismiss": "关闭",
+  "libraryAlreadyHint": "已在书库，勾选可刷新页数和封面",
   "libraryTopLevelOnly": "仅顶层",
   "libraryRemove": "移出书库",
   "libraryRemoveHint": "只删除记录，不删除原文件",
@@ -104,6 +109,7 @@
   "readerFullscreen": "全屏",
   "readerExitFullscreen": "退出全屏",
   "readerMore": "更多",
+  "readerMode": "阅读模式",
   "readerJumpHint": "输入页码后回车跳转",
   "readerPageOf": "/",
   "import": "导入漫画",
@@ -260,5 +266,11 @@
   "readerBgBlack": "纯黑",
   "readerBgDark": "深灰",
   "readerBgWhite": "纯白",
-  "readerBgSepia": "暖纸"
+  "readerBgSepia": "暖纸",
+  "readerWebtoon": "竖读",
+  "readerWebtoonHint": "宽度撑满，向下滚动",
+  "readerWebtoonNoDouble": "竖读时不可双页",
+  "readerWebtoonNoRtl": "竖读固定从上到下",
+  "readerWebtoonFitLocked": "竖读使用适应宽度，不改变窗口",
+  "readerChapter": "第 {n} 话"
 }

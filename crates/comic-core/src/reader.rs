@@ -275,11 +275,24 @@ fn display_ext(name: &str) -> &'static str {
     }
 }
 
-fn extract_cache_path(cfg: &AppConfig, source: &Path, page_index: u32, ext: &str) -> PathBuf {
+fn page_name_tag(name: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(name.as_bytes());
+    hex::encode(&h.finalize()[..4])
+}
+
+fn extract_cache_path_for_name(
+    cfg: &AppConfig,
+    source: &Path,
+    page_index: u32,
+    name: &str,
+    ext: &str,
+) -> PathBuf {
+    let tag = page_name_tag(name);
     cfg.work_root
         .join("reader")
         .join(source_cache_key(source))
-        .join(format!("{page_index:04}.{ext}"))
+        .join(format!("{page_index:04}.{tag}.{ext}"))
 }
 
 pub(crate) fn extract_original(
@@ -302,12 +315,15 @@ pub(crate) fn extract_original(
         }
     }
     let ext = display_ext(&name);
-    let dest = extract_cache_path(cfg, source, page_index, ext);
+    let dest = extract_cache_path_for_name(cfg, source, page_index, &name, ext);
+    if dest.is_file() && !crate::image_io::file_looks_like_image(&dest) {
+        let _ = std::fs::remove_file(&dest);
+    }
     if !dest.is_file() {
         archive::extract_page_native(source, kind, page_index, &name, &dest, cfg)?;
-        if dest.is_file() && dest.metadata().map(|m| m.len() == 0).unwrap_or(false) {
+        if dest.is_file() && !crate::image_io::file_looks_like_image(&dest) {
             let _ = std::fs::remove_file(&dest);
-            return Err(AppError::internal("抽取结果为空"));
+            return Err(AppError::internal("抽取结果不是可显示的图片"));
         }
     }
     Ok((name, dest))
@@ -501,7 +517,7 @@ mod tests {
             let mut w = ZipWriter::new(f);
             w.start_file("001.jpg", SimpleFileOptions::default())
                 .unwrap();
-            w.write_all(b"FAKEJPEG-BYTES").unwrap();
+            w.write_all(b"\xFF\xD8\xFFFAKEJPEG-BYTES").unwrap();
             w.finish().unwrap();
         }
         let cfg = AppConfig {
@@ -511,13 +527,41 @@ mod tests {
         let file = resolve_source_page(&cbz, 0, &cfg).unwrap();
         assert_eq!(file.kind, "original");
         assert!(
-            file.path.ends_with(".jpg"),
+            file.path.contains(".jpg"),
             "expected native jpeg cache, got {}",
             file.path
         );
-        assert_eq!(std::fs::read(&file.path).unwrap(), b"FAKEJPEG-BYTES");
+        assert_eq!(std::fs::read(&file.path).unwrap(), b"\xFF\xD8\xFFFAKEJPEG-BYTES");
         let again = resolve_source_page(&cbz, 0, &cfg).unwrap();
         assert_eq!(again.path, file.path);
+    }
+
+    #[test]
+    fn stale_appledouble_cache_is_reextracted() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cbz = tmp.path().join("book.cbz");
+        let jpeg = b"\xFF\xD8\xFFreal-page";
+        {
+            let f = std::fs::File::create(&cbz).unwrap();
+            let mut w = ZipWriter::new(f);
+            w.start_file("001.jpg", SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(jpeg).unwrap();
+            w.finish().unwrap();
+        }
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            ..Default::default()
+        };
+        let dest = extract_cache_path_for_name(&cfg, &cbz, 0, "001.jpg", "jpg");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, [0x00, 0x05, 0x16, 0x07, 0, 0, 0, 0]).unwrap();
+        let file = resolve_source_page(&cbz, 0, &cfg).unwrap();
+        assert_eq!(std::fs::read(&file.path).unwrap(), jpeg);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::job::ImageFormat;
 use image::{DynamicImage, ImageFormat as ImgFmt};
+use std::io::Read;
 use std::path::Path;
 
 pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
@@ -19,6 +20,35 @@ pub fn is_image_path(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// Magic-byte sniff (JPEG / PNG / WebP / GIF / BMP). AppleDouble `._*` 会失败。
+pub fn sniff_image_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("jpg");
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Some("png");
+    }
+    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some("gif");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("bmp");
+    }
+    None
+}
+
+pub fn file_looks_like_image(path: &Path) -> bool {
+    let mut buf = [0u8; 16];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let n = f.read(&mut buf).unwrap_or(0);
+    n > 0 && sniff_image_ext(&buf[..n]).is_some()
 }
 
 /// Decode by magic bytes, not the file extension. Comic archives often store

@@ -103,6 +103,9 @@ pub fn list_rar_images(
             has_comic_info = true;
             continue;
         }
+        if crate::archive::is_ignored_archive_entry(&safe_str) {
+            continue;
+        }
         if is_image_path(Path::new(&safe_str)) {
             images.push(safe_str);
         }

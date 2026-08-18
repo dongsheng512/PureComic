@@ -8,7 +8,7 @@ use crate::job::{ImageFormat, JobManifest, OutputContainer, PageRecord, PageStat
 use crate::natural_sort::natural_cmp;
 use crate::security::{check_entry_limits, sanitize_entry_path};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
@@ -22,6 +22,59 @@ pub struct ValidateResult {
     pub has_comic_info: bool,
     pub warnings: Vec<String>,
     pub page_names: Vec<String>,
+}
+
+/// Finder / Windows 夹带的非页面条目（解压进阅读器会变成「乱码页」）。
+pub(crate) fn is_ignored_archive_entry(name: &str) -> bool {
+    name.replace('\\', "/").split('/').any(|part| {
+        if part.is_empty() {
+            return false;
+        }
+        let lower = part.to_ascii_lowercase();
+        lower == "__macosx"
+            || lower == "thumbs.db"
+            || lower == "desktop.ini"
+            || part.starts_with('.')
+    })
+}
+
+/// ZIP 本地文件名：无 Language encoding bit 时 zip crate 按 CP437 解。
+/// macOS 压缩工具常写 UTF-8 却不置位；中文 Windows 则多为 GBK/GB18030。
+pub(crate) fn decode_zip_name(raw: &[u8]) -> String {
+    let s = if let Ok(s) = std::str::from_utf8(raw) {
+        s.to_string()
+    } else if let Some(cow) =
+        encoding_rs::GB18030.decode_without_bom_handling_and_without_replacement(raw)
+    {
+        cow.into_owned()
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    s.replace('\\', "/")
+}
+
+fn zip_entry_name(entry: &zip::read::ZipFile<'_>) -> String {
+    decode_zip_name(entry.name_raw())
+}
+
+fn find_zip_entry_index<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    want: &str,
+) -> AppResult<usize> {
+    let want = want.replace('\\', "/");
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let decoded = zip_entry_name(&entry);
+        if decoded == want || entry.name().replace('\\', "/") == want {
+            return Ok(i);
+        }
+    }
+    Err(AppError::not_found(format!("压缩包中找不到页: {want}")))
 }
 
 pub fn validate_source(path: &Path, cfg: &AppConfig) -> AppResult<ValidateResult> {
@@ -97,6 +150,9 @@ fn collect_folder_images(root: &Path) -> AppResult<Vec<String>> {
                 .unwrap_or(p)
                 .to_string_lossy()
                 .replace('\\', "/");
+            if is_ignored_archive_entry(&rel) {
+                continue;
+            }
             names.push(rel);
         }
     }
@@ -119,8 +175,8 @@ fn validate_zip(path: &Path, cfg: &AppConfig) -> AppResult<ValidateResult> {
         let entry = archive
             .by_index(i)
             .map_err(|e| AppError::internal(format!("读取 zip 条目失败: {e}")))?;
-        let name = entry.name().to_string();
-        if name.ends_with('/') {
+        let name = zip_entry_name(&entry);
+        if name.ends_with('/') || is_ignored_archive_entry(&name) {
             continue;
         }
         // symlink / unix mode check — zip crate may not always flag; reject absolute etc.
@@ -178,35 +234,7 @@ pub fn extract_zip_entry_raw(source: &Path, name: &str, dest: &Path) -> AppResul
     let file = File::open(source)?;
     let mut archive =
         ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开压缩包: {e}")))?;
-    let want = name.replace('\\', "/");
-    let tmp = unique_tmp_sibling(dest);
-    if archive.by_name(&want).is_ok() {
-        let mut entry = archive
-            .by_name(&want)
-            .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
-        let declared = entry.size();
-        let mut f = File::create(&tmp)?;
-        if let Err(e) = copy_limited(&mut entry, &mut f, declared) {
-            drop(f);
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        drop(f);
-        std::fs::rename(&tmp, dest)?;
-        return Ok(());
-    }
-    let mut found = None;
-    for i in 0..archive.len() {
-        let entry = archive
-            .by_index(i)
-            .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
-        let ename = entry.name().replace('\\', "/");
-        if ename == want {
-            found = Some(i);
-            break;
-        }
-    }
-    let idx = found.ok_or_else(|| AppError::not_found(format!("压缩包中找不到页: {name}")))?;
+    let idx = find_zip_entry_index(&mut archive, name)?;
     let mut entry = archive
         .by_index(idx)
         .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
@@ -244,8 +272,11 @@ pub fn extract_page_native(
     dest: &Path,
     cfg: &AppConfig,
 ) -> AppResult<()> {
-    if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-        return Ok(());
+    if dest.is_file() {
+        if image_io::file_looks_like_image(dest) {
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(dest);
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -341,23 +372,7 @@ fn extract_zip_entry_to_png(source: &Path, name: &str, dest_png: &Path) -> AppRe
     let file = File::open(source)?;
     let mut archive =
         ZipArchive::new(file).map_err(|e| AppError::unsupported(format!("无法打开压缩包: {e}")))?;
-    let mut found = None;
-    for i in 0..archive.len() {
-        let entry = archive
-            .by_index(i)
-            .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
-        let ename = entry.name().to_string();
-        if ename.ends_with('/') {
-            continue;
-        }
-        let safe = sanitize_entry_path(&ename)?;
-        let safe_str = safe.to_string_lossy().replace('\\', "/");
-        if safe_str == name {
-            found = Some(i);
-            break;
-        }
-    }
-    let idx = found.ok_or_else(|| AppError::not_found(format!("压缩包中找不到页: {name}")))?;
+    let idx = find_zip_entry_index(&mut archive, name)?;
     let mut entry = archive
         .by_index(idx)
         .map_err(|e| AppError::internal(format!("读取页失败: {e}")))?;
@@ -749,8 +764,8 @@ fn extract_zip(
         let entry = archive
             .by_index(i)
             .map_err(|e| AppError::internal(format!("zip 条目: {e}")))?;
-        let name = entry.name().to_string();
-        if name.ends_with('/') {
+        let name = zip_entry_name(&entry);
+        if name.ends_with('/') || is_ignored_archive_entry(&name) {
             continue;
         }
         // 与 validate_source 的语义保持一致：恶意/超限条目跳过（警告），
@@ -1304,5 +1319,158 @@ mod tests {
             .detail
             .unwrap_or_default()
             .contains("brew install unrar"));
+    }
+
+    #[test]
+    fn decode_zip_name_utf8_and_gbk() {
+        assert_eq!(decode_zip_name("绍宋/8.jpg".as_bytes()), "绍宋/8.jpg");
+        let (gbk, _, _) = encoding_rs::GBK.encode("绍宋/Chapter_001/8.jpg");
+        assert_eq!(decode_zip_name(&gbk), "绍宋/Chapter_001/8.jpg");
+        assert!(is_ignored_archive_entry("__MACOSX/绍宋/._8.jpg"));
+        assert!(is_ignored_archive_entry("绍宋/._8.jpg"));
+        assert!(is_ignored_archive_entry("绍宋/.DS_Store"));
+        assert!(!is_ignored_archive_entry("绍宋/Chapter_060/8.jpg"));
+    }
+
+    fn clear_zip_utf8_flags(buf: &mut [u8]) {
+        let mut i = 0;
+        while i + 10 < buf.len() {
+            if buf[i..].starts_with(b"PK\x03\x04") {
+                let f = u16::from_le_bytes([buf[i + 6], buf[i + 7]]) & !0x800;
+                buf[i + 6] = f as u8;
+                buf[i + 7] = (f >> 8) as u8;
+                i += 4;
+            } else if buf[i..].starts_with(b"PK\x01\x02") {
+                let f = u16::from_le_bytes([buf[i + 8], buf[i + 9]]) & !0x800;
+                buf[i + 8] = f as u8;
+                buf[i + 9] = (f >> 8) as u8;
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn crc32_ieee(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    fn write_stored_zip(path: &Path, entries: &[(&[u8], &[u8])]) {
+        let mut locals = Vec::new();
+        let mut centrals = Vec::new();
+        let mut offset = 0u32;
+        for (name, data) in entries {
+            let crc = crc32_ieee(data);
+            let mut local = Vec::new();
+            local.extend_from_slice(b"PK\x03\x04");
+            local.extend_from_slice(&20u16.to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(&crc.to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes());
+            local.extend_from_slice(name);
+            local.extend_from_slice(data);
+            let mut central = Vec::new();
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name);
+            offset += local.len() as u32;
+            locals.extend_from_slice(&local);
+            centrals.extend_from_slice(&central);
+        }
+        let mut out = locals;
+        let cd_off = out.len() as u32;
+        out.extend_from_slice(&centrals);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        let n = entries.len() as u16;
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(centrals.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_off.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn zip_skips_macos_junk_and_decodes_utf8_without_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("p.png");
+        write_tiny_png(&png_path);
+        let data = std::fs::read(&png_path).unwrap();
+        let zip_path = dir.path().join("book.zip");
+        {
+            let file = File::create(&zip_path).unwrap();
+            let mut zip = ZipWriter::new(file);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("绍宋/Chapter_001/8.jpg", opts).unwrap();
+            zip.write_all(&data).unwrap();
+            zip.start_file("__MACOSX/绍宋/Chapter_001/._8.jpg", opts)
+                .unwrap();
+            zip.write_all(&[0, 5, 0x16, 7, 0, 0, 0, 0]).unwrap();
+            zip.start_file("绍宋/Chapter_001/._8.jpg", opts).unwrap();
+            zip.write_all(&[0, 5, 0x16, 7]).unwrap();
+            zip.finish().unwrap();
+        }
+        let mut bytes = std::fs::read(&zip_path).unwrap();
+        clear_zip_utf8_flags(&mut bytes);
+        std::fs::write(&zip_path, bytes).unwrap();
+
+        let cfg = AppConfig::default();
+        let v = validate_source(&zip_path, &cfg).unwrap();
+        assert_eq!(v.page_count, 1);
+        assert_eq!(v.page_names[0], "绍宋/Chapter_001/8.jpg");
+
+        let dest = dir.path().join("out.jpg");
+        extract_zip_entry_raw(&zip_path, "绍宋/Chapter_001/8.jpg", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+    }
+
+    #[test]
+    fn zip_decodes_gbk_names_without_utf8_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("p.png");
+        write_tiny_png(&png_path);
+        let data = std::fs::read(&png_path).unwrap();
+        let (name, _, _) = encoding_rs::GBK.encode("绍宋/001.png");
+        let zip_path = dir.path().join("gbk.zip");
+        write_stored_zip(&zip_path, &[(&name, data.as_slice())]);
+
+        let cfg = AppConfig::default();
+        let v = validate_source(&zip_path, &cfg).unwrap();
+        assert_eq!(v.page_count, 1);
+        assert_eq!(v.page_names[0], "绍宋/001.png");
     }
 }

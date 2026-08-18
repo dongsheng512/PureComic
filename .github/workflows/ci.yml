@@ -77,3 +77,6 @@ jobs:
       - name: typecheck + build
         working-directory: apps/desktop
         run: npm run build
+      - name: test
+        working-directory: apps/desktop
+        run: npm test

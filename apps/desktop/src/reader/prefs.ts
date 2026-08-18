@@ -1,12 +1,14 @@
 export type SpreadMode = "single" | "double";
 export type ReadDirection = "ltr" | "rtl";
 export type FitMode = "screen" | "smart";
+export type ReaderViewMode = "page" | "webtoon";
 
 export type ReaderPref = {
   pageIndex: number;
   spread: SpreadMode;
   direction: ReadDirection;
   fit: FitMode;
+  view?: ReaderViewMode;
 };
 
 const KEY = "comic.reader.prefs";
@@ -16,6 +18,7 @@ const DEFAULT_PREF: ReaderPref = {
   spread: "single",
   direction: "ltr",
   fit: "screen",
+  view: "page",
 };
 
 function loadAll(): Record<string, ReaderPref> {
@@ -42,6 +45,7 @@ export function loadReaderPref(source: string): ReaderPref {
     spread: saved.spread === "double" ? "double" : "single",
     direction: saved.direction === "rtl" ? "rtl" : "ltr",
     fit: saved.fit === "smart" ? "smart" : "screen",
+    view: saved.view === "webtoon" ? "webtoon" : "page",
   };
 }
 
@@ -55,19 +59,39 @@ export function loadAllReaderPrefs(): Map<string, ReaderPref> {
       spread: v.spread === "double" ? "double" : "single",
       direction: v.direction === "rtl" ? "rtl" : "ltr",
       fit: v.fit === "smart" ? "smart" : "screen",
+      view: v.view === "webtoon" ? "webtoon" : "page",
     });
   }
   return map;
 }
 
-export function saveReaderPref(source: string, pref: ReaderPref) {
+export function saveReaderPref(
+  source: string,
+  pref: ReaderPref,
+  options: { persistView?: boolean } = {},
+) {
   try {
     const all = loadAll();
-    all[prefKey(source)] = pref;
+    const next: ReaderPref = {
+      pageIndex: pref.pageIndex,
+      spread: pref.spread,
+      direction: pref.direction,
+      fit: pref.fit,
+    };
+    if (options.persistView || prefHasExplicitView(source) || pref.view === "webtoon") {
+      next.view = pref.view === "webtoon" ? "webtoon" : "page";
+    }
+    all[prefKey(source)] = next;
     localStorage.setItem(KEY, JSON.stringify(all));
   } catch {
     /* ignore quota */
   }
+}
+
+/** Whether this book has an explicit view choice; old records have no view key. */
+export function prefHasExplicitView(source: string): boolean {
+  const saved = loadAll()[prefKey(source)];
+  return !!saved && Object.prototype.hasOwnProperty.call(saved, "view");
 }
 
 const READER_ENGINE_KEY = "comic.reader.engine";

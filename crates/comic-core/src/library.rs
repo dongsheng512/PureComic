@@ -17,7 +17,7 @@ const LIBRARY_VERSION: u32 = 1;
 const COVER_MAX_SIDE: u32 = 720;
 const COVER_JPEG_QUALITY: u8 = 90;
 /// Bump when cover encode params change so old blurry thumbs regenerate.
-const COVER_CACHE_TAG: &str = "v3";
+const COVER_CACHE_TAG: &str = "v4";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,6 +64,8 @@ pub struct LibraryScanPreview {
 #[serde(rename_all = "camelCase")]
 pub struct LibraryScanResult {
     pub added: u32,
+    #[serde(default)]
+    pub updated: u32,
     pub existed: u32,
     pub skipped: u32,
     pub failed: u32,
@@ -137,15 +139,13 @@ impl LibraryStore {
         let mut dirty = false;
         for e in &mut self.entries {
             e.missing = !PathBuf::from(&e.path).exists();
-            let dest = cover_dest(&self.cover_dir, e);
-            let ok = e
-                .cover_path
-                .as_ref()
-                .map(|p| Path::new(p) == dest.as_path())
-                .unwrap_or(false)
-                && dest.is_file()
-                && dest.metadata().map(|m| m.len() > 32).unwrap_or(false);
-            if ok || e.missing {
+            if e.missing {
+                continue;
+            }
+            // 已有能显示的封面就保留（含旧版 v3 路径）。
+            // 否则每次改 COVER_CACHE_TAG，list_library 会同步重抽全书封面，
+            // 前端一直拿不到列表，看起来像书库被清空。
+            if cover_file_ok(e.cover_path.as_deref()) {
                 continue;
             }
             if let Ok(c) = ensure_cover(e, &self.cover_dir, cfg) {
@@ -173,12 +173,21 @@ impl LibraryStore {
             existing.missing = !path.exists();
             existing.last_opened_at = Some(Utc::now());
             existing.path = path.display().to_string();
-            // 重新导入时补全页数 / 封面（首次因校验失败可能是 0 / 空）
-            if existing.page_count == 0 || !cover_file_ok(existing.cover_path.as_deref()) {
-                if let Ok(v) = archive::validate_source(&path, cfg) {
+            // 重新导入时刷新页数（例如原先把 __MACOSX 算进页数）
+            if let Ok(v) = archive::validate_source(&path, cfg) {
+                if existing.page_count != v.page_count {
                     existing.page_count = v.page_count;
-                    existing.kind = kind_str(v.kind);
+                    if let Some(c) = existing.cover_path.take() {
+                        let _ = std::fs::remove_file(&c);
+                    }
+                    let dest = cover_dest(&self.cover_dir, existing);
+                    let _ = std::fs::remove_file(&dest);
+                } else {
+                    existing.page_count = v.page_count;
                 }
+                existing.kind = kind_str(v.kind);
+            }
+            if existing.page_count == 0 || !cover_file_ok(existing.cover_path.as_deref()) {
                 if let Ok(cover) = ensure_cover(existing, &self.cover_dir, cfg) {
                     existing.cover_path = Some(cover.display().to_string());
                 }
@@ -322,6 +331,7 @@ impl LibraryStore {
         cfg: &AppConfig,
     ) -> AppResult<LibraryScanResult> {
         let mut added = 0u32;
+        let mut updated = 0u32;
         let mut existed = 0u32;
         let mut skipped = 0u32;
         let mut failed = 0u32;
@@ -331,19 +341,25 @@ impl LibraryStore {
                 skipped += 1;
                 continue;
             }
-            let id = source_cache_key(&canonicalize_or_abs(p));
-            if self
+            let abs = canonicalize_or_abs(p);
+            let id = source_cache_key(&abs);
+            let prior_pages = self
                 .entries
                 .iter()
-                .any(|e| e.id == id || paths_eq(&e.path, p))
-            {
-                existed += 1;
-                continue;
-            }
+                .find(|e| e.id == id || paths_eq(&e.path, p) || paths_eq(&e.path, &abs))
+                .map(|e| e.page_count);
             match self.upsert_path(p, cfg) {
                 Ok(e) => {
-                    added += 1;
-                    titles.push(e.title);
+                    if let Some(before) = prior_pages {
+                        existed += 1;
+                        if before != e.page_count {
+                            updated += 1;
+                            titles.push(e.title);
+                        }
+                    } else {
+                        added += 1;
+                        titles.push(e.title);
+                    }
                 }
                 Err(_) => {
                     if p.is_dir() {
@@ -354,10 +370,10 @@ impl LibraryStore {
                 }
             }
         }
-        let message =
-            format!("已导入 {added} 本（已在书库 {existed}，跳过 {skipped}，失败 {failed}）");
+        let message = import_result_message(added, updated, existed, skipped, failed, &titles);
         Ok(LibraryScanResult {
             added,
+            updated,
             existed,
             skipped,
             failed,
@@ -384,6 +400,30 @@ fn canonicalize_or_abs(path: &Path) -> PathBuf {
                 .unwrap_or_else(|_| path.to_path_buf())
         }
     })
+}
+
+fn import_result_message(
+    added: u32,
+    updated: u32,
+    existed: u32,
+    skipped: u32,
+    failed: u32,
+    titles: &[String],
+) -> String {
+    let sample = match titles {
+        [one] => format!("「{one}」"),
+        [one, ..] => format!("「{one}」等"),
+        [] => String::new(),
+    };
+    match (added, updated, existed, skipped, failed) {
+        (0, u, _, 0, 0) if u > 0 => format!("已刷新 {u} 本{sample}"),
+        (a, 0, _, 0, 0) if a > 0 => format!("已导入 {a} 本{sample}"),
+        (a, u, _, 0, 0) if a > 0 && u > 0 => format!("已导入 {a} 本，刷新 {u} 本"),
+        (0, 0, e, 0, 0) if e > 0 => "所选书籍已在书库，页数未变化".into(),
+        _ => format!(
+            "已导入 {added} 本（刷新 {updated}，已在书库 {existed}，跳过 {skipped}，失败 {failed}）"
+        ),
+    }
 }
 
 fn paths_eq(a: &str, b: &Path) -> bool {
@@ -481,17 +521,20 @@ fn cover_dest(cover_dir: &Path, entry: &LibraryEntry) -> PathBuf {
 }
 
 fn cover_file_ok(path: Option<&str>) -> bool {
-    path.map(|p| {
-        let p = Path::new(p);
-        p.is_file() && p.metadata().map(|m| m.len() > 32).unwrap_or(false)
-    })
-    .unwrap_or(false)
+    path.map(|p| cover_looks_real(Path::new(p)))
+        .unwrap_or(false)
+}
+
+fn cover_looks_real(path: &Path) -> bool {
+    path.is_file()
+        && path.metadata().map(|m| m.len() > 32).unwrap_or(false)
+        && image_io::file_looks_like_image(path)
 }
 
 fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
     std::fs::create_dir_all(cover_dir)?;
     let dest = cover_dest(cover_dir, entry);
-    if dest.is_file() && dest.metadata().map(|m| m.len() > 32).unwrap_or(false) {
+    if cover_looks_real(&dest) {
         return Ok(dest);
     }
     // 旧版缓存或损坏文件：删掉重做
@@ -506,14 +549,7 @@ fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppR
         // 前几页尝试：首页可能是空白/版权页或抽取失败
         try_cover_from_pages(&src, cfg, &dest)
     };
-    if let Err(e) = extracted {
-        tracing::warn!(
-            error = %e.message,
-            path = %src.display(),
-            "cover extract failed, using placeholder"
-        );
-        write_placeholder_cover(&entry.title, &dest)?;
-    }
+    extracted?;
     Ok(dest)
 }
 
@@ -547,19 +583,6 @@ fn write_cover_from_bytes(bytes: &[u8], dest: &Path) -> AppResult<()> {
             .with_detail(e.to_string())
     })?;
     encode_cover_jpeg(&img, dest)
-}
-
-fn write_placeholder_cover(title: &str, dest: &Path) -> AppResult<()> {
-    let mut h: u32 = 2166136261;
-    for b in title.as_bytes() {
-        h ^= *b as u32;
-        h = h.wrapping_mul(16777619);
-    }
-    let r = 40 + (h & 0x5f) as u8;
-    let g = 45 + ((h >> 8) & 0x4f) as u8;
-    let b = 70 + ((h >> 16) & 0x5f) as u8;
-    let img = image::ImageBuffer::from_pixel(480, 720, image::Rgb([r, g, b]));
-    encode_cover_jpeg(&image::DynamicImage::ImageRgb8(img), dest)
 }
 
 fn extract_first_page(source: &Path, cfg: &AppConfig) -> AppResult<(String, PathBuf)> {
@@ -625,12 +648,77 @@ mod tests {
         c
     }
 
+    fn write_tiny_png(path: &Path) {
+        let img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(16, 24, image::Rgb([200, 40, 40]));
+        image::DynamicImage::ImageRgb8(img).save(path).unwrap();
+    }
+
     fn write_cbz(path: &Path, name: &str, bytes: &[u8]) {
         let f = File::create(path).unwrap();
         let mut w = ZipWriter::new(f);
         w.start_file(name, SimpleFileOptions::default()).unwrap();
         w.write_all(bytes).unwrap();
         w.finish().unwrap();
+    }
+
+    #[test]
+    fn reimport_refreshes_stale_page_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let folder = tmp.path().join("book");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("001.png"), b"x").unwrap();
+        let mut store = LibraryStore::open(&cfg).unwrap();
+        let first = store.upsert_path(&folder, &cfg).unwrap();
+        assert_eq!(first.page_count, 1);
+        let pos = store
+            .entries
+            .iter()
+            .position(|e| e.id == first.id)
+            .unwrap();
+        store.entries[pos].page_count = 99;
+        store.save().unwrap();
+        let r = store.import_paths(&[folder.clone()], &cfg).unwrap();
+        assert_eq!(r.added, 0);
+        assert_eq!(r.existed, 1);
+        assert_eq!(r.updated, 1);
+        assert!(r.message.contains("刷新"));
+        assert_eq!(store.list()[0].page_count, 1);
+    }
+
+    #[test]
+    fn refresh_keeps_existing_cover_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let folder = tmp.path().join("book");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_tiny_png(&folder.join("001.png"));
+        let mut store = LibraryStore::open(&cfg).unwrap();
+        let e = store.upsert_path(&folder, &cfg).unwrap();
+        let old = e.cover_path.clone().unwrap();
+        // 假装封面仍在旧版路径（v3），不要为了对齐新 tag 去重抽
+        store.entries[0].cover_path = Some(old.clone());
+        store.refresh_covers(&cfg);
+        assert_eq!(store.list()[0].cover_path.as_deref(), Some(old.as_str()));
+    }
+
+    #[test]
+    fn refresh_replaces_invalid_cover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let folder = tmp.path().join("book");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_tiny_png(&folder.join("001.png"));
+        let mut store = LibraryStore::open(&cfg).unwrap();
+        let e = store.upsert_path(&folder, &cfg).unwrap();
+        let dest = PathBuf::from(e.cover_path.as_ref().unwrap());
+        assert!(cover_looks_real(&dest));
+        std::fs::write(&dest, [0x00, 0x05, 0x16, 0x07, 0, 0, 0, 0]).unwrap();
+        assert!(!cover_looks_real(&dest));
+        store.refresh_covers(&cfg);
+        let cover = PathBuf::from(store.list()[0].cover_path.as_ref().unwrap());
+        assert!(cover_looks_real(&cover));
     }
 
     #[test]

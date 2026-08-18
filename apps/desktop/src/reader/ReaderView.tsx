@@ -1,7 +1,14 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { comicFileFilter } from "../formats";
 import {
   cancelReaderEnhance,
@@ -28,6 +35,7 @@ import {
   loadEnhanceNoise,
   loadReaderEngine,
   loadReaderPref,
+  prefHasExplicitView,
   saveEnhanceNoise,
   saveReaderEngine,
   saveReaderPref,
@@ -36,11 +44,23 @@ import {
   READER_BG_PRESETS,
   saveReaderBg,
   type ReaderBgId,
+  type ReaderViewMode,
   type FitMode,
   type ReadDirection,
   type SpreadMode,
 } from "./prefs";
+import { chapterIndexFromName, shouldDefaultWebtoon } from "./webtoonDetect";
 import {
+  estimatedHeight,
+  expandStripPrefetch,
+  loadStoredAspects,
+  medianAspect,
+  storeAspects,
+  stripIndexes,
+} from "./webtoonStripHelpers";
+import { WebtoonStrip, type WebtoonJumpRequest } from "./WebtoonStrip";
+import {
+  allowCompactWindowMinSize,
   fitWindowToPageUrls,
   restoreDefaultWindowMinSize,
   syncReaderBarHeightCss,
@@ -52,6 +72,12 @@ const CANCEL_MESSAGE = "任务已取消";
 /** 原图页内存 LRU 窗口：保留当前页 ±N 页，超长书翻页不无限膨胀 */
 const LOADED_WINDOW = 120;
 const LOADED_HALF_WINDOW = 60;
+// Keep webtoon pages readable on large screens without upscaling the source too far.
+const WEBTOON_MAX_WIDTH = 960;
+/** 顶栏：窄于此时把阅读模式折进「更多」 */
+const BAR_COMPACT_W = 760;
+/** 顶栏：更窄时只留返回 / 页码 / 更多 */
+const BAR_TINY_W = 560;
 
 type Props = {
   jobs: JobStatus[];
@@ -118,6 +144,7 @@ export function ReaderView({
   const [spread, setSpread] = useState<SpreadMode>("single");
   const [direction, setDirection] = useState<ReadDirection>("ltr");
   const [fit, setFit] = useState<FitMode>("screen");
+  const [view, setView] = useState<ReaderViewMode>("page");
   const [loaded, setLoaded] = useState<Record<number, LoadedPage>>({});
   const [busy, setBusy] = useState(false);
   const [barHidden, setBarHidden] = useState(readBarHidden);
@@ -146,13 +173,28 @@ export function ReaderView({
   const clearRevertTimer = useRef<number | null>(null);
   const clearToastTimer = useRef<number | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
+  const [barWidth, setBarWidth] = useState(0);
+  const [stripWidth, setStripWidth] = useState(0);
+  const [webtoonVisibleIndexes, setWebtoonVisibleIndexes] = useState<number[]>([]);
+  const [jumpRequest, setJumpRequest] = useState<WebtoonJumpRequest | null>(null);
   const enhanceEpochRef = useRef(0);
   const pageInputRef = useRef<HTMLInputElement>(null);
   const progressTimer = useRef<number | null>(null);
+  const aspectMap = useRef<Map<number, number>>(new Map());
+  const jumpSeqRef = useRef(0);
+  const aspectPersistTimer = useRef<number | null>(null);
+  const inflightPagesRef = useRef<Set<number>>(new Set());
+  const prepareBookEpochRef = useRef(0);
+  const decodedUrlsRef = useRef<Set<string>>(new Set());
+  const skipProgressFlashRef = useRef(false);
   const sourceRef = useRef<string>("");
   const skipSaveRef = useRef(true);
   const lastCountRef = useRef(0);
+  const didSuggestViewRef = useRef<string | null>(null);
+  const detectionPagesRef = useRef<ReaderState["pages"]>([]);
+  detectionPagesRef.current = state?.pages ?? [];
   /** 悬停说明：极简单例 tooltip（延迟 120ms 显示，避免扫过闪烁） */
   const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
   const tipTimer = useRef<number | null>(null);
@@ -171,12 +213,19 @@ export function ReaderView({
     if (tipTimer.current) window.clearTimeout(tipTimer.current);
     setTip(null);
   }, []);
+
+  // 切换工具栏可见性后，清掉旧按钮留下的 tooltip，避免提示悬浮在画布上。
+  useEffect(() => {
+    hideTip();
+  }, [barHidden, hideTip]);
+
   /**
    * 智能适应会话键：仅在「进入 smart / 换书 / 单双页切换」时变，
    * 翻页不变更 → 窗口不会跟页乱跳（方案 A）。
    */
   const smartSessionKeyRef = useRef<string | null>(null);
   const smartFitGen = useRef(0);
+  const wasWebtoonRef = useRef(false);
 
   const immersive = barHidden || fullscreen;
 
@@ -184,6 +233,19 @@ export function ReaderView({
   useEffect(() => {
     syncReaderBarHeightCss();
   }, []);
+
+  useEffect(() => {
+    if (barHidden) return;
+    const el = barRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      setBarWidth(w);
+    });
+    ro.observe(el);
+    setBarWidth(el.getBoundingClientRect().width);
+    return () => ro.disconnect();
+  }, [barHidden]);
 
   useEffect(() => {
     setJobId(requestedJobId);
@@ -305,16 +367,34 @@ export function ReaderView({
     if (pick) void refreshState(pick.jobId, null);
   }, [jobs, jobId, requestedJobId, source, state, refreshState]);
 
+  const statePageLength = state?.pages.length ?? 0;
+  const firstPageName = state?.pages[0]?.name ?? "";
   useEffect(() => {
     if (!state?.source) return;
     const bookChanged = sourceRef.current !== state.source;
     const countAppeared = lastCountRef.current === 0 && state.pageCount > 0;
+    const namesReady = statePageLength > 0;
+    const explicitView = prefHasExplicitView(state.source);
+    const canSuggestView =
+      namesReady &&
+      !explicitView &&
+      didSuggestViewRef.current !== state.source &&
+      shouldDefaultWebtoon(detectionPagesRef.current);
     lastCountRef.current = state.pageCount;
-    if (!bookChanged && !countAppeared) return;
+    if (!bookChanged && !countAppeared && !canSuggestView) return;
     if (bookChanged) {
       sourceRef.current = state.source;
       lastCountRef.current = state.pageCount;
+      didSuggestViewRef.current = null;
       setLoaded({});
+      if (aspectPersistTimer.current != null) window.clearTimeout(aspectPersistTimer.current);
+      aspectMap.current = loadStoredAspects(state.source);
+      setWebtoonVisibleIndexes([]);
+      setJumpRequest(null);
+      inflightPagesRef.current.clear();
+      decodedUrlsRef.current.clear();
+      prepareBookEpochRef.current += 1;
+      jumpSeqRef.current = 0;
       setEnhanceOn(false);
       setAiPages({});
       setEnhanceBusy(false);
@@ -322,12 +402,35 @@ export function ReaderView({
     }
     if (state.pageCount <= 0) return;
     const pref = loadReaderPref(state.source);
+    const storedView: ReaderViewMode = pref.view ?? "page";
+    const shouldSuggest =
+      namesReady &&
+      !explicitView &&
+      didSuggestViewRef.current !== state.source &&
+      shouldDefaultWebtoon(detectionPagesRef.current);
+    const suggestedView = shouldSuggest ? "webtoon" : storedView;
+    if (shouldSuggest) didSuggestViewRef.current = state.source;
     skipSaveRef.current = true;
     setSpread(pref.spread);
     setDirection(pref.direction);
     setFit(pref.fit);
-    setPageIndex(alignIndex(pref.pageIndex, pref.spread, state.pageCount));
-  }, [state?.source, state?.pageCount]);
+    setView(suggestedView);
+    const initialPage = alignIndex(
+      pref.pageIndex,
+      suggestedView === "webtoon" ? "single" : pref.spread,
+      state.pageCount,
+    );
+    if (suggestedView === "webtoon") {
+      const seq = ++jumpSeqRef.current;
+      setJumpRequest({ seq, index: initialPage, align: "start" });
+    } else {
+      setJumpRequest(null);
+    }
+    if (suggestedView !== storedView) {
+      saveReaderPref(state.source, { ...pref, view: suggestedView }, { persistView: true });
+    }
+    setPageIndex(initialPage);
+  }, [state?.source, state?.pageCount, statePageLength, firstPageName]);
 
   useEffect(() => {
     if (!state?.source) return;
@@ -335,34 +438,49 @@ export function ReaderView({
       skipSaveRef.current = false;
       return;
     }
-    saveReaderPref(state.source, { pageIndex, spread, direction, fit });
-  }, [state?.source, pageIndex, spread, direction, fit]);
+    saveReaderPref(state.source, { pageIndex, spread, direction, fit, view });
+  }, [state?.source, pageIndex, spread, direction, fit, view]);
+
+  const webtoon = view === "webtoon";
+  const effectiveSpread: SpreadMode = webtoon ? "single" : spread;
+  const prefetchRtl = !webtoon && direction === "rtl";
 
   // 只依赖页数而不是整个 ReaderState：任务进度轮询会创建新的 state 对象，
   // 但不会改变可见页。保持数组引用稳定，避免预加载 effect 被无意义地重启。
   const pageCount = state?.pageCount ?? 0;
   const visibleIndexes = useMemo(() => {
     if (pageCount <= 0) return [] as number[];
-    const i = alignIndex(pageIndex, spread, pageCount);
-    if (spread === "double" && i + 1 < pageCount) return [i, i + 1];
+    const i = alignIndex(pageIndex, effectiveSpread, pageCount);
+    if (effectiveSpread === "double" && i + 1 < pageCount) return [i, i + 1];
     return [i];
-  }, [pageCount, pageIndex, spread]);
+  }, [pageCount, pageIndex, effectiveSpread]);
+
+  const webtoonPrefetchIndexes = useMemo(() => {
+    if (!webtoon || pageCount <= 0) return [];
+    return webtoonVisibleIndexes.length > 0
+      ? webtoonVisibleIndexes
+      : stripIndexes(pageIndex, pageCount);
+  }, [pageCount, pageIndex, webtoon, webtoonVisibleIndexes]);
 
   const prefetchIndexes = useMemo(() => {
     if (pageCount <= 0) return visibleIndexes;
+    if (webtoon) {
+      return expandStripPrefetch(webtoonPrefetchIndexes, pageCount, 6);
+    }
     const extra: number[] = [];
     const origin =
-      direction === "rtl"
+      prefetchRtl
         ? (visibleIndexes[0] ?? 0)
         : (visibleIndexes[visibleIndexes.length - 1] ?? 0);
-    const step = direction === "rtl" ? -1 : 1;
-    for (let d = 1; d <= 4; d++) {
+    const step = prefetchRtl ? -1 : 1;
+    const aheadN = 4;
+    for (let d = 1; d <= aheadN; d++) {
       const n = origin + step * d;
       if (n < 0 || n >= pageCount) break;
       if (!visibleIndexes.includes(n)) extra.push(n);
     }
     const back =
-      direction === "rtl"
+      prefetchRtl
         ? (visibleIndexes[visibleIndexes.length - 1] ?? 0) + 1
         : (visibleIndexes[0] ?? 0) - 1;
     if (
@@ -374,7 +492,7 @@ export function ReaderView({
       extra.push(back);
     }
     return [...visibleIndexes, ...extra];
-  }, [pageCount, visibleIndexes, direction]);
+  }, [pageCount, visibleIndexes, prefetchRtl, webtoon, webtoonPrefetchIndexes]);
 
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
@@ -403,14 +521,16 @@ export function ReaderView({
         next[file.index] = { ...file, url: fileUrl(file.path, file.kind) };
       }
       const keys = Object.keys(next).map(Number);
-      if (keys.length > 80) {
+      const aiLimit = webtoon ? 8 : 80;
+      const aiHalf = webtoon ? 4 : 40;
+      if (keys.length > aiLimit) {
         for (const k of keys) {
-          if (Math.abs(k - pageIndex) > 40) delete next[k];
+          if (Math.abs(k - pageIndex) > aiHalf) delete next[k];
         }
       }
       return next;
     });
-  }, [pageIndex]);
+  }, [pageIndex, webtoon]);
 
   const applyAiRef = useRef(applyAiFiles);
   applyAiRef.current = applyAiFiles;
@@ -460,13 +580,13 @@ export function ReaderView({
 
     const ahead: number[] = [];
     const origin =
-      direction === "rtl"
+      prefetchRtl
         ? (visibleIndexes[0] ?? 0)
         : (visibleIndexes[visibleIndexes.length - 1] ?? 0);
-    const step = direction === "rtl" ? -1 : 1;
+    const step = prefetchRtl ? -1 : 1;
     // 单页：前方 2 + 回翻 1。双页按整屏走：前方 4（两屏）+ 回翻 2（上一屏）
-    const aheadCount = visibleIndexes.length >= 2 ? 4 : 2;
-    const behindCount = visibleIndexes.length >= 2 ? 2 : 1;
+    const aheadCount = webtoon ? 2 : visibleIndexes.length >= 2 ? 4 : 2;
+    const behindCount = webtoon ? 2 : visibleIndexes.length >= 2 ? 2 : 1;
     for (let n = 1; n <= aheadCount; n++) {
       const idx = origin + step * n;
       if (idx < 0 || idx >= total) break;
@@ -474,7 +594,7 @@ export function ReaderView({
     }
     for (let n = 1; n <= behindCount; n++) {
       const idx =
-        direction === "rtl"
+        prefetchRtl
           ? (visibleIndexes[visibleIndexes.length - 1] ?? 0) + n
           : (visibleIndexes[0] ?? 0) - n;
       if (
@@ -578,7 +698,7 @@ export function ReaderView({
   }, [
     enhanceOn,
     visibleIndexes,
-    direction,
+    prefetchRtl,
     enhanceOpts,
     state?.source,
     state?.jobId,
@@ -587,21 +707,24 @@ export function ReaderView({
     jobId,
     onError,
     refreshCacheStats,
+    webtoon,
   ]);
 
   useEffect(() => {
-    let cancelled = false;
+    const bookEpoch = prepareBookEpochRef.current;
+    const stillThisBook = () => bookEpoch === prepareBookEpochRef.current;
     const jid = state?.jobId ?? jobId;
     const src = state?.source ?? source;
     if (!src && !jid) return;
 
     const need = (idx: number) => {
+      if (inflightPagesRef.current.has(idx)) return false;
       const existing = loadedRef.current[idx];
       return !existing || existing.kind !== "original";
     };
 
     const apply = (files: { index: number; name: string; kind: string; path: string }[]) => {
-      if (cancelled || files.length === 0) return;
+      if (!stillThisBook() || files.length === 0) return;
       setLoaded((prev) => {
         const next = { ...prev };
         for (const file of files) {
@@ -610,36 +733,50 @@ export function ReaderView({
         // 原图页 LRU 窗口：翻完超长书后 loaded 无限膨胀（与 aiPages 同思路）
         const keys = Object.keys(next).map(Number);
         const center = pageIndexRef.current;
-        if (keys.length > LOADED_WINDOW) {
+        const limit = webtoon ? 32 : LOADED_WINDOW;
+        const half = webtoon ? 16 : LOADED_HALF_WINDOW;
+        if (keys.length > limit) {
           for (const k of keys) {
-            if (Math.abs(k - center) > LOADED_HALF_WINDOW) delete next[k];
+            if (Math.abs(k - center) > half) delete next[k];
           }
         }
         return next;
       });
     };
 
+    const mark = (indexes: number[], on: boolean) => {
+      for (const index of indexes) {
+        if (on) inflightPagesRef.current.add(index);
+        else inflightPagesRef.current.delete(index);
+      }
+    };
+
     (async () => {
-      const vis = visibleIndexes.filter(need);
-      const rest = prefetchIndexes.filter((i) => !visibleIndexes.includes(i) && need(i));
+      const urgent = (webtoon ? webtoonVisibleIndexes : visibleIndexes).filter(need);
+      const rest = prefetchIndexes.filter((i) => !urgent.includes(i) && need(i));
       try {
-        if (vis.length > 0) {
+        if (urgent.length > 0) {
           setBusy(true);
-          const files = await prepareReaderPages({
-            jobId: jid,
-            source: src,
-            pageIndexes: vis,
-            preferOriginal: true,
-          });
-          if (cancelled) return;
-          apply(files);
+          mark(urgent, true);
+          try {
+            const files = await prepareReaderPages({
+              jobId: jid,
+              source: src,
+              pageIndexes: urgent,
+              preferOriginal: true,
+            });
+            apply(files);
+          } finally {
+            mark(urgent, false);
+          }
         }
       } catch (e) {
-        if (!cancelled) onError(e instanceof Error ? e.message : String(e));
+        if (stillThisBook()) onError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (!cancelled) setBusy(false);
+        if (stillThisBook()) setBusy(false);
       }
-      if (cancelled || rest.length === 0) return;
+      if (!stillThisBook() || rest.length === 0) return;
+      mark(rest, true);
       try {
         const files = await prepareReaderPages({
           jobId: jid,
@@ -650,13 +787,15 @@ export function ReaderView({
         apply(files);
       } catch {
         /* prefetch is best-effort */
+      } finally {
+        mark(rest, false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    // Sliding the strip must not abort in-flight extracts: cancelled applies
+    // left holes that remounted as placeholders and flashed the canvas.
   }, [
     visibleIndexes,
+    webtoonVisibleIndexes,
     prefetchIndexes,
     state?.source,
     state?.jobId,
@@ -664,6 +803,7 @@ export function ReaderView({
     jobId,
     source,
     onError,
+    webtoon,
   ]);
 
   useEffect(() => {
@@ -685,6 +825,10 @@ export function ReaderView({
   }, []);
 
   useEffect(() => {
+    if (skipProgressFlashRef.current) {
+      skipProgressFlashRef.current = false;
+      return;
+    }
     if ((state?.pageCount ?? 0) > 0) flashProgress();
   }, [pageIndex, flashProgress, state?.pageCount]);
 
@@ -697,10 +841,90 @@ export function ReaderView({
   const go = useCallback(
     (dir: 1 | -1) => {
       if (!state) return;
-      setPageIndex((i) => stepIndex(i, dir, spread, state.pageCount));
+      setPageIndex((i) => stepIndex(i, dir, effectiveSpread, state.pageCount));
     },
-    [state, spread],
+    [state, effectiveSpread],
   );
+
+  const persistAspects = useCallback(() => {
+    const source = sourceRef.current;
+    if (!source) return;
+    if (aspectPersistTimer.current != null) window.clearTimeout(aspectPersistTimer.current);
+    aspectPersistTimer.current = window.setTimeout(() => {
+      aspectPersistTimer.current = null;
+      storeAspects(source, aspectMap.current);
+    }, 400);
+  }, []);
+
+  const estimatedStripHeight = useCallback((index: number): number => {
+    const aspect = aspectMap.current.get(index) ?? medianAspect(Array.from(aspectMap.current.values()));
+    const width = stripWidth > 0 ? stripWidth : (viewportRef.current?.clientWidth ?? WEBTOON_MAX_WIDTH);
+    return estimatedHeight(width, WEBTOON_MAX_WIDTH, aspect ?? undefined);
+  }, [stripWidth]);
+
+  const handleWebtoonImageLoad = useCallback(
+    (index: number, image: HTMLImageElement) => {
+      const naturalWidth = Math.max(1, image.naturalWidth);
+      const naturalHeight = Math.max(1, image.naturalHeight);
+      const aspect = naturalHeight / naturalWidth;
+      if (!Number.isFinite(aspect) || aspect <= 0) return;
+      const previous = aspectMap.current.get(index);
+      aspectMap.current.set(index, aspect);
+      if (previous == null || Math.abs(previous - aspect) > 0.002) persistAspects();
+    },
+    [persistAspects],
+  );
+
+  const handleWebtoonPageChange = useCallback(
+    (index: number, meta: { fromScroll: boolean }) => {
+      if (!webtoon || !meta.fromScroll || index === pageIndexRef.current) return;
+      skipProgressFlashRef.current = true;
+      setPageIndex(index);
+    },
+    [webtoon],
+  );
+
+  const requestScrollToPage = useCallback(
+    (index: number, where: "top" | "bottom") => {
+      const seq = ++jumpSeqRef.current;
+      setJumpRequest({ seq, index, align: where === "bottom" ? "end" : "start" });
+      skipProgressFlashRef.current = true;
+      setPageIndex(index);
+    },
+    [],
+  );
+
+  const scrollOrTurn = useCallback(
+    (dir: 1 | -1) => {
+      if (!webtoon) {
+        go(dir);
+        return;
+      }
+      const el = viewportRef.current;
+      if (!el) return;
+      el.scrollBy({ top: dir * el.clientHeight * 0.9, behavior: "auto" });
+    },
+    [go, webtoon],
+  );
+
+  const toggleView = useCallback(() => {
+    const next = view === "webtoon" ? "page" : "webtoon";
+    if (next === "webtoon") {
+      const seq = ++jumpSeqRef.current;
+      setJumpRequest({ seq, index: pageIndexRef.current, align: "start" });
+    } else {
+      setJumpRequest(null);
+    }
+    setView(next);
+    const prefSource = state?.source ?? source;
+    if (prefSource) {
+      saveReaderPref(
+        prefSource,
+        { pageIndex, spread, direction, fit, view: next },
+        { persistView: true },
+      );
+    }
+  }, [direction, fit, pageIndex, source, spread, state?.source, view]);
 
   const toggleAi = useCallback(() => {
     if (enhanceOn) {
@@ -718,7 +942,15 @@ export function ReaderView({
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-      if (e.key === "ArrowRight") {
+      if (webtoon && (e.key === "ArrowDown" || e.key === " " || e.key === "PageDown" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        scrollOrTurn(1);
+        return;
+      } else if (webtoon && (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "ArrowLeft")) {
+        e.preventDefault();
+        scrollOrTurn(-1);
+        return;
+      } else if (e.key === "ArrowRight") {
         e.preventDefault();
         go(direction === "rtl" ? -1 : 1);
       } else if (e.key === "ArrowLeft") {
@@ -732,10 +964,13 @@ export function ReaderView({
         go(-1);
       } else if (e.key === "Home") {
         e.preventDefault();
-        setPageIndex(0);
+        if (webtoon) requestScrollToPage(0, "top");
+        else setPageIndex(0);
       } else if (e.key === "End" && state) {
         e.preventDefault();
-        setPageIndex(alignIndex(state.pageCount - 1, spread, state.pageCount));
+        const last = alignIndex(state.pageCount - 1, effectiveSpread, state.pageCount);
+        if (webtoon) requestScrollToPage(last, "bottom");
+        else setPageIndex(last);
       } else if (e.key === "f" || e.key === "F") {
         e.preventDefault();
         void toggleFullscreen();
@@ -769,7 +1004,10 @@ export function ReaderView({
   }, [
     direction,
     go,
-    spread,
+    effectiveSpread,
+    webtoon,
+    scrollOrTurn,
+    requestScrollToPage,
     state,
     barHidden,
     fullscreen,
@@ -779,6 +1017,7 @@ export function ReaderView({
     pageEditing,
     moreOpen,
     toggleAi,
+    toggleView,
   ]);
 
   const pickFile = async () => {
@@ -808,12 +1047,67 @@ export function ReaderView({
   const pagesInView = visibleIndexes
     .map((i) => (enhanceOn && aiPages[i] ? aiPages[i] : loaded[i]))
     .filter(Boolean) as LoadedPage[];
+
+  const handleWebtoonVisibleIndexes = useCallback((indexes: number[]) => {
+    setWebtoonVisibleIndexes((previous) => {
+      if (previous.length === indexes.length && previous.every((value, i) => value === indexes[i])) {
+        return previous;
+      }
+      return indexes;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (aspectPersistTimer.current != null) window.clearTimeout(aspectPersistTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!webtoon) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    setStripWidth(el.clientWidth);
+    const ro = new ResizeObserver(() => setStripWidth(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [webtoon]);
+
+  useEffect(() => {
+    if (!webtoon) return;
+    const decoded = decodedUrlsRef.current;
+    for (const index of prefetchIndexes) {
+      const page = enhanceOn && aiPages[index] ? aiPages[index] : loaded[index];
+      if (!page || decoded.has(page.url)) continue;
+      const warm = new Image();
+      warm.decoding = "async";
+      warm.src = page.url;
+      decoded.add(page.url);
+    }
+    if (decoded.size > 80) {
+      const keep = new Set<string>();
+      for (const index of prefetchIndexes) {
+        const page = enhanceOn && aiPages[index] ? aiPages[index] : loaded[index];
+        if (page) keep.add(page.url);
+      }
+      decodedUrlsRef.current = keep;
+    }
+  }, [aiPages, enhanceOn, loaded, prefetchIndexes, webtoon]);
+
   const showingAi =
     enhanceOn &&
     visibleIndexes.length > 0 &&
     visibleIndexes.every((i) => Boolean(aiPages[i]));
   const pageEnhancing = enhanceBusy && !showingAi;
-  const displayPages = direction === "rtl" ? [...pagesInView].reverse() : pagesInView;
+  const displayPages = webtoon
+    ? pagesInView
+    : direction === "rtl"
+      ? [...pagesInView].reverse()
+      : pagesInView;
+  const webtoonPages = useMemo(
+    () => (enhanceOn ? { ...loaded, ...aiPages } : loaded),
+    [aiPages, enhanceOn, loaded],
+  );
   const total = state?.pageCount ?? 0;
 
   const cacheSizeText = (stats: EnhanceCacheStats | null): string => {
@@ -926,6 +1220,16 @@ export function ReaderView({
 
   // 方案 A：智能适应持续模式 — 仅在会话键变化时定一次窗口；翻页只缩放图片
   useEffect(() => {
+    if (view === "webtoon") {
+      wasWebtoonRef.current = true;
+      void allowCompactWindowMinSize();
+      return;
+    }
+    if (wasWebtoonRef.current) {
+      wasWebtoonRef.current = false;
+      void restoreDefaultWindowMinSize();
+      return;
+    }
     if (fit !== "smart") {
       smartSessionKeyRef.current = null;
       void restoreDefaultWindowMinSize();
@@ -955,15 +1259,15 @@ export function ReaderView({
     };
     // 刻意不依赖 pageIndex / pageUrls 的每一页变化；仅在进入 smart、换书、切单双页时跑
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fit, fullscreen, spread, bookKey, pageUrlsKey === "" ? "" : "ready"]);
+  }, [fit, fullscreen, spread, view, bookKey, pageUrlsKey === "" ? "" : "ready"]);
 
   /** 方案 B：贴合当前页 — 一次性 resize（可居中），然后回到适应屏幕 */
   const fitWindowToCurrentPage = useCallback(async () => {
-    if (pagesInView.length === 0 || fullscreen) return;
+    if (view === "webtoon" || pagesInView.length === 0 || fullscreen) return;
     try {
       await fitWindowToPageUrls(
         pagesInView.map((p) => p.url),
-        spread,
+        effectiveSpread,
         !barHidden,
         true,
       );
@@ -974,12 +1278,26 @@ export function ReaderView({
     smartSessionKeyRef.current = null;
     setFit("screen");
     void restoreDefaultWindowMinSize();
-  }, [pagesInView, spread, barHidden, fullscreen]);
+  }, [pagesInView, effectiveSpread, barHidden, fullscreen, view]);
 
+  // Chapter_000 is index 0 and is shown to readers as 第 1 话 / Ch. 1.
+  const currentChapter = chapterIndexFromName(state?.pages[visibleIndexes[0] ?? pageIndex]?.name ?? "");
+  const barCompact = barWidth > 0 && barWidth < BAR_COMPACT_W;
+  const barTiny = barWidth > 0 && barWidth < BAR_TINY_W;
+  const chapterLabel =
+    barCompact || !webtoon || currentChapter == null
+      ? ""
+      : ` · ${i18n.readerChapter.replace("{n}", String(currentChapter + 1))}`;
   const pageLabel =
-    spread === "double" && visibleIndexes.length === 2
-      ? `${visibleIndexes[0] + 1}–${visibleIndexes[1] + 1} / ${total}`
-      : `${(visibleIndexes[0] ?? 0) + 1} / ${total || "—"}`;
+    effectiveSpread === "double" && visibleIndexes.length === 2
+      ? `${visibleIndexes[0] + 1}–${visibleIndexes[1] + 1} / ${total}${chapterLabel}`
+      : `${(visibleIndexes[0] ?? 0) + 1} / ${total || "—"}${chapterLabel}`;
+
+  const clickNavWebtoon = (clientY: number, rect: DOMRect) => {
+    const y = (clientY - rect.top) / rect.height;
+    if (y < 0.35) void scrollOrTurn(-1);
+    else if (y > 0.65) void scrollOrTurn(1);
+  };
 
   const clickNav = (clientX: number, rect: DOMRect) => {
     const left = clientX < rect.left + rect.width * 0.35;
@@ -997,14 +1315,16 @@ export function ReaderView({
     if (total <= 0) return;
     const t = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     const idx = Math.min(total - 1, Math.floor(t * total));
-    setPageIndex(alignIndex(idx, spread, total));
+    if (webtoon) requestScrollToPage(alignIndex(idx, effectiveSpread, total), "top");
+    else setPageIndex(alignIndex(idx, effectiveSpread, total));
   };
 
   const commitPageJump = () => {
     const n = Number.parseInt(pageDraft.replace(/[^\d]/g, ""), 10);
     setPageEditing(false);
     if (!Number.isFinite(n) || total <= 0) return;
-    setPageIndex(alignIndex(n - 1, spread, total));
+    if (webtoon) requestScrollToPage(alignIndex(n - 1, effectiveSpread, total), "top");
+    else setPageIndex(alignIndex(n - 1, effectiveSpread, total));
   };
 
   useEffect(() => {
@@ -1036,7 +1356,212 @@ export function ReaderView({
 
   const displayTitle = bookTitle || state?.title || null;
   const canPrev = !!state && pageIndex > 0;
-  const canNext = !!state && pageIndex < Math.max(0, total - (spread === "double" ? 2 : 1));
+  const canNext = !!state && pageIndex < Math.max(0, total - (effectiveSpread === "double" ? 2 : 1));
+  const fitLocked = webtoon;
+
+  const readingModeSeg = (
+    <div className="reader-seg" role="group" aria-label={i18n.readerMode}>
+      <button
+        type="button"
+        className={`reader-seg-item ${effectiveSpread === "single" ? "is-active" : ""} disabled:opacity-35`}
+        aria-label={i18n.readerSingle}
+        onMouseEnter={(e) => showTip(e, i18n.readerSingle)}
+        onMouseLeave={hideTip}
+        aria-pressed={effectiveSpread === "single"}
+        disabled={webtoon}
+        title={webtoon ? i18n.readerWebtoonHint : undefined}
+        onClick={() => {
+          setSpread("single");
+          setPageIndex((i) => alignIndex(i, "single", total));
+        }}
+      >
+        <IconSinglePage />
+      </button>
+      <button
+        type="button"
+        className={`reader-seg-item ${effectiveSpread === "double" ? "is-active" : ""} disabled:opacity-35`}
+        aria-label={i18n.readerDouble}
+        onMouseEnter={(e) => showTip(e, i18n.readerDouble)}
+        onMouseLeave={hideTip}
+        aria-pressed={effectiveSpread === "double"}
+        disabled={webtoon}
+        title={webtoon ? i18n.readerWebtoonNoDouble : undefined}
+        onClick={() => {
+          setSpread("double");
+          setPageIndex((i) => alignIndex(i, "double", total));
+        }}
+      >
+        <IconDoublePage />
+      </button>
+      <button
+        type="button"
+        className={`reader-seg-item ${direction === "rtl" ? "is-active" : ""} disabled:opacity-35`}
+        aria-label={direction === "rtl" ? i18n.readerRtl : i18n.readerLtr}
+        onMouseEnter={(e) =>
+          showTip(e, direction === "rtl" ? i18n.readerRtl : i18n.readerLtr)
+        }
+        onMouseLeave={hideTip}
+        aria-pressed={direction === "rtl"}
+        disabled={webtoon}
+        title={webtoon ? i18n.readerWebtoonNoRtl : undefined}
+        onClick={() => setDirection((d) => (d === "ltr" ? "rtl" : "ltr"))}
+      >
+        {direction === "rtl" ? <IconRtl /> : <IconLtr />}
+      </button>
+      <button
+        type="button"
+        className={`reader-seg-item ${webtoon ? "is-active" : ""}`}
+        aria-label={i18n.readerWebtoon}
+        aria-pressed={webtoon}
+        title={i18n.readerWebtoonHint}
+        onMouseEnter={(e) => showTip(e, i18n.readerWebtoonHint)}
+        onMouseLeave={hideTip}
+        onClick={toggleView}
+      >
+        <IconWebtoon />
+      </button>
+      <button
+        type="button"
+        className="reader-seg-item"
+        aria-label={i18n.readerHideBar}
+        onMouseEnter={(e) => showTip(e, i18n.readerHideBar)}
+        onMouseLeave={hideTip}
+        onClick={() => {
+          hideTip();
+          setMoreOpen(false);
+          setBar(true);
+        }}
+      >
+        <IconHideBar />
+      </button>
+    </div>
+  );
+
+  const pagerControls = (
+    <div className="pointer-events-auto group/pager flex flex-col items-center">
+      <div className="flex items-center gap-0.5">
+        {!barTiny && (
+          <button
+            type="button"
+            className="reader-icon-btn"
+            disabled={!canPrev}
+            aria-label={i18n.readerPrevPage}
+            onMouseEnter={(e) => showTip(e, i18n.readerPrevPage)}
+            onMouseLeave={hideTip}
+            onClick={() => {
+              if (webtoon) requestScrollToPage(Math.max(0, pageIndex - 1), "top");
+              else go(-1);
+            }}
+          >
+            {direction === "rtl" ? <IconChevronRight /> : <IconChevronLeft />}
+          </button>
+        )}
+        {pageEditing ? (
+          <input
+            ref={pageInputRef}
+            value={pageDraft}
+            onChange={(e) => setPageDraft(e.target.value)}
+            onBlur={commitPageJump}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitPageJump();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setPageEditing(false);
+              }
+            }}
+            className="reader-page-chip border-0 bg-white text-center outline-none ring-1 ring-ink-300 dark:bg-surface-raised dark:ring-white/15"
+            inputMode="numeric"
+            aria-label={i18n.readerJumpHint}
+          />
+        ) : (
+          <button
+            type="button"
+            className={`reader-page-chip ${barTiny ? "reader-page-chip-sm" : ""}`}
+            aria-label={i18n.readerPageLabel}
+            onMouseEnter={(e) => showTip(e, i18n.readerPageLabel)}
+            onMouseLeave={hideTip}
+            disabled={total <= 0}
+            onClick={() => {
+              const cur = (visibleIndexes[0] ?? pageIndex) + 1;
+              setPageDraft(String(cur));
+              setPageEditing(true);
+            }}
+          >
+            {pageLabel}
+          </button>
+        )}
+        {!barTiny && (
+          <button
+            type="button"
+            className="reader-icon-btn"
+            disabled={!canNext}
+            aria-label={i18n.readerNextPage}
+            onMouseEnter={(e) => showTip(e, i18n.readerNextPage)}
+            onMouseLeave={hideTip}
+            onClick={() => {
+              if (webtoon) requestScrollToPage(Math.min(Math.max(0, total - 1), pageIndex + 1), "top");
+              else go(1);
+            }}
+          >
+            {direction === "rtl" ? <IconChevronLeft /> : <IconChevronRight />}
+          </button>
+        )}
+      </div>
+      {total > 0 && !barTiny && (
+        <div className="pointer-events-none absolute top-full z-20 pt-2 opacity-0 transition-opacity duration-150 group-hover/pager:pointer-events-auto group-hover/pager:opacity-100">
+          <div className="w-64 select-none rounded-xl border border-ink-200 bg-white px-3 py-2.5 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised">
+            <input
+              type="range"
+              min={1}
+              max={total}
+              value={sliderDragValue ?? sliderPage}
+              onPointerDown={() => setSliderDragValue(sliderPage)}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                setSliderDragValue(n);
+              }}
+              onPointerUp={() => {
+                if (sliderDragValue == null) return;
+                const idx = alignIndex(sliderDragValue - 1, effectiveSpread, total);
+                setSliderDragValue(null);
+                if (webtoon) requestScrollToPage(idx, "top");
+                else setPageIndex(idx);
+              }}
+              onBlur={() => {
+                if (sliderDragValue == null) return;
+                const idx = alignIndex(sliderDragValue - 1, effectiveSpread, total);
+                setSliderDragValue(null);
+                if (webtoon) requestScrollToPage(idx, "top");
+                else setPageIndex(idx);
+              }}
+              onKeyUp={(e) => {
+                if (sliderDragValue == null) return;
+                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") {
+                  return;
+                }
+                const idx = alignIndex(sliderDragValue - 1, effectiveSpread, total);
+                setSliderDragValue(null);
+                if (webtoon) requestScrollToPage(idx, "top");
+                else setPageIndex(idx);
+              }}
+              className="reader-range w-full"
+              style={
+                {
+                  "--range-pct":
+                    (total > 0
+                      ? ((sliderDragValue ?? sliderPage) / total) * 100
+                      : 0) + "%",
+                } as CSSProperties
+              }
+              aria-label="progress"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div
@@ -1066,9 +1591,10 @@ export function ReaderView({
 
       {!barHidden && (
         <div
-          className={`reader-bar relative shrink-0 border-b border-ink-200/70 bg-ink-100/95 pl-[88px] pr-2 backdrop-blur-md dark:border-white/[0.08] dark:bg-surface/95 ${
-            moreOpen ? "z-50" : "z-40"
-          }`}
+          ref={barRef}
+          className={`reader-bar relative shrink-0 border-b border-ink-200/70 bg-ink-100/95 pr-2 backdrop-blur-md dark:border-white/[0.08] dark:bg-surface/95 ${
+            barTiny ? "pl-[72px]" : "pl-[88px]"
+          } ${moreOpen ? "z-50" : "z-40"}`}
           onClick={(e) => e.stopPropagation()}
         >
           {/* 底层整栏拖窗：上层控件 pointer-events-auto，空白处穿透到此层 */}
@@ -1079,7 +1605,11 @@ export function ReaderView({
           />
           <div className="relative z-10 flex h-full items-center gap-2 pointer-events-none">
             {/* —— 左：返回 + 书名 —— */}
-            <div className="relative z-20 flex min-w-0 max-w-[28%] shrink-0 items-center gap-1 sm:max-w-[32%] pointer-events-none">
+            <div
+              className={`relative z-20 flex min-w-0 shrink-0 items-center gap-1 pointer-events-none ${
+                barCompact ? "" : "max-w-[28%] sm:max-w-[32%]"
+              }`}
+            >
               {onClose && (
                 <button
                   type="button"
@@ -1092,234 +1622,82 @@ export function ReaderView({
                   <IconBack />
                 </button>
               )}
-              {displayTitle ? (
-                <span
-                  data-tauri-drag-region
-                  className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-900 dark:text-fg pointer-events-auto"
-                  title={displayTitle}
-                  onMouseDown={startWindowDrag}
-                >
-                  {displayTitle}
-                </span>
-              ) : (
-                <span
-                  data-tauri-drag-region
-                  className="truncate text-[12px] text-ink-500 dark:text-fg-muted pointer-events-auto"
-                  onMouseDown={startWindowDrag}
-                >
-                  {i18n.readerEmpty}
-                </span>
-              )}
-              {temporary && (
+              {!barCompact &&
+                (displayTitle ? (
+                  <span
+                    data-tauri-drag-region
+                    className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-900 dark:text-fg pointer-events-auto"
+                    title={displayTitle}
+                    onMouseDown={startWindowDrag}
+                  >
+                    {displayTitle}
+                  </span>
+                ) : (
+                  <span
+                    data-tauri-drag-region
+                    className="truncate text-[12px] text-ink-500 dark:text-fg-muted pointer-events-auto"
+                    onMouseDown={startWindowDrag}
+                  >
+                    {i18n.readerEmpty}
+                  </span>
+                ))}
+              {!barCompact && temporary && (
                 <span className="pointer-events-none shrink-0 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-100">
                   {i18n.externalTempBadge}
                 </span>
               )}
             </div>
 
-            {/* —— 中：翻页进度（绝对居中） —— */}
-            <div className="pointer-events-none absolute inset-x-0 z-10 flex justify-center">
-              <div className="pointer-events-auto group/pager flex flex-col items-center">
-                <div className="flex items-center gap-0.5">
+            {barCompact ? (
+              <div className="relative z-10 mx-1 flex min-w-0 flex-1 justify-center">{pagerControls}</div>
+            ) : (
+              <div className="pointer-events-none absolute inset-x-0 z-10 flex justify-center">
+                {pagerControls}
+              </div>
+            )}
+
+            {/* —— 右：宽屏完整控件；窄屏折进「更多」 —— */}
+            <div className="relative z-20 ml-auto flex shrink-0 items-center gap-1 pointer-events-auto">
+              {!barTiny && (
+                <div className="relative z-50">
                   <button
                     type="button"
-                    className="reader-icon-btn"
-                    disabled={!canPrev}
-                    aria-label={i18n.readerPrevPage}
-                    onMouseEnter={(e) => showTip(e, i18n.readerPrevPage)}
+                    className={`reader-ai-trigger ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
+                    disabled={visibleIndexes.length === 0}
+                    aria-label={i18n.readerAiTooltip}
+                    onMouseEnter={(e) => showTip(e, i18n.readerAiTooltip)}
                     onMouseLeave={hideTip}
-                    onClick={() => go(-1)}
+                    aria-pressed={showingAi}
+                    onClick={() => toggleAi()}
                   >
-                    {direction === "rtl" ? <IconChevronRight /> : <IconChevronLeft />}
-                  </button>
-                  {pageEditing ? (
-                    <input
-                      ref={pageInputRef}
-                      value={pageDraft}
-                      onChange={(e) => setPageDraft(e.target.value)}
-                      onBlur={commitPageJump}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          commitPageJump();
-                        } else if (e.key === "Escape") {
-                          e.preventDefault();
-                          setPageEditing(false);
-                        }
-                      }}
-                      className="reader-page-chip border-0 bg-white text-center outline-none ring-1 ring-ink-300 dark:bg-surface-raised dark:ring-white/15"
-                      inputMode="numeric"
-                      aria-label={i18n.readerJumpHint}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      className="reader-page-chip"
-                      aria-label={i18n.readerPageLabel}
-                      onMouseEnter={(e) => showTip(e, i18n.readerPageLabel)}
-                      onMouseLeave={hideTip}
-                      disabled={total <= 0}
-                      onClick={() => {
-                        const cur = (visibleIndexes[0] ?? pageIndex) + 1;
-                        setPageDraft(String(cur));
-                        setPageEditing(true);
-                      }}
-                    >
-                      {pageLabel}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="reader-icon-btn"
-                    disabled={!canNext}
-                    aria-label={i18n.readerNextPage}
-                    onMouseEnter={(e) => showTip(e, i18n.readerNextPage)}
-                    onMouseLeave={hideTip}
-                    onClick={() => go(1)}
-                  >
-                    {direction === "rtl" ? <IconChevronLeft /> : <IconChevronRight />}
+                    <IconSparkles />
+                    {showingAi && <span className="reader-ai-dot" aria-hidden="true" />}
                   </button>
                 </div>
-                {/* 悬停显示进度条跳转：面板化，与 reader-menu / 底部 HUD 同一套视觉语言 */}
-                {total > 0 && (
-                  <div className="pointer-events-none absolute top-full z-20 pt-2 opacity-0 transition-opacity duration-150 group-hover/pager:pointer-events-auto group-hover/pager:opacity-100">
-                    <div className="w-64 select-none rounded-xl border border-ink-200 bg-white px-3 py-2.5 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised">
-                      <input
-                        type="range"
-                        min={1}
-                        max={total}
-                        value={sliderDragValue ?? sliderPage}
-                        onPointerDown={() => setSliderDragValue(sliderPage)}
-                        onChange={(e) => {
-                          const n = Number(e.target.value);
-                          setSliderDragValue(n);
-                          // 拖动中直接落位（不 align），thum 跟随指针，页码不闪跳
-                          setPageIndex(Math.min(Math.max(0, n - 1), Math.max(0, total - 1)));
-                        }}
-                        onPointerUp={() => {
-                          if (sliderDragValue == null) return;
-                          setSliderDragValue(null);
-                          setPageIndex((i) => alignIndex(i, spread, total));
-                        }}
-                        onBlur={() => {
-                          if (sliderDragValue == null) return;
-                          setSliderDragValue(null);
-                          setPageIndex((i) => alignIndex(i, spread, total));
-                        }}
-                        onKeyUp={() => {
-                          // 键盘方向键走 onChange（会置 drag 值），此处统一收口对齐
-                          setSliderDragValue(null);
-                          setPageIndex((i) => alignIndex(i, spread, total));
-                        }}
-                        className="reader-range w-full"
-                        style={
-                          {
-                            "--range-pct":
-                              (total > 0
-                                ? ((sliderDragValue ?? sliderPage) / total) * 100
-                                : 0) + "%",
-                          } as CSSProperties
-                        }
-                        aria-label="progress"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
+              )}
 
-            {/* —— 右：AI / 阅读模式+隐藏 / 窗口，三组分隔 —— */}
-            <div className="relative z-20 ml-auto flex shrink-0 items-center gap-1 pointer-events-auto">
-              <div className="relative z-50">
-                <button
-                  type="button"
-                  className={`reader-ai-trigger ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
-                  disabled={visibleIndexes.length === 0}
-                  aria-label={i18n.readerAiTooltip}
-                  onMouseEnter={(e) => showTip(e, i18n.readerAiTooltip)}
-                  onMouseLeave={hideTip}
-                  aria-pressed={showingAi}
-                  onClick={() => toggleAi()}
-                >
-                  <IconSparkles />
-                  {showingAi && <span className="reader-ai-dot" aria-hidden="true" />}
-                </button>
-              </div>
+              {!barCompact && (
+                <>
+                  <span className="reader-bar-sep" aria-hidden="true" />
+                  {readingModeSeg}
+                  <span className="reader-bar-sep" aria-hidden="true" />
+                </>
+              )}
 
-              <span className="reader-bar-sep" aria-hidden="true" />
-
-              {/* ② 阅读模式：单双页 + 方向 */}
-              <div className="reader-seg" role="group" aria-label={i18n.readerSingle}>
+              {!barTiny && (
                 <button
                   type="button"
-                  className={`reader-seg-item ${spread === "single" ? "is-active" : ""}`}
-                  aria-label={i18n.readerSingle}
-                  onMouseEnter={(e) => showTip(e, i18n.readerSingle)}
-                  onMouseLeave={hideTip}
-                  aria-pressed={spread === "single"}
-                  onClick={() => {
-                    setSpread("single");
-                    setPageIndex((i) => alignIndex(i, "single", total));
-                  }}
-                >
-                  <IconSinglePage />
-                </button>
-                <button
-                  type="button"
-                  className={`reader-seg-item ${spread === "double" ? "is-active" : ""}`}
-                  aria-label={i18n.readerDouble}
-                  onMouseEnter={(e) => showTip(e, i18n.readerDouble)}
-                  onMouseLeave={hideTip}
-                  aria-pressed={spread === "double"}
-                  onClick={() => {
-                    setSpread("double");
-                    setPageIndex((i) => alignIndex(i, "double", total));
-                  }}
-                >
-                  <IconDoublePage />
-                </button>
-                {/* 方向并入同一容器：视觉上是一个「阅读模式」组 */}
-                <button
-                  type="button"
-                  className={`reader-seg-item ${direction === "rtl" ? "is-active" : ""}`}
-                  aria-label={direction === "rtl" ? i18n.readerRtl : i18n.readerLtr}
+                  className={`reader-icon-btn ${fullscreen ? "is-active" : ""}`}
+                  aria-label={`${fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen}`}
                   onMouseEnter={(e) =>
-                    showTip(e, direction === "rtl" ? i18n.readerRtl : i18n.readerLtr)
+                    showTip(e, fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen)
                   }
                   onMouseLeave={hideTip}
-                  aria-pressed={direction === "rtl"}
-                  onClick={() => setDirection((d) => (d === "ltr" ? "rtl" : "ltr"))}
+                  onClick={() => void toggleFullscreen()}
                 >
-                  {direction === "rtl" ? <IconRtl /> : <IconLtr />}
+                  {fullscreen ? <IconExitFullscreen /> : <IconFullscreen />}
                 </button>
-                {/* 隐藏工具栏：方向切换按钮右侧，快捷键 H 保留 */}
-                <button
-                  type="button"
-                  className="reader-seg-item"
-                  aria-label={i18n.readerHideBar}
-                  onMouseEnter={(e) => showTip(e, i18n.readerHideBar)}
-                  onMouseLeave={hideTip}
-                  onClick={() => setBar(true)}
-                >
-                  <IconHideBar />
-                </button>
-              </div>
-
-              <span className="reader-bar-sep" aria-hidden="true" />
-
-              {/* ③ 窗口：全屏 + 更多（隐藏工具栏收进更多，快捷键 H 保留） */}
-              <button
-                type="button"
-                className={`reader-icon-btn ${fullscreen ? "is-active" : ""}`}
-                aria-label={`${fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen}`}
-                onMouseEnter={(e) =>
-                  showTip(e, fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen)
-                }
-                onMouseLeave={hideTip}
-                onClick={() => void toggleFullscreen()}
-              >
-                {fullscreen ? <IconExitFullscreen /> : <IconFullscreen />}
-              </button>
+              )}
 
               {/* 更多：AI 设置 / 适应模式 / 打开文件 / 任务切换 */}
               <div className="relative z-50" ref={moreRef}>
@@ -1340,6 +1718,40 @@ export function ReaderView({
                 </button>
                 {moreOpen && (
                   <div className="reader-menu reader-menu-wide" role="menu" onClick={(e) => e.stopPropagation()}>
+                    {barCompact && (
+                      <div className="border-b border-ink-100 px-3 pb-2 pt-2 dark:border-white/[0.08]">
+                        <p className="text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
+                          {i18n.readerMode}
+                        </p>
+                        <div className="mt-1.5">{readingModeSeg}</div>
+                        {barTiny && (
+                          <div className="mt-2 flex flex-col">
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-xs text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
+                              onClick={() => {
+                                toggleAi();
+                                setMoreOpen(false);
+                              }}
+                            >
+                              <IconSparkles />
+                              {i18n.readerAiLabel}
+                            </button>
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-xs text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
+                              onClick={() => {
+                                void toggleFullscreen();
+                                setMoreOpen(false);
+                              }}
+                            >
+                              {fullscreen ? <IconExitFullscreen /> : <IconFullscreen />}
+                              {fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {/* AI 设置：引擎 / 去噪 / 缓存（顶栏 AI 按钮只做开关，设置收敛于此） */}
                     <div className="px-3 pb-1 pt-2">
                       <p className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
@@ -1498,12 +1910,15 @@ export function ReaderView({
                     </p>
                     <button
                       type="button"
-                      className={`flex w-full px-3 py-2 text-left text-xs ${
+                      disabled={fitLocked}
+                      title={fitLocked ? i18n.readerWebtoonFitLocked : undefined}
+                      className={`flex w-full px-3 py-2 text-left text-xs disabled:opacity-40 ${
                         fit === "screen"
                           ? "bg-ink-100 font-medium text-ink-900 dark:bg-surface-high dark:text-fg"
                           : "text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
                       }`}
                       onClick={() => {
+                        if (fitLocked) return;
                         setFit("screen");
                         smartSessionKeyRef.current = null;
                         void restoreDefaultWindowMinSize();
@@ -1514,13 +1929,15 @@ export function ReaderView({
                     </button>
                     <button
                       type="button"
-                      title={i18n.readerFitSmartHint}
-                      className={`flex w-full flex-col items-start px-3 py-2 text-left text-xs ${
+                      disabled={fitLocked}
+                      title={fitLocked ? i18n.readerWebtoonFitLocked : i18n.readerFitSmartHint}
+                      className={`flex w-full flex-col items-start px-3 py-2 text-left text-xs disabled:opacity-40 ${
                         fit === "smart"
                           ? "bg-ink-100 font-medium text-ink-900 dark:bg-surface-high dark:text-fg"
                           : "text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
                       }`}
                       onClick={() => {
+                        if (fitLocked) return;
                         setMoreOpen(false);
                         // 已在 smart：按当前页再定一次窗；否则进入 smart（effect 定一次）
                         if (fit === "smart") {
@@ -1546,10 +1963,11 @@ export function ReaderView({
                     </button>
                     <button
                       type="button"
-                      title={i18n.readerFitCurrentHint}
-                      disabled={pagesInView.length === 0 || fullscreen}
+                      title={fitLocked ? i18n.readerWebtoonFitLocked : i18n.readerFitCurrentHint}
+                      disabled={fitLocked || pagesInView.length === 0 || fullscreen}
                       className="flex w-full flex-col items-start px-3 py-2 text-left text-xs text-ink-800 hover:bg-ink-50 disabled:opacity-40 dark:text-fg dark:hover:bg-white/[0.06]"
                       onClick={() => {
+                        if (fitLocked) return;
                         setMoreOpen(false);
                         void fitWindowToCurrentPage();
                       }}
@@ -1626,11 +2044,14 @@ export function ReaderView({
       {barHidden && (
         <button
           type="button"
-          className="reader-no-drag absolute right-3 top-2.5 z-40 flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-black/50 text-white/90 backdrop-blur-sm hover:bg-black/70"
+          className="reader-no-drag absolute right-3 top-2.5 z-40 flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-black/35 text-white/85 backdrop-blur-sm hover:bg-black/60"
           aria-label={i18n.readerShowBar}
           onMouseEnter={(e) => showTip(e, i18n.readerShowBar)}
           onMouseLeave={hideTip}
-          onClick={() => setBar(false)}
+          onClick={() => {
+            hideTip();
+            setBar(false);
+          }}
         >
           <IconShowBar />
         </button>
@@ -1638,36 +2059,61 @@ export function ReaderView({
 
       <div
         ref={viewportRef}
-        className="relative min-h-0 flex-1 select-none overflow-auto"
-        onClick={(e) => clickNav(e.clientX, e.currentTarget.getBoundingClientRect())}
+        className="reader-viewport relative min-h-0 flex-1 select-none overflow-auto"
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          if (webtoon) {
+            const target = e.target;
+            if (!(target instanceof HTMLImageElement) || !target.classList.contains("reader-page-img")) return;
+            clickNavWebtoon(e.clientY, rect);
+          } else clickNav(e.clientX, rect);
+        }}
       >
         {!state && (
           <div className={`grid h-full place-items-center px-6 text-center text-sm ${canvasPreset.onDark ? "text-white/45" : "text-ink-500"}`}>
             {i18n.readerHint}
           </div>
         )}
-        {state && displayPages.length === 0 && (
+        {state && (webtoon ? pageCount <= 0 : displayPages.length === 0) && (
           <div className={`grid h-full place-items-center text-sm ${canvasPreset.onDark ? "text-white/45" : "text-ink-500"}`}>
             {busy ? i18n.readerLoading : i18n.readerWaitingExtract}
           </div>
         )}
-        {state && displayPages.length > 0 && (
-          <div className="flex h-full min-h-full select-none items-center justify-center">
-            {displayPages.map((p) => (
-              <img
-                key={`${p.index}-${p.kind}`}
-                src={p.url}
-                alt={p.name}
-                decoding="async"
-                draggable={false}
-                className={
-                  spread === "double"
-                    ? "reader-page-img max-h-full max-w-[50%] object-contain select-none"
-                    : "reader-page-img max-h-full max-w-full object-contain select-none"
-                }
-              />
-            ))}
-          </div>
+        {state && (webtoon ? pageCount > 0 : displayPages.length > 0) && (
+          webtoon ? (
+            <WebtoonStrip
+              pageCount={pageCount}
+              pageIndex={pageIndex}
+              pages={webtoonPages}
+              maxWidth={WEBTOON_MAX_WIDTH}
+              canvasHex={canvasPreset.hex}
+              sourceKey={state.source ?? source ?? ""}
+              contentWidth={stripWidth}
+              viewportRef={viewportRef}
+              jumpRequest={jumpRequest}
+              estimateSize={estimatedStripHeight}
+              onImageLoad={handleWebtoonImageLoad}
+              onVisibleIndexes={handleWebtoonVisibleIndexes}
+              onPageChange={handleWebtoonPageChange}
+            />
+          ) : (
+            <div className="flex h-full min-h-full select-none items-center justify-center">
+              {displayPages.map((p) => (
+                <img
+                  key={`${p.index}-${p.kind}`}
+                  src={p.url}
+                  alt={p.name}
+                  decoding="async"
+                  draggable={false}
+                  className={
+                    spread === "double"
+                      ? "reader-page-img max-h-full max-w-[50%] object-contain select-none"
+                      : "reader-page-img max-h-full max-w-full object-contain select-none"
+                  }
+                />
+              ))}
+            </div>
+          )
         )}
       </div>
 
@@ -1807,6 +2253,16 @@ function IconRtl() {
   return (
     <svg viewBox="0 0 20 20" className={iconClass()} fill="none" aria-hidden="true">
       <path d="M16 10H5M9 6 5 10l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconWebtoon() {
+  return (
+    <svg viewBox="0 0 20 20" className={iconClass()} fill="none" aria-hidden="true">
+      <rect x="6" y="2.5" width="8" height="5" rx="1" stroke="currentColor" strokeWidth="1.35" />
+      <rect x="6" y="8.25" width="8" height="5" rx="1" stroke="currentColor" strokeWidth="1.35" />
+      <path d="M10 14.75v2.25m0 0-1.8-1.8M10 17l1.8-1.8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
