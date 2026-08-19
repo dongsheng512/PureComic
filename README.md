@@ -1,7 +1,7 @@
 # PureComic
 
 [![CI](https://github.com/dongsheng512/PureComic/actions/workflows/ci.yml/badge.svg)](https://github.com/dongsheng512/PureComic/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-v0.3.0-6bb6ff)](https://github.com/dongsheng512/PureComic/tags)
+[![version](https://img.shields.io/badge/version-v0.3.1-6bb6ff)](https://github.com/dongsheng512/PureComic/tags)
 
 本地优先的桌面端 **漫画增强 + 阅读 + 书库** 工具。
 
@@ -9,7 +9,7 @@ Local-first desktop **comic enhancer, reader, and library**.
 
 技术栈：**Tauri 2 + Rust + React + TypeScript + Tailwind CSS**
 
-当前版本：**v0.3.0**。引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
+当前版本：**v0.3.1**。引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
 
 ## 能做什么
 
