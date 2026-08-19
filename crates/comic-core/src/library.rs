@@ -2,6 +2,7 @@
 
 use crate::archive;
 use crate::config::AppConfig;
+use crate::cover::{self, COVER_SCAN_PAGES};
 use crate::error::{AppError, AppResult};
 use crate::image_io::{self, is_image_path};
 use crate::job::SourceKind;
@@ -17,7 +18,7 @@ const LIBRARY_VERSION: u32 = 1;
 const COVER_MAX_SIDE: u32 = 720;
 const COVER_JPEG_QUALITY: u8 = 90;
 /// Bump when cover encode params change so old blurry thumbs regenerate.
-const COVER_CACHE_TAG: &str = "v4";
+const COVER_CACHE_TAG: &str = "v6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -526,9 +527,16 @@ fn cover_file_ok(path: Option<&str>) -> bool {
 }
 
 fn cover_looks_real(path: &Path) -> bool {
-    path.is_file()
-        && path.metadata().map(|m| m.len() > 32).unwrap_or(false)
-        && image_io::file_looks_like_image(path)
+    if !path.is_file()
+        || path.metadata().map(|m| m.len() <= 32).unwrap_or(true)
+        || !image_io::file_looks_like_image(path)
+    {
+        return false;
+    }
+    match image_io::load_image(path) {
+        Ok(img) => cover::cover_image_usable(&img),
+        Err(_) => false,
+    }
 }
 
 fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
@@ -544,33 +552,42 @@ fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppR
     let src = PathBuf::from(&entry.path);
     let kind = SourceKind::detect(&src);
     let extracted = if matches!(kind, SourceKind::Mobi) {
-        crate::ebook::mobi_cover_bytes(&src).and_then(|bytes| write_cover_from_bytes(&bytes, &dest))
+        match crate::ebook::mobi_cover_bytes(&src).and_then(|bytes| write_cover_from_bytes(&bytes, &dest)) {
+            Ok(()) => Ok(()),
+            Err(_) => try_cover_from_pages(&src, cfg, &dest),
+        }
     } else {
-        // 前几页尝试：首页可能是空白/版权页或抽取失败
         try_cover_from_pages(&src, cfg, &dest)
     };
     extracted?;
     Ok(dest)
 }
 
-/// 依次尝试第 0..N 页作为封面，直到成功解码并写出 JPEG。
+/// Score the first pages and keep the one that looks most like a cover.
 fn try_cover_from_pages(source: &Path, cfg: &AppConfig, dest: &Path) -> AppResult<()> {
-    let max_try = 8u32;
     let mut last_err = AppError::unsupported("无法抽取封面页");
-    for idx in 0..max_try {
+    let mut best: Option<(i32, PathBuf)> = None;
+    for idx in 0..COVER_SCAN_PAGES {
         match crate::reader::resolve_source_page(source, idx, cfg) {
-            Ok(page) => match write_cover_jpeg(Path::new(&page.path), dest) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    last_err = e;
-                    // 失败的缓存文件清掉，避免下次短路
-                    let _ = std::fs::remove_file(dest);
+            Ok(page) => {
+                let path = PathBuf::from(&page.path);
+                match image_io::load_image(&path) {
+                    Ok(img) => {
+                        if let Some(score) = cover::total_cover_score(&page.name, &img) {
+                            if best.as_ref().map(|(best_score, _)| score > *best_score).unwrap_or(true) {
+                                best = Some((score, path));
+                            }
+                        }
+                    }
+                    Err(e) => last_err = e,
                 }
-            },
+            }
             Err(e) => last_err = e,
         }
     }
-    // 回退旧逻辑：仅第一页路径
+    if let Some((_, path)) = best {
+        return write_cover_jpeg(&path, dest);
+    }
     match extract_first_page(source, cfg).and_then(|(_, page)| write_cover_jpeg(&page, dest)) {
         Ok(()) => Ok(()),
         Err(_) => Err(last_err),
@@ -582,6 +599,9 @@ fn write_cover_from_bytes(bytes: &[u8], dest: &Path) -> AppResult<()> {
         AppError::new(crate::error::ErrorCode::DecodeFail, "封面解码失败")
             .with_detail(e.to_string())
     })?;
+    if !cover::cover_image_usable(&img) {
+        return Err(AppError::unsupported("内嵌封面不像可用的封面图"));
+    }
     encode_cover_jpeg(&img, dest)
 }
 
@@ -649,8 +669,32 @@ mod tests {
     }
 
     fn write_tiny_png(path: &Path) {
+        let mut img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> = image::ImageBuffer::new(32, 48);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            *pixel = image::Rgb([
+                (x * 7 + 20) as u8,
+                (y * 5 + 40) as u8,
+                (x * 3 + y * 4) as u8,
+            ]);
+        }
+        image::DynamicImage::ImageRgb8(img).save(path).unwrap();
+    }
+
+    fn write_solid_png(path: &Path, color: [u8; 3]) {
         let img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
-            image::ImageBuffer::from_pixel(16, 24, image::Rgb([200, 40, 40]));
+            image::ImageBuffer::from_pixel(24, 36, image::Rgb(color));
+        image::DynamicImage::ImageRgb8(img).save(path).unwrap();
+    }
+
+    fn write_banner_png(path: &Path) {
+        let mut img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> = image::ImageBuffer::new(32, 48);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            *pixel = if y < 10 {
+                image::Rgb([252, 252, 252])
+            } else {
+                image::Rgb([20, 20, (x * 2) as u8])
+            };
+        }
         image::DynamicImage::ImageRgb8(img).save(path).unwrap();
     }
 
@@ -785,5 +829,22 @@ mod tests {
         assert_eq!(r2.added, 1);
         assert_eq!(r2.existed, 1);
         assert_eq!(store.list().len(), 2);
+    }
+
+    #[test]
+    fn cover_picks_art_page_over_blank_and_banner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let folder = tmp.path().join("webtoon-pack");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_solid_png(&folder.join("001.png"), [40, 110, 170]);
+        write_banner_png(&folder.join("002.png"));
+        write_tiny_png(&folder.join("003.png"));
+        let mut store = LibraryStore::open(&cfg).unwrap();
+        let e = store.upsert_path(&folder, &cfg).unwrap();
+        let cover = PathBuf::from(e.cover_path.expect("cover"));
+        let img = image_io::load_image(&cover).unwrap();
+        assert!(cover::cover_image_usable(&img));
+        assert!(cover::cover_stats(&img).top_white_ratio < 0.5);
     }
 }

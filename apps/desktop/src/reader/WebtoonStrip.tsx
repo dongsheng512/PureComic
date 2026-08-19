@@ -1,5 +1,12 @@
-import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
-import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type RefObject,
+} from "react";
 
 type StripPage = { url: string; name: string } | undefined;
 
@@ -25,21 +32,12 @@ type Props = {
   onPageChange: (index: number, meta: { fromScroll: boolean }) => void;
 };
 
-function findMidpointIndex(items: VirtualItem[], midpoint: number, fallback: number): number {
-  let closest = fallback;
-  let distance = Number.POSITIVE_INFINITY;
-  for (const item of items) {
-    if (item.start <= midpoint && midpoint < item.end) return item.index;
-    const nextDistance = midpoint < item.start ? item.start - midpoint : midpoint - item.end;
-    if (nextDistance < distance) {
-      distance = nextDistance;
-      closest = item.index;
-    }
-  }
-  return closest;
-}
+type EngineProps = Props & {
+  layoutWidth: number;
+  metricRef: MutableRefObject<{ index: number; ratio: number } | null>;
+};
 
-export function WebtoonStrip({
+function StripEngine({
   pageCount,
   pageIndex,
   pages,
@@ -47,25 +45,27 @@ export function WebtoonStrip({
   canvasHex,
   sourceKey,
   contentWidth,
+  layoutWidth,
   viewportRef,
   jumpRequest,
   estimateSize,
   onImageLoad,
   onVisibleIndexes,
   onPageChange,
-}: Props) {
+  metricRef,
+}: EngineProps) {
   const jumpingRef = useRef(false);
   const lastJumpSeqRef = useRef<number | null>(null);
   const lastPageRef = useRef(pageIndex);
-  const metricRef = useRef<{ index: number; ratio: number } | null>(null);
-  const lastWidthRef = useRef(0);
+  const jumpClearTimer = useRef<number | null>(null);
+  const [decoded, setDecoded] = useState<Set<number>>(() => new Set());
   // TanStack Virtual owns scroll state and intentionally exposes non-memoizable methods.
   // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: pageCount,
     getScrollElement: () => viewportRef.current,
     estimateSize,
-    overscan: 4,
+    overscan: 3,
     getItemKey: (index) => index,
     paddingStart: 0,
     paddingEnd: 0,
@@ -77,24 +77,67 @@ export function WebtoonStrip({
     onVisibleIndexes(visibleKey ? visibleKey.split(",").map(Number) : []);
   }, [onVisibleIndexes, visibleKey]);
 
-  useEffect(() => {
-    if (jumpingRef.current || virtualItems.length === 0) return;
-    const scrollElement = viewportRef.current;
-    if (!scrollElement) return;
-    const offset = virtualizer.scrollOffset ?? 0;
-    const midpoint = offset + scrollElement.clientHeight / 2;
-    const hit = findMidpointIndex(virtualItems, midpoint, pageIndex);
-    const item = virtualItems.find((entry) => entry.index === hit);
-    if (item && item.size > 0) {
-      metricRef.current = {
-        index: hit,
-        ratio: Math.max(0, Math.min(1, (offset - item.start) / item.size)),
-      };
+  useLayoutEffect(() => {
+    const metric = metricRef.current;
+    const el = viewportRef.current;
+    if (!el || pageCount <= 0) return;
+    if (metric) {
+      const placed = virtualizer.getOffsetForIndex(metric.index, "start");
+      if (placed) {
+        jumpingRef.current = true;
+        el.scrollTop = placed[0] + metric.ratio * estimateSize(metric.index);
+        lastPageRef.current = metric.index;
+        requestAnimationFrame(() => {
+          jumpingRef.current = false;
+        });
+        return;
+      }
     }
-    if (hit === lastPageRef.current) return;
-    lastPageRef.current = hit;
-    onPageChange(hit, { fromScroll: true });
-  }, [onPageChange, pageIndex, virtualItems, virtualizer, viewportRef]);
+    if (pageIndex > 0) {
+      jumpingRef.current = true;
+      virtualizer.scrollToIndex(pageIndex, { align: "start" });
+      lastPageRef.current = pageIndex;
+      requestAnimationFrame(() => {
+        jumpingRef.current = false;
+      });
+    }
+    // Restore once when this layout-width engine mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    let frame = 0;
+    const syncFromScroll = () => {
+      if (jumpingRef.current) return;
+      const offset = el.scrollTop;
+      const midpoint = offset + el.clientHeight / 2;
+      const found = virtualizer.getVirtualItemForOffset(midpoint);
+      const hit = found?.index ?? lastPageRef.current;
+      if (found && found.size > 0) {
+        metricRef.current = {
+          index: hit,
+          ratio: Math.max(0, Math.min(1, (offset - found.start) / found.size)),
+        };
+      }
+      if (hit === lastPageRef.current) return;
+      lastPageRef.current = hit;
+      onPageChange(hit, { fromScroll: true });
+    };
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        syncFromScroll();
+      });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [metricRef, onPageChange, virtualizer, viewportRef]);
 
   useLayoutEffect(() => {
     if (!jumpRequest || jumpRequest.seq === lastJumpSeqRef.current) return;
@@ -102,54 +145,23 @@ export function WebtoonStrip({
     jumpingRef.current = true;
     lastPageRef.current = jumpRequest.index;
     virtualizer.scrollToIndex(jumpRequest.index, { align: jumpRequest.align });
-    let attempts = 0;
-    const settle = () => {
-      attempts += 1;
-      const scrollElement = viewportRef.current;
-      const item =
-        virtualizer.getVirtualItems().find((entry) => entry.index === jumpRequest.index) ??
-        virtualizer.measurementsCache[jumpRequest.index];
-      const offset = virtualizer.scrollOffset ?? 0;
-      const clientHeight = scrollElement?.clientHeight ?? 0;
-      const target =
-        item == null
-          ? offset
-          : jumpRequest.align === "end"
-            ? Math.max(0, item.end - clientHeight)
-            : item.start;
-      if (item && Math.abs(target - offset) < 4) {
+    const frame = requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(jumpRequest.index, { align: jumpRequest.align });
+      if (jumpClearTimer.current != null) window.clearTimeout(jumpClearTimer.current);
+      jumpClearTimer.current = window.setTimeout(() => {
         jumpingRef.current = false;
-        return;
-      }
-      if (attempts === 2 || attempts === 5) {
-        virtualizer.scrollToIndex(jumpRequest.index, { align: jumpRequest.align });
-      }
-      if (attempts >= 12) {
-        jumpingRef.current = false;
-        return;
-      }
-      requestAnimationFrame(settle);
-    };
-    requestAnimationFrame(settle);
-  }, [jumpRequest, virtualizer, viewportRef]);
-
-  useLayoutEffect(() => {
-    virtualizer.measure();
-    const el = viewportRef.current;
-    const metric = metricRef.current;
-    const prevWidth = lastWidthRef.current;
-    lastWidthRef.current = contentWidth;
-    if (!el || !metric || prevWidth <= 0 || contentWidth <= 0 || prevWidth === contentWidth) return;
-    const placed = virtualizer.getOffsetForIndex(metric.index, "start");
-    if (!placed) return;
-    const measured = virtualizer.measurementsCache[metric.index];
-    const size = measured?.size ?? estimateSize(metric.index);
-    jumpingRef.current = true;
-    el.scrollTop = placed[0] + metric.ratio * size;
-    requestAnimationFrame(() => {
-      jumpingRef.current = false;
+        jumpClearTimer.current = null;
+      }, 90);
     });
-  }, [contentWidth, estimateSize, sourceKey, virtualizer, viewportRef]);
+    return () => {
+      cancelAnimationFrame(frame);
+      if (jumpClearTimer.current != null) window.clearTimeout(jumpClearTimer.current);
+    };
+  }, [jumpRequest, virtualizer]);
+
+  useEffect(() => {
+    setDecoded(new Set());
+  }, [sourceKey]);
 
   return (
     <div
@@ -159,6 +171,8 @@ export function WebtoonStrip({
     >
       {virtualItems.map((item) => {
         const page = pages[item.index];
+        const measured = decoded.has(item.index);
+        const near = Math.abs(item.index - pageIndex) <= 1;
         return (
           <div
             key={item.key}
@@ -169,7 +183,7 @@ export function WebtoonStrip({
             style={{
               top: 0,
               maxWidth,
-              minHeight: estimateSize(item.index),
+              minHeight: measured ? undefined : estimateSize(item.index),
               transform: `translate(-50%, ${item.start}px)`,
             }}
           >
@@ -178,18 +192,30 @@ export function WebtoonStrip({
                 src={page.url}
                 alt={page.name}
                 decoding="async"
+                fetchPriority={near ? "high" : "low"}
                 draggable={false}
                 className="reader-page-img block h-auto w-full min-w-0 max-w-full select-none"
                 onLoad={(event) => {
                   const image = event.currentTarget;
-                  const box = image.parentElement;
+                  const naturalWidth = Math.max(1, image.naturalWidth);
+                  const naturalHeight = Math.max(1, image.naturalHeight);
+                  const aspect = naturalHeight / naturalWidth;
                   onImageLoad(item.index, image);
-                  requestAnimationFrame(() => {
-                    if (box) virtualizer.measureElement(box);
-                    if (jumpingRef.current && jumpRequest?.index === item.index) {
-                      virtualizer.scrollToIndex(item.index, { align: jumpRequest.align });
-                    }
+                  const width = Math.min(
+                    Math.max(1, image.getBoundingClientRect().width || contentWidth || layoutWidth),
+                    maxWidth,
+                  );
+                  const height = Number.isFinite(aspect) && aspect > 0 ? Math.round(width * aspect) : Math.round(image.getBoundingClientRect().height);
+                  if (height > 0) virtualizer.resizeItem(item.index, height);
+                  setDecoded((prev) => {
+                    if (prev.has(item.index)) return prev;
+                    const next = new Set(prev);
+                    next.add(item.index);
+                    return next;
                   });
+                  if (jumpingRef.current && jumpRequest?.index === item.index) {
+                    virtualizer.scrollToIndex(item.index, { align: jumpRequest.align });
+                  }
                 }}
               />
             ) : (
@@ -203,5 +229,30 @@ export function WebtoonStrip({
         );
       })}
     </div>
+  );
+}
+
+export function WebtoonStrip(props: Props) {
+  const metricRef = useRef<{ index: number; ratio: number } | null>(null);
+  const [layoutWidth, setLayoutWidth] = useState(props.contentWidth);
+
+  useEffect(() => {
+    if (props.contentWidth <= 0) return;
+    if (Math.abs(props.contentWidth - layoutWidth) < 1) return;
+    const timer = window.setTimeout(() => setLayoutWidth(props.contentWidth), 64);
+    return () => window.clearTimeout(timer);
+  }, [layoutWidth, props.contentWidth]);
+
+  useEffect(() => {
+    setLayoutWidth(props.contentWidth);
+  }, [props.sourceKey]);
+
+  return (
+    <StripEngine
+      key={`${props.sourceKey}:${layoutWidth}`}
+      {...props}
+      layoutWidth={layoutWidth > 0 ? layoutWidth : props.contentWidth}
+      metricRef={metricRef}
+    />
   );
 }

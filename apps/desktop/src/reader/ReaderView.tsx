@@ -183,6 +183,7 @@ export function ReaderView({
   const pageInputRef = useRef<HTMLInputElement>(null);
   const progressTimer = useRef<number | null>(null);
   const aspectMap = useRef<Map<number, number>>(new Map());
+  const aspectMedianRef = useRef<number | null>(null);
   const jumpSeqRef = useRef(0);
   const aspectPersistTimer = useRef<number | null>(null);
   const inflightPagesRef = useRef<Set<number>>(new Set());
@@ -389,6 +390,7 @@ export function ReaderView({
       setLoaded({});
       if (aspectPersistTimer.current != null) window.clearTimeout(aspectPersistTimer.current);
       aspectMap.current = loadStoredAspects(state.source);
+      aspectMedianRef.current = medianAspect(Array.from(aspectMap.current.values()));
       setWebtoonVisibleIndexes([]);
       setJumpRequest(null);
       inflightPagesRef.current.clear();
@@ -465,7 +467,7 @@ export function ReaderView({
   const prefetchIndexes = useMemo(() => {
     if (pageCount <= 0) return visibleIndexes;
     if (webtoon) {
-      return expandStripPrefetch(webtoonPrefetchIndexes, pageCount, 6);
+      return expandStripPrefetch(webtoonPrefetchIndexes, pageCount, 4);
     }
     const extra: number[] = [];
     const origin =
@@ -733,8 +735,9 @@ export function ReaderView({
         // 原图页 LRU 窗口：翻完超长书后 loaded 无限膨胀（与 aiPages 同思路）
         const keys = Object.keys(next).map(Number);
         const center = pageIndexRef.current;
-        const limit = webtoon ? 32 : LOADED_WINDOW;
-        const half = webtoon ? 16 : LOADED_HALF_WINDOW;
+        const visible = webtoonVisibleIndexes.length;
+        const limit = webtoon ? Math.max(28, visible + 12) : LOADED_WINDOW;
+        const half = webtoon ? Math.max(8, Math.ceil(visible / 2) + 6) : LOADED_HALF_WINDOW;
         if (keys.length > limit) {
           for (const k of keys) {
             if (Math.abs(k - center) > half) delete next[k];
@@ -756,7 +759,7 @@ export function ReaderView({
       const rest = prefetchIndexes.filter((i) => !urgent.includes(i) && need(i));
       try {
         if (urgent.length > 0) {
-          setBusy(true);
+          if (!webtoon) setBusy(true);
           mark(urgent, true);
           try {
             const files = await prepareReaderPages({
@@ -773,7 +776,7 @@ export function ReaderView({
       } catch (e) {
         if (stillThisBook()) onError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (stillThisBook()) setBusy(false);
+        if (stillThisBook() && !webtoon) setBusy(false);
       }
       if (!stillThisBook() || rest.length === 0) return;
       mark(rest, true);
@@ -857,9 +860,9 @@ export function ReaderView({
   }, []);
 
   const estimatedStripHeight = useCallback((index: number): number => {
-    const aspect = aspectMap.current.get(index) ?? medianAspect(Array.from(aspectMap.current.values()));
+    const aspect = aspectMap.current.get(index) ?? aspectMedianRef.current ?? undefined;
     const width = stripWidth > 0 ? stripWidth : (viewportRef.current?.clientWidth ?? WEBTOON_MAX_WIDTH);
-    return estimatedHeight(width, WEBTOON_MAX_WIDTH, aspect ?? undefined);
+    return estimatedHeight(width, WEBTOON_MAX_WIDTH, aspect);
   }, [stripWidth]);
 
   const handleWebtoonImageLoad = useCallback(
@@ -870,7 +873,10 @@ export function ReaderView({
       if (!Number.isFinite(aspect) || aspect <= 0) return;
       const previous = aspectMap.current.get(index);
       aspectMap.current.set(index, aspect);
-      if (previous == null || Math.abs(previous - aspect) > 0.002) persistAspects();
+      if (previous == null || Math.abs(previous - aspect) > 0.002) {
+        aspectMedianRef.current = medianAspect(Array.from(aspectMap.current.values()));
+        persistAspects();
+      }
     },
     [persistAspects],
   );
@@ -1104,10 +1110,15 @@ export function ReaderView({
     : direction === "rtl"
       ? [...pagesInView].reverse()
       : pagesInView;
-  const webtoonPages = useMemo(
-    () => (enhanceOn ? { ...loaded, ...aiPages } : loaded),
-    [aiPages, enhanceOn, loaded],
-  );
+  const webtoonPages = useMemo(() => {
+    const sourcePages = enhanceOn ? { ...loaded, ...aiPages } : loaded;
+    const next: Record<number, LoadedPage> = {};
+    for (const index of prefetchIndexes) {
+      const page = sourcePages[index];
+      if (page) next[index] = page;
+    }
+    return next;
+  }, [aiPages, enhanceOn, loaded, prefetchIndexes]);
   const total = state?.pageCount ?? 0;
 
   const cacheSizeText = (stats: EnhanceCacheStats | null): string => {

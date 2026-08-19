@@ -41,14 +41,34 @@ export function medianAspect(aspects: readonly number[]): number | null {
     : known[middle];
 }
 
+/** Fit-width used by the strip (never upscale past maxWidth). */
+export function stripContentWidth(viewportWidth: number, maxWidth: number): number {
+  return Math.max(1, Math.min(viewportWidth, maxWidth));
+}
+
 /** Convert a natural image aspect ratio into the displayed height. */
 export function displayHeight(
   viewportWidth: number,
   maxWidth: number,
   aspect: number,
 ): number {
-  const width = Math.max(1, Math.min(viewportWidth, maxWidth));
-  return Math.round(width * aspect);
+  return Math.round(stripContentWidth(viewportWidth, maxWidth) * aspect);
+}
+
+/** Resolve the page under a Y offset using per-page heights. */
+export function pageIndexAtOffset(
+  offsetY: number,
+  pageCount: number,
+  heightOf: (index: number) => number,
+): number {
+  if (pageCount <= 0) return 0;
+  let rest = Math.max(0, offsetY);
+  for (let i = 0; i < pageCount; i += 1) {
+    const height = Math.max(1, heightOf(i));
+    if (rest < height) return i;
+    rest -= height;
+  }
+  return pageCount - 1;
 }
 
 /** Estimate a page height before its image has decoded. */

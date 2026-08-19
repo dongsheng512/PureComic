@@ -5,6 +5,8 @@ import {
   estimatedHeight,
   expandStripPrefetch,
   medianAspect,
+  pageIndexAtOffset,
+  stripContentWidth,
   stripIndexes,
 } from "./webtoonStripHelpers";
 
@@ -41,5 +43,17 @@ describe("webtoon strip helpers", () => {
     expect(medianAspect([1.4, 1.5])).toBeNull();
     expect(medianAspect([2.07, 1.4, 1.45])).toBe(1.45);
     expect(medianAspect([1.4, 1.42, 1.46, 1.5])).toBe(1.44);
+  });
+
+  it("fits strip content width without upscaling past the cap", () => {
+    expect(stripContentWidth(2000, 960)).toBe(960);
+    expect(stripContentWidth(400, 960)).toBe(400);
+  });
+
+  it("maps a scroll offset onto a page index", () => {
+    const heightOf = () => 100;
+    expect(pageIndexAtOffset(0, 200, heightOf)).toBe(0);
+    expect(pageIndexAtOffset(250, 200, heightOf)).toBe(2);
+    expect(pageIndexAtOffset(999_999, 200, heightOf)).toBe(199);
   });
 });

@@ -4,6 +4,7 @@
 
 pub mod archive;
 pub mod config;
+pub mod cover;
 pub mod diagnostics;
 pub mod ebook;
 pub mod error;
