@@ -715,7 +715,7 @@ mod tests {
         let pos = store.entries.iter().position(|e| e.id == first.id).unwrap();
         store.entries[pos].page_count = 99;
         store.save().unwrap();
-        let r = store.import_paths(&[folder.clone()], &cfg).unwrap();
+        let r = store.import_paths(&[folder], &cfg).unwrap();
         assert_eq!(r.added, 0);
         assert_eq!(r.existed, 1);
         assert_eq!(r.updated, 1);
