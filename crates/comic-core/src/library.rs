@@ -552,7 +552,9 @@ fn ensure_cover(entry: &LibraryEntry, cover_dir: &Path, cfg: &AppConfig) -> AppR
     let src = PathBuf::from(&entry.path);
     let kind = SourceKind::detect(&src);
     let extracted = if matches!(kind, SourceKind::Mobi) {
-        match crate::ebook::mobi_cover_bytes(&src).and_then(|bytes| write_cover_from_bytes(&bytes, &dest)) {
+        match crate::ebook::mobi_cover_bytes(&src)
+            .and_then(|bytes| write_cover_from_bytes(&bytes, &dest))
+        {
             Ok(()) => Ok(()),
             Err(_) => try_cover_from_pages(&src, cfg, &dest),
         }
@@ -710,11 +712,7 @@ mod tests {
         let mut store = LibraryStore::open(&cfg).unwrap();
         let first = store.upsert_path(&folder, &cfg).unwrap();
         assert_eq!(first.page_count, 1);
-        let pos = store
-            .entries
-            .iter()
-            .position(|e| e.id == first.id)
-            .unwrap();
+        let pos = store.entries.iter().position(|e| e.id == first.id).unwrap();
         store.entries[pos].page_count = 99;
         store.save().unwrap();
         let r = store.import_paths(&[folder.clone()], &cfg).unwrap();

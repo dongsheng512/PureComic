@@ -531,7 +531,10 @@ mod tests {
             "expected native jpeg cache, got {}",
             file.path
         );
-        assert_eq!(std::fs::read(&file.path).unwrap(), b"\xFF\xD8\xFFFAKEJPEG-BYTES");
+        assert_eq!(
+            std::fs::read(&file.path).unwrap(),
+            b"\xFF\xD8\xFFFAKEJPEG-BYTES"
+        );
         let again = resolve_source_page(&cbz, 0, &cfg).unwrap();
         assert_eq!(again.path, file.path);
     }
