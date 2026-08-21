@@ -37,7 +37,7 @@ enum Commands {
         #[arg(long, default_value_t = 92)]
         jpeg_quality: u8,
         /// 增强引擎：auto | realcugan-coreml | waifu2x-coreml | realesrgan-coreml
-        /// | realcugan-vulkan | waifu2x-vulkan | mock（auto 按可用性回退，优先 Core ML）
+        /// | animevideo-coreml | realcugan-vulkan | waifu2x-vulkan | mock（auto 按可用性回退，优先 Core ML）
         #[arg(long, default_value = "auto")]
         engine: String,
     },

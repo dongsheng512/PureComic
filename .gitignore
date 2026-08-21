@@ -53,6 +53,8 @@ third_party/realesrgan-coreml/*.mlmodel
 third_party/realesrgan-coreml/*.mlmodelc/
 third_party/realcugan-coreml/*.mlpackage/
 third_party/realcugan-coreml/*.mlmodelc/
+third_party/animevideo-coreml/*.mlpackage/
+third_party/animevideo-coreml/*.mlmodelc/
 third_party/ncnn-vulkan/.cache/
 third_party/ncnn-vulkan/waifu2x-ncnn-vulkan/bin/
 third_party/ncnn-vulkan/realcugan-ncnn-vulkan/bin/
@@ -70,6 +72,7 @@ third_party/models-cunet/**
 !third_party/waifu2x-coreml/.gitkeep
 !third_party/realesrgan-coreml/.gitkeep
 !third_party/realcugan-coreml/.gitkeep
+!third_party/animevideo-coreml/.gitkeep
 
 # Keep pin metadata & notices tracked
 !third_party/NOTICE
@@ -91,3 +94,6 @@ pic/
 
 # UI tooling artifacts
 .mimosa/
+
+# Python
+__pycache__/

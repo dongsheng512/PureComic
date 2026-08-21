@@ -83,11 +83,13 @@ pub fn cache_signature(options: Option<&EnhanceOptionsDto>) -> AppResult<String>
     {
         comic_engines::EngineKind::RealEsrganCoreMl => "realesrgan-coreml",
         comic_engines::EngineKind::Waifu2xCoreMl => "waifu2x-coreml",
+        comic_engines::EngineKind::AnimeVideoCoreMl => "animevideo-coreml",
         _ => "realcugan-coreml",
     };
     let model = match engine {
         "realesrgan-coreml" => "anime-6b-4x-v2",
         "realcugan-coreml" => "se-2x-v2",
+        "animevideo-coreml" => "v3-4x-fp16",
         _ => "anime-2x-v4",
     };
     // 实际解析到的模型文件：请求 n3 而本机只有 n2 时回退推理，键必须反映
@@ -95,6 +97,7 @@ pub fn cache_signature(options: Option<&EnhanceOptionsDto>) -> AppResult<String>
     let resolved_model = match engine {
         "realesrgan-coreml" => comic_engines::resolve_realesrgan_coreml_model(),
         "realcugan-coreml" => comic_engines::resolve_realcugan_coreml_model_for_noise(opts.noise),
+        "animevideo-coreml" => comic_engines::resolve_animevideo_coreml_model(),
         _ => comic_engines::resolve_waifu2x_coreml_model_for_noise(opts.noise),
     };
     let model_tag = resolved_model
@@ -123,7 +126,9 @@ pub const ESRGAN_INPUT_SIDE: u32 = 1024;
 
 pub fn reader_input_cap(engine: &str) -> u32 {
     match engine {
-        "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => ESRGAN_INPUT_SIDE,
+        "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" | "animevideo-coreml" => {
+            ESRGAN_INPUT_SIDE
+        }
         _ => MAX_INPUT_SIDE,
     }
 }
@@ -298,7 +303,9 @@ fn reader_engine_params(opts: &crate::job::EnhanceOptions) -> comic_engines::Enh
     params.output_format = Some("jpg".into());
     params.tile_size = Some(READER_TILE);
     params.jobs = Some("2:2:2".into());
-    if params.engine == comic_engines::EngineKind::RealEsrganCoreMl {
+    if params.engine == comic_engines::EngineKind::RealEsrganCoreMl
+        || params.engine == comic_engines::EngineKind::AnimeVideoCoreMl
+    {
         params.scale = comic_engines::ScaleFactor::X4;
     }
     params
@@ -438,7 +445,9 @@ async fn enhance_one_page(
     std::fs::create_dir_all(&scratch)?;
     let id = Uuid::new_v4();
     let id_s = id.to_string();
-    let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl {
+    let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl
+        || params.engine == comic_engines::EngineKind::AnimeVideoCoreMl
+    {
         ESRGAN_INPUT_SIDE
     } else {
         MAX_INPUT_SIDE
@@ -605,7 +614,9 @@ pub async fn enhance_pages(
         std::collections::BTreeMap::new();
     for (i, name, original, dest) in missing {
         let stem = format!("{i:04}");
-        let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl {
+        let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl
+            || params.engine == comic_engines::EngineKind::AnimeVideoCoreMl
+        {
             ESRGAN_INPUT_SIDE
         } else {
             MAX_INPUT_SIDE

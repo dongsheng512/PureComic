@@ -46,6 +46,21 @@ Pin: `third_party/realesrgan-coreml.pin.json`（下载后强制 sha256 校验，
 
 `.mlmodel` / `.mlmodelc` 不入库。
 
+## `fetch-animevideo-coreml.sh`
+
+Download **realesr-animevideov3**（Compact/SRVGGNet）权重并转换为 Core ML fp16 mlprogram，
+写入 `third_party/animevideo-coreml/`。阅读器「极速」引擎（4×，ANE 友好）。
+需要 `uv`（torch/coremltools 以 ephemeral 环境运行，无需手动装）。
+
+```bash
+./scripts/fetch-animevideo-coreml.sh
+```
+
+Pin: `third_party/animevideo-coreml.pin.json`（pth 下载后 sha256 校验；
+转换脚本内置 fp16 vs fp32 数值校验，PSNR <40dB 即失败）。
+
+`.mlpackage` / `.mlmodelc` 不入库。
+
 ## `re-export-fp16-coreml.py`
 
 把两套 Core ML 模型权重量化到 fp16（waifu2x 顺带把 multiArray I/O Double→Float32），

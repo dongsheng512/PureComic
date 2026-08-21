@@ -97,10 +97,15 @@ export function prefHasExplicitView(source: string): boolean {
 const READER_ENGINE_KEY = "comic.reader.engine";
 
 /** 阅读器可用的引擎（仅用于类型收窄） */
-export type ReaderEngineId = "realcugan-coreml" | "waifu2x-coreml" | "realesrgan-coreml";
+export type ReaderEngineId = "realcugan-coreml" | "waifu2x-coreml" | "realesrgan-coreml" | "animevideo-coreml";
 
 export function isReaderEngine(id: string): id is ReaderEngineId {
-  return id === "realcugan-coreml" || id === "waifu2x-coreml" || id === "realesrgan-coreml";
+  return (
+    id === "realcugan-coreml" ||
+    id === "waifu2x-coreml" ||
+    id === "realesrgan-coreml" ||
+    id === "animevideo-coreml"
+  );
 }
 
 export function loadReaderEngine(): ReaderEngineId {

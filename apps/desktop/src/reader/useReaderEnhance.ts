@@ -75,8 +75,9 @@ export function useReaderEnhance(args: Args) {
     () => ({
       engine: engineId,
       preset: "quality",
-      scale: engineId === "realesrgan-coreml" ? 4 : 2,
-      noiseLevel: engineId === "realesrgan-coreml" ? 0 : noiseLevel,
+      scale: engineId === "realesrgan-coreml" || engineId === "animevideo-coreml" ? 4 : 2,
+      noiseLevel:
+        engineId === "realesrgan-coreml" || engineId === "animevideo-coreml" ? 0 : noiseLevel,
       tta: false,
     }),
     [engineId, noiseLevel],
@@ -330,6 +331,14 @@ export function useReaderEnhance(args: Args) {
               scales: [4],
               models: [],
             },
+            {
+              id: "animevideo-coreml",
+              label: "AnimeVideo v3 4×",
+              available: true,
+              detail: "",
+              scales: [4],
+              models: [],
+            },
           ];
     return list
       .filter((e) => isReaderEngine(e.id) && e.available !== false)
@@ -341,7 +350,9 @@ export function useReaderEnhance(args: Args) {
               ? { main: "Waifu2x", sub: "Core ML" }
               : e.id === "realesrgan-coreml"
                 ? { main: "Real-ESRGAN", sub: "4×" }
-                : null;
+                : e.id === "animevideo-coreml"
+                  ? { main: "AnimeVideo v3", sub: "4× 极速" }
+                  : null;
         return {
           id: e.id,
           main: known?.main ?? e.label,

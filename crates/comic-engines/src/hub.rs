@@ -1,10 +1,11 @@
 //! Multi-engine catalog: pick per job without restarting the app.
 
 use crate::{
-    resolve_realcugan_coreml_model, resolve_realcugan_paths, resolve_realesrgan_coreml_model,
-    resolve_waifu2x_coreml_model, resolve_waifu2x_paths, EngineAvailability, EngineKind,
-    EngineStatus, MockEngine, RealCuganCoreMlEngine, RealCuganEngine, RealEsrganCoreMlEngine,
-    UpscaleEngine, Waifu2xCoreMlEngine, Waifu2xEngine,
+    resolve_animevideo_coreml_model, resolve_realcugan_coreml_model, resolve_realcugan_paths,
+    resolve_realesrgan_coreml_model, resolve_waifu2x_coreml_model, resolve_waifu2x_paths,
+    AnimeVideoCoreMlEngine, EngineAvailability, EngineKind, EngineStatus, MockEngine,
+    RealCuganCoreMlEngine, RealCuganEngine, RealEsrganCoreMlEngine, UpscaleEngine,
+    Waifu2xCoreMlEngine, Waifu2xEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -34,6 +35,7 @@ pub struct EngineHub {
     waifu2x_coreml: Option<Arc<Waifu2xCoreMlEngine>>,
     realesrgan_coreml: Option<Arc<RealEsrganCoreMlEngine>>,
     realcugan_coreml: Option<Arc<RealCuganCoreMlEngine>>,
+    animevideo_coreml: Option<Arc<AnimeVideoCoreMlEngine>>,
     realcugan: Option<Arc<RealCuganEngine>>,
     allow_mock: bool,
 }
@@ -52,6 +54,7 @@ impl EngineHub {
                 waifu2x_coreml: None,
                 realesrgan_coreml: None,
                 realcugan_coreml: None,
+                animevideo_coreml: None,
                 realcugan: None,
                 allow_mock: true,
             };
@@ -71,6 +74,8 @@ impl EngineHub {
             resolve_realesrgan_coreml_model().map(|p| Arc::new(RealEsrganCoreMlEngine::new(p)));
         let realcugan_coreml =
             resolve_realcugan_coreml_model().map(|p| Arc::new(RealCuganCoreMlEngine::new(p)));
+        let animevideo_coreml =
+            resolve_animevideo_coreml_model().map(|p| Arc::new(AnimeVideoCoreMlEngine::new(p)));
         let realcugan = resolve_realcugan_paths().and_then(|p| {
             let eng = RealCuganEngine::new(p.binary, p.models_root);
             match eng.is_available() {
@@ -84,6 +89,7 @@ impl EngineHub {
             waifu2x_coreml,
             realesrgan_coreml,
             realcugan_coreml,
+            animevideo_coreml,
             realcugan,
             allow_mock,
         }
@@ -145,6 +151,18 @@ impl EngineHub {
                         .into(),
                 )
             }
+            EngineKind::AnimeVideoCoreMl => {
+                if let Some(e) = &self.animevideo_coreml {
+                    return Ok(e.clone());
+                }
+                if self.allow_mock {
+                    return Ok(self.mock.clone());
+                }
+                Err(
+                    "未找到 AnimeVideo Core ML 模型，请运行 scripts/fetch-animevideo-coreml.sh"
+                        .into(),
+                )
+            }
             EngineKind::RealCugan => {
                 if let Some(e) = &self.realcugan {
                     return Ok(e.clone());
@@ -168,6 +186,7 @@ impl EngineHub {
                     EngineKind::Waifu2xCoreMl => "waifu2x-coreml".into(),
                     EngineKind::RealEsrganCoreMl => "realesrgan-coreml".into(),
                     EngineKind::RealCuganCoreMl => "realcugan-coreml".into(),
+                    EngineKind::AnimeVideoCoreMl => "animevideo-coreml".into(),
                     EngineKind::RealCugan => "realcugan".into(),
                     #[cfg(feature = "anime4k")]
                     EngineKind::Anime4K2x => "anime4k".into(),
@@ -241,6 +260,18 @@ impl EngineHub {
                 label: "Anime 6B · 4×".into(),
             }],
         });
+        let avd_ok = self.animevideo_coreml.is_some();
+        out.push(EngineInfo {
+            id: "animevideo-coreml".into(),
+            label: "AnimeVideo v3（极速 / ANE）".into(),
+            available: avd_ok,
+            detail: self.status_for(EngineKind::AnimeVideoCoreMl).detail,
+            scales: vec![4],
+            models: vec![EngineModelInfo {
+                id: "v3-4x".into(),
+                label: "Compact · 4×".into(),
+            }],
+        });
         out
     }
 
@@ -249,6 +280,7 @@ impl EngineHub {
             || self.waifu2x_coreml.is_some()
             || self.realesrgan_coreml.is_some()
             || self.realcugan_coreml.is_some()
+            || self.animevideo_coreml.is_some()
             || self.realcugan.is_some()
     }
 }

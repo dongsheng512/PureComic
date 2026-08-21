@@ -181,6 +181,7 @@ pub fn parse_engine_kind(id: &str) -> AppResult<EngineKind> {
         "waifu2x" | "waifu2x-coreml" | "coreml" => Ok(EngineKind::Waifu2xCoreMl),
         "waifu2x-vulkan" | "waifu2x-ncnn" => Ok(EngineKind::Waifu2x),
         "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => Ok(EngineKind::RealEsrganCoreMl),
+        "animevideo-coreml" | "animevideo" | "avd" => Ok(EngineKind::AnimeVideoCoreMl),
         "realcugan-vulkan" | "realcugan-ncnn" => Ok(EngineKind::RealCugan),
         "realcugan" | "cugan" | "realcugan-coreml" | "cugan-coreml" | "auto" | "" => {
             Ok(EngineKind::RealCuganCoreMl)
@@ -253,7 +254,7 @@ impl EnhanceOptions {
                 }
                 changed
             }
-            EngineKind::RealEsrganCoreMl => {
+            EngineKind::RealEsrganCoreMl | EngineKind::AnimeVideoCoreMl => {
                 let mut changed = false;
                 if self.scale != ScaleFactor::X4 {
                     self.scale = ScaleFactor::X4;

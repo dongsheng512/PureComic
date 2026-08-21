@@ -1,0 +1,19 @@
+{
+  "comment": "Official xinntao Real-ESRGAN realesr-animevideov3 (Compact/SRVGGNet 64f-16conv) converted to Core ML mlprogram fp16. Fixed input 532×532 (= inner tile 512 + baked reflect-pad ring 10), output 2048×2048 (4×). Tensor I/O in [0,1] domain; host feeds [0,255] floats (positive-homogeneity, same trick as realcugan). Convert with scripts/convert-animevideo-coreml.py (uv run --with torch --with coremltools --with pillow --with numpy).",
+  "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0",
+  "weights": {
+    "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth",
+    "sha256": "b8a8376811077954d82ca3fcf476f1ac3da3e8a68a4f4d71363008000a18b75d",
+    "bytes": 2504012
+  },
+  "models": [
+    {
+      "name": "realesr_animevideov3_x4.mlpackage",
+      "scale": 4,
+      "input_side": 532,
+      "inner_tile": 512,
+      "pad": 10,
+      "precision": "fp16"
+    }
+  ]
+}

@@ -848,6 +848,9 @@ impl Scheduler {
                     EngineKind::RealCuganCoreMl => {
                         "未找到 Real-CUGAN Core ML 模型，请运行 scripts/fetch-realcugan-coreml.sh"
                     }
+                    EngineKind::AnimeVideoCoreMl => {
+                        "未找到 AnimeVideo Core ML 模型，请运行 scripts/fetch-animevideo-coreml.sh"
+                    }
                     _ => "未找到 Waifu2x 引擎，请重新安装应用或运行 scripts/fetch-waifu2x.sh",
                 },
             )),

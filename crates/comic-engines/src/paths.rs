@@ -338,6 +338,40 @@ pub fn resolve_realcugan_coreml_model() -> Option<PathBuf> {
     resolve_realcugan_coreml_model_for_noise(0)
 }
 
+fn animevideo_coreml_roots() -> Vec<PathBuf> {
+    let dirs = {
+        let mut dirs = third_party_candidates();
+        #[cfg(debug_assertions)]
+        dirs.insert(0, PathBuf::from("third_party"));
+        dirs
+    };
+    let mut roots = Vec::new();
+    for tp in dirs {
+        roots.push(tp.join("animevideo-coreml"));
+        roots.push(tp.join("resources/animevideo-coreml"));
+    }
+    roots
+}
+
+/// realesr-animevideov3 4×（fp16 mlprogram）。编译缓存目录名带 .i532 后缀，
+/// 一并接受以便转换后未清理时仍可解析。
+pub fn resolve_animevideo_coreml_model() -> Option<PathBuf> {
+    const NAMES: [&str; 3] = [
+        "realesr_animevideov3_x4.mlpackage",
+        "realesr_animevideov3_x4.mlpackage.i532.mlmodelc",
+        "realesr_animevideov3_x4.mlmodelc",
+    ];
+    for root in animevideo_coreml_roots() {
+        for name in NAMES {
+            let p = root.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 fn first_existing_dir(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find(|p| p.is_dir()).cloned()
 }

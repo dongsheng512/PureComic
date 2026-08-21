@@ -1,5 +1,6 @@
 //! Upscale engines: trait, mock, Core ML (Waifu2x / Real-CUGAN / Real-ESRGAN), optional Vulkan sidecars.
 
+mod animevideo_coreml;
 mod hub;
 mod mock;
 pub mod paths;
@@ -9,11 +10,13 @@ mod realesrgan_coreml;
 mod waifu2x;
 mod waifu2x_coreml;
 
+pub use animevideo_coreml::AnimeVideoCoreMlEngine;
 pub use hub::{EngineHub, EngineInfo};
 pub use mock::MockEngine;
 pub use paths::{
-    host_target_triple, resolve_realcugan_coreml_model, resolve_realcugan_coreml_model_for_noise,
-    resolve_realcugan_paths, resolve_realesrgan_coreml_model, resolve_waifu2x_coreml_model,
+    host_target_triple, resolve_animevideo_coreml_model, resolve_realcugan_coreml_model,
+    resolve_realcugan_coreml_model_for_noise, resolve_realcugan_paths,
+    resolve_realesrgan_coreml_model, resolve_waifu2x_coreml_model,
     resolve_waifu2x_coreml_model_for_noise, resolve_waifu2x_paths, RealCuganPaths, Waifu2xPaths,
 };
 pub use realcugan::{CuganModelPack, RealCuganEngine};
@@ -54,6 +57,7 @@ pub enum EngineKind {
     Waifu2xCoreMl,
     RealEsrganCoreMl,
     RealCuganCoreMl,
+    AnimeVideoCoreMl,
     RealCugan,
     #[cfg(feature = "anime4k")]
     Anime4K2x,
