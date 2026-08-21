@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify third_party checksums for waifu2x binary + models.
+# Verify third_party/ncnn-vulkan checksums for waifu2x binary + models.
 #
 # Usage:
 #   ./scripts/verify-waifu2x.sh
@@ -9,7 +9,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${COMIC_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-THIRD="$ROOT/third_party"
+THIRD="$ROOT/third_party/ncnn-vulkan"
+if [[ ! -f "$THIRD/checksums.sha256" && -f "$ROOT/third_party/checksums.sha256" ]]; then
+  THIRD="$ROOT/third_party"
+fi
 CHECKSUMS="$THIRD/checksums.sha256"
 TARGET=""
 

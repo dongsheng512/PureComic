@@ -516,16 +516,12 @@ impl Scheduler {
         page_index: u32,
         options: Option<crate::preview::EnhanceOptionsDto>,
     ) -> AppResult<crate::preview::PreviewResult> {
-        let kind = match options
-            .as_ref()
-            .and_then(|o| o.engine.as_deref())
-            .unwrap_or("realcugan")
-        {
-            "waifu2x" | "auto" => EngineKind::Waifu2x,
-            "waifu2x-coreml" | "coreml" => EngineKind::Waifu2xCoreMl,
-            "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => EngineKind::RealEsrganCoreMl,
-            _ => EngineKind::RealCugan,
-        };
+        let kind = crate::job::parse_engine_kind(
+            options
+                .as_ref()
+                .and_then(|o| o.engine.as_deref())
+                .unwrap_or("realcugan-coreml"),
+        )?;
         let engine = self.pick_engine(kind)?;
         crate::preview::preview_page(
             PathBuf::from(source).as_path(),
@@ -588,15 +584,12 @@ impl Scheduler {
         options: Option<crate::preview::EnhanceOptionsDto>,
     ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
         let src = self.resolve_reader_source(job_id, source).await?;
-        // 阅读器只跑 Core ML：Vulkan waifu2x / Real-CUGAN 留给整本增强。
-        let kind = match options
-            .as_ref()
-            .and_then(|o| o.engine.as_deref())
-            .unwrap_or("waifu2x-coreml")
-        {
-            "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => EngineKind::RealEsrganCoreMl,
-            _ => EngineKind::Waifu2xCoreMl,
-        };
+        let kind = crate::job::parse_engine_kind(
+            options
+                .as_ref()
+                .and_then(|o| o.engine.as_deref())
+                .unwrap_or("realcugan-coreml"),
+        )?;
         self.ensure_engine_ready(kind)?;
         let engine = self.pick_engine(kind)?;
         let cancel = CancellationToken::new();
@@ -851,6 +844,9 @@ impl Scheduler {
                     }
                     EngineKind::RealEsrganCoreMl => {
                         "未找到 Real-ESRGAN Core ML 模型，请运行 scripts/fetch-realesrgan-coreml.sh"
+                    }
+                    EngineKind::RealCuganCoreMl => {
+                        "未找到 Real-CUGAN Core ML 模型，请运行 scripts/fetch-realcugan-coreml.sh"
                     }
                     _ => "未找到 Waifu2x 引擎，请重新安装应用或运行 scripts/fetch-waifu2x.sh",
                 },

@@ -1,0 +1,32 @@
+{
+  "comment": "Official Real-CUGAN SE 2× PyTorch weights converted to Core ML mlprogram (fp16, tile 384+18). Source zip from bilibili/ailab Real-CUGAN updated_weights. Convert with scripts/convert-realcugan-coreml.py.",
+  "source": "https://github.com/bilibili/ailab/tree/main/Real-CUGAN",
+  "weights_zip": {
+    "url": "https://github.com/bilibili/ailab/releases/download/Real-CUGAN/updated_weights.zip",
+    "sha256": "99a8ce2e4a6ce0548668879f148b3db3e143201d3df42c825a4143490396da53",
+    "bytes": 54001450
+  },
+  "upcunet_py": "https://raw.githubusercontent.com/bilibili/ailab/main/Real-CUGAN/upcunet_v3.py",
+  "models": [
+    {
+      "pth": "up2x-latest-conservative.pth",
+      "mlpackage": "up2x_conservative.mlpackage",
+      "noise": 0
+    },
+    {
+      "pth": "up2x-latest-denoise1x.pth",
+      "mlpackage": "up2x_denoise1x.mlpackage",
+      "noise": 1
+    },
+    {
+      "pth": "up2x-latest-denoise2x.pth",
+      "mlpackage": "up2x_denoise2x.mlpackage",
+      "noise": 2
+    },
+    {
+      "pth": "up2x-latest-denoise3x.pth",
+      "mlpackage": "up2x_denoise3x.mlpackage",
+      "noise": 3
+    }
+  ]
+}

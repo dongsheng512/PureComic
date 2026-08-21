@@ -85,6 +85,22 @@ pub async fn collect_doctor(
     })
 }
 
+/// 路径脱敏：`$HOME` → `~`，`work_root` → `$WORK`。诊断包会离开本机，
+/// 绝对路径（家目录、外接卷、用户名）不应随包泄露。
+fn redact(text: &str, cfg: &AppConfig) -> String {
+    let mut s = text.to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            s = s.replace(&home, "~");
+        }
+    }
+    let work = cfg.work_root.display().to_string();
+    if !work.is_empty() {
+        s = s.replace(&work, "$WORK");
+    }
+    s
+}
+
 /// Write a small diagnostics zip under `out_dir` (or work_root/diagnostics).
 pub async fn export_diagnostics_zip(
     cfg: &AppConfig,
@@ -112,9 +128,10 @@ pub async fn export_diagnostics_zip(
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let json = serde_json::to_vec_pretty(&report)?;
+    let json_redacted = redact(&String::from_utf8_lossy(&json), cfg);
     zip.start_file("doctor.json", opts)
         .map_err(|e| crate::error::AppError::internal(format!("zip: {e}")))?;
-    zip.write_all(&json)?;
+    zip.write_all(json_redacted.as_bytes())?;
 
     // include recent job logs (redacted paths partially — keep basenames)
     if let Ok(rd) = std::fs::read_dir(cfg.jobs_dir()) {
@@ -125,23 +142,19 @@ pub async fn export_diagnostics_zip(
             }
             let log = e.path().join("job.log");
             if log.is_file() {
-                if let Ok(data) = std::fs::read(&log) {
+                if let Ok(data) = std::fs::read_to_string(&log) {
                     let name = format!("jobs/{}/job.log", e.file_name().to_string_lossy());
                     let _ = zip.start_file(name, opts);
-                    let _ = zip.write_all(&data);
+                    let _ = zip.write_all(redact(&data, cfg).as_bytes());
                     count += 1;
                 }
             }
             let man = e.path().join("manifest.json");
             if man.is_file() {
-                if let Ok(mut data) = std::fs::read_to_string(&man) {
-                    // light redaction: replace home prefix
-                    if let Ok(home) = std::env::var("HOME") {
-                        data = data.replace(&home, "~");
-                    }
+                if let Ok(data) = std::fs::read_to_string(&man) {
                     let name = format!("jobs/{}/manifest.json", e.file_name().to_string_lossy());
                     let _ = zip.start_file(name, opts);
-                    let _ = zip.write_all(data.as_bytes());
+                    let _ = zip.write_all(redact(&data, cfg).as_bytes());
                 }
             }
         }
@@ -150,4 +163,27 @@ pub async fn export_diagnostics_zip(
     zip.finish()
         .map_err(|e| crate::error::AppError::internal(format!("zip finish: {e}")))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_replaces_home_and_work_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: dir.path().join("work"),
+            ..Default::default()
+        };
+        let text = format!(
+            "source={} log={}/jobs/x/manifest.json",
+            cfg.work_root.display(),
+            cfg.work_root.display()
+        );
+        assert_eq!(
+            redact(&text, &cfg),
+            "source=$WORK log=$WORK/jobs/x/manifest.json"
+        );
+    }
 }

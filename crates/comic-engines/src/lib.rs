@@ -1,9 +1,10 @@
-//! Upscale engines: trait, mock, waifu2x-ncnn-vulkan sidecar.
+//! Upscale engines: trait, mock, Core ML (Waifu2x / Real-CUGAN / Real-ESRGAN), optional Vulkan sidecars.
 
 mod hub;
 mod mock;
 pub mod paths;
 mod realcugan;
+mod realcugan_coreml;
 mod realesrgan_coreml;
 mod waifu2x;
 mod waifu2x_coreml;
@@ -11,11 +12,12 @@ mod waifu2x_coreml;
 pub use hub::{EngineHub, EngineInfo};
 pub use mock::MockEngine;
 pub use paths::{
-    host_target_triple, resolve_realcugan_paths, resolve_realesrgan_coreml_model,
-    resolve_waifu2x_coreml_model, resolve_waifu2x_coreml_model_for_noise, resolve_waifu2x_paths,
-    RealCuganPaths, Waifu2xPaths,
+    host_target_triple, resolve_realcugan_coreml_model, resolve_realcugan_coreml_model_for_noise,
+    resolve_realcugan_paths, resolve_realesrgan_coreml_model, resolve_waifu2x_coreml_model,
+    resolve_waifu2x_coreml_model_for_noise, resolve_waifu2x_paths, RealCuganPaths, Waifu2xPaths,
 };
 pub use realcugan::{CuganModelPack, RealCuganEngine};
+pub use realcugan_coreml::RealCuganCoreMlEngine;
 pub use realesrgan_coreml::RealEsrganCoreMlEngine;
 pub use waifu2x::Waifu2xEngine;
 pub use waifu2x_coreml::Waifu2xCoreMlEngine;
@@ -27,15 +29,55 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+/// Hard decode guardrails（与 comic-core 同值）：压缩炸弹可能通过字节级检查，
+/// 但解码瞬间会展开成数 GB 像素缓冲——Rust 分配失败是 abort，不可恢复。
+pub const HARD_MAX_IMAGE_SIDE: u32 = 16_384;
+pub const HARD_MAX_IMAGE_PIXELS: u64 = 268_435_456; // 16384²
+
+/// Decode 前的尺寸守卫：超限返回 Image 错误而不是尝试分配。
+pub fn check_hard_dimensions(w: u32, h: u32) -> Result<(), EngineError> {
+    if w > HARD_MAX_IMAGE_SIDE
+        || h > HARD_MAX_IMAGE_SIDE
+        || (w as u64).saturating_mul(h as u64) > HARD_MAX_IMAGE_PIXELS
+    {
+        return Err(EngineError::Image(format!(
+            "图像尺寸超过安全上限 ({w}x{h})"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineKind {
     Waifu2x,
     Waifu2xCoreMl,
     RealEsrganCoreMl,
+    RealCuganCoreMl,
     RealCugan,
     #[cfg(feature = "anime4k")]
     Anime4K2x,
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::*;
+
+    #[test]
+    fn limit_boundary_is_allowed() {
+        assert!(check_hard_dimensions(16_384, 16_384).is_ok());
+        assert!(check_hard_dimensions(1, 1).is_ok());
+        // 边长受限时像素总量恒不超限（冗余防线的边界自洽）
+        assert_eq!((16_384u64).saturating_mul(16_384), HARD_MAX_IMAGE_PIXELS);
+    }
+
+    #[test]
+    fn oversized_side_is_rejected() {
+        let err = check_hard_dimensions(16_385, 100).unwrap_err();
+        assert!(matches!(err, EngineError::Image(_)));
+        let err = check_hard_dimensions(100, 30_000).unwrap_err();
+        assert!(matches!(err, EngineError::Image(_)));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,7 +137,7 @@ pub struct EnhanceParams {
 impl Default for EnhanceParams {
     fn default() -> Self {
         Self {
-            engine: EngineKind::Waifu2x,
+            engine: EngineKind::RealCuganCoreMl,
             scale: ScaleFactor::X2,
             noise_level: 1,
             preset: QualityPreset::Balanced,

@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use url::Url;
 
+use comic_core::security::is_symlink_path;
+
 const COMIC_EXTS: &[&str] = &["cbz", "cbr", "zip", "rar", "epub", "mobi", "azw", "azw3"];
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif"];
 
@@ -41,7 +43,8 @@ fn dir_contains_comic_content(path: &Path) -> bool {
             }
             *visits += 1;
             let p = e.path();
-            if p.is_file() && (has_comic_ext(&p) || is_image_file(&p)) {
+            // symlink 不当漫画内容，防止借「打开文件夹」探测根外文件
+            if p.is_file() && !is_symlink_path(&p) && (has_comic_ext(&p) || is_image_file(&p)) {
                 return true;
             }
             if p.is_dir() && walk(&p, depth + 1, visits) {

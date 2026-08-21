@@ -1,36 +1,21 @@
 PureComic third-party notices
 =============================
 
-This product bundles or optionally downloads components with their own licenses.
+This product bundles Core ML models. Optional ncnn-Vulkan sidecars (not in the
+app bundle) live under third_party/ncnn-vulkan/ — see that directory's NOTICE.
 
-Real-CUGAN (ncnn/Vulkan port)
------------------------------
-Project: realcugan-ncnn-vulkan
-Upstream: https://github.com/nihui/realcugan-ncnn-vulkan
-License: MIT (see upstream)
-
-Waifu2x (ncnn/Vulkan port)
---------------------------
-Project: waifu2x-ncnn-vulkan
-Upstream: https://github.com/nihui/waifu2x-ncnn-vulkan
-License: MIT (see upstream repository)
-
-ncnn
-----
-Upstream: https://github.com/Tencent/ncnn
-License: BSD 3-Clause (see upstream)
-
-Models (cunet etc.)
--------------------
-Model weights shipped or downloaded for Waifu2x follow their respective upstream
-model licenses. Verify before redistribution.
-
-Waifu2x Core ML (reader)
-------------------------
+Waifu2x Core ML
+---------------
 Converted models from waifu2x-ios / waifu2x-caffe.
 Upstream: https://github.com/imxieyi/waifu2x-ios
 Original: https://github.com/nagadomi/waifu2x
 Download: scripts/fetch-waifu2x-coreml.sh
+
+Real-CUGAN Core ML
+------------------
+Official Real-CUGAN SE 2× PyTorch weights converted to Core ML mlprogram.
+Upstream: https://github.com/bilibili/ailab/tree/main/Real-CUGAN
+Download: scripts/fetch-realcugan-coreml.sh
 
 Real-ESRGAN Anime 4× Core ML (reader)
 -------------------------------------

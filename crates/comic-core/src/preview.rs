@@ -117,12 +117,8 @@ pub(crate) fn options_from_dto(dto: Option<EnhanceOptionsDto>) -> AppResult<Enha
         o.gpu_id = Some(g);
     }
     o.engine = match dto.engine.as_deref() {
-        Some("waifu2x") | Some("auto") => comic_engines::EngineKind::Waifu2x,
-        Some("waifu2x-coreml") | Some("coreml") => comic_engines::EngineKind::Waifu2xCoreMl,
-        Some("realesrgan-coreml") | Some("esrgan-coreml") | Some("esrgan-anime") => {
-            comic_engines::EngineKind::RealEsrganCoreMl
-        }
-        _ => comic_engines::EngineKind::RealCugan,
+        Some(id) => crate::job::parse_engine_kind(id)?,
+        None => comic_engines::EngineKind::RealCuganCoreMl,
     };
     if let Some(cm) = dto.cugan_model {
         o.cugan_model = cm;

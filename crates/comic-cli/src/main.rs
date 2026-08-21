@@ -11,7 +11,7 @@ use std::time::Duration;
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,
-    /// 强制 mock 引擎（最近邻）。默认使用真实 Waifu2x（需 third_party 已 fetch）
+    /// 强制 mock 引擎（最近邻放大，等价 --engine mock）
     #[arg(long, global = true, default_value_t = false)]
     mock: bool,
     /// 工作目录
@@ -36,6 +36,10 @@ enum Commands {
         format: String,
         #[arg(long, default_value_t = 92)]
         jpeg_quality: u8,
+        /// 增强引擎：auto | realcugan-coreml | waifu2x-coreml | realesrgan-coreml
+        /// | realcugan-vulkan | waifu2x-vulkan | mock（auto 按可用性回退，优先 Core ML）
+        #[arg(long, default_value = "auto")]
+        engine: String,
     },
     /// 校验源文件
     Validate { input: PathBuf },
@@ -81,8 +85,12 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let mut cfg = AppConfig::from_env();
-    // --mock forces mock; otherwise keep from_env (default real Waifu2x)
-    if cli.mock {
+    // --mock 或 run --engine mock 强制 mock；否则保持 from_env（按可用性回退）
+    let run_engine = match &cli.cmd {
+        Commands::Run { engine, .. } => Some(engine.trim().to_ascii_lowercase()),
+        _ => None,
+    };
+    if cli.mock || run_engine.as_deref() == Some("mock") {
         cfg.use_mock_engine = true;
     }
     if let Some(w) = cli.work_root {
@@ -173,15 +181,21 @@ async fn main() -> anyhow::Result<()> {
             container,
             format,
             jpeg_quality,
+            engine,
         } => {
             std::fs::create_dir_all(&output)?;
             if let Some(hint) = sched.probe_resume(&input.display().to_string()).await? {
                 eprintln!("{}", hint.message);
             }
+            // mock/auto 交由 hub 默认与回退链处理（auto 优先 realcugan-coreml）
+            let engine_opt = match engine.as_str() {
+                "mock" | "auto" => None,
+                other => Some(other.to_string()),
+            };
             let created = sched
                 .create_job(CreateJobRequest {
                     source: input.display().to_string(),
-                    engine: Some("waifu2x".into()),
+                    engine: engine_opt,
                     preset,
                     output: OutputOptionsDto {
                         dir: output.display().to_string(),

@@ -7,9 +7,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src/waifu2x_coreml.h");
     println!("cargo:rerun-if-changed=src/realesrgan_coreml.m");
     println!("cargo:rerun-if-changed=src/realesrgan_coreml.h");
+    println!("cargo:rerun-if-changed=src/realcugan_coreml.m");
+    println!("cargo:rerun-if-changed=src/realcugan_coreml.h");
     cc::Build::new()
         .file("src/waifu2x_coreml.m")
         .file("src/realesrgan_coreml.m")
+        .file("src/realcugan_coreml.m")
         .flag("-fobjc-arc")
         .opt_level(3)
         .compile("comic_coreml");

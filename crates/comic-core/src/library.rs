@@ -58,8 +58,17 @@ pub struct LibraryScanCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct LibraryScanPreview {
     pub root: String,
+    /// true = 命中访问/候选上限被截断，结果可能不完整
+    pub truncated: bool,
     pub candidates: Vec<LibraryScanCandidate>,
 }
+
+/// 扫描访问条目上限：宽扇出目录（如 /usr/share）不应拖垮 blocking 线程
+const SCAN_MAX_VISITS: usize = 5000;
+/// 候选上限
+const SCAN_MAX_CANDIDATES: usize = 2000;
+/// 单批导入上限
+const IMPORT_MAX_BATCH: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,7 +311,16 @@ impl LibraryStore {
         if !root.is_dir() {
             return Err(AppError::invalid("扫描路径不是文件夹"));
         }
-        let found = discover_comics(root);
+        if is_system_root(root) {
+            return Err(AppError::invalid("拒绝扫描系统根目录"));
+        }
+        let (found, truncated) = discover_comics(root);
+        let mut truncated = truncated;
+        let mut found = found;
+        if found.len() > SCAN_MAX_CANDIDATES {
+            found.truncate(SCAN_MAX_CANDIDATES);
+            truncated = true;
+        }
         let candidates = found
             .into_iter()
             .map(|p| {
@@ -322,6 +340,7 @@ impl LibraryStore {
             .collect();
         Ok(LibraryScanPreview {
             root: canonicalize_or_abs(root).display().to_string(),
+            truncated,
             candidates,
         })
     }
@@ -331,6 +350,12 @@ impl LibraryStore {
         paths: &[PathBuf],
         cfg: &AppConfig,
     ) -> AppResult<LibraryScanResult> {
+        if paths.len() > IMPORT_MAX_BATCH {
+            return Err(AppError::invalid(format!(
+                "单批导入上限 {IMPORT_MAX_BATCH}（当前 {}）",
+                paths.len()
+            )));
+        }
         let mut added = 0u32;
         let mut updated = 0u32;
         let mut existed = 0u32;
@@ -459,20 +484,36 @@ fn dir_has_images(dir: &Path) -> bool {
     };
     rd.flatten().any(|e| {
         let p = e.path();
-        p.is_file() && is_image_path(&p) && !is_hidden(&p)
+        p.is_file() && !crate::security::is_symlink_path(&p) && is_image_path(&p) && !is_hidden(&p)
     })
 }
 
+/// 明显的系统根：扫描它们只有代价没有收益（用户库不会建在这里）
+fn is_system_root(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    matches!(s.as_ref(), "/" | "/System" | "/private" | "/dev")
+        || s.eq_ignore_ascii_case("C:\\Windows")
+        || s.eq_ignore_ascii_case("C:\\")
+}
+
 /// Find comics under `root`: archives in root and one subdirectory, plus image folders.
-pub fn discover_comics(root: &Path) -> Vec<PathBuf> {
+/// Returns `(candidates, truncated)`；访问条目超 `SCAN_MAX_VISITS` 即截断。
+pub fn discover_comics(root: &Path) -> (Vec<PathBuf>, bool) {
     let mut archives = Vec::new();
     let mut image_dirs = Vec::new();
     let mut root_has_images = false;
+    let mut visits = 0usize;
+    let mut truncated = false;
 
     let Ok(rd) = std::fs::read_dir(root) else {
-        return vec![];
+        return (vec![], false);
     };
     for ent in rd.flatten() {
+        visits += 1;
+        if visits >= SCAN_MAX_VISITS {
+            truncated = true;
+            break;
+        }
         let p = ent.path();
         if is_hidden(&p) {
             continue;
@@ -492,6 +533,11 @@ pub fn discover_comics(root: &Path) -> Vec<PathBuf> {
             }
             if let Ok(sub) = std::fs::read_dir(&p) {
                 for s in sub.flatten() {
+                    visits += 1;
+                    if visits >= SCAN_MAX_VISITS {
+                        truncated = true;
+                        break;
+                    }
                     let sp = s.path();
                     if sp.is_file() && is_comic_archive(&sp) && !is_hidden(&sp) {
                         if looks_like_enhance_output(
@@ -514,7 +560,7 @@ pub fn discover_comics(root: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out.dedup();
-    out
+    (out, truncated)
 }
 
 fn cover_dest(cover_dir: &Path, entry: &LibraryEntry) -> PathBuf {
@@ -796,7 +842,8 @@ mod tests {
         write_cbz(&root.join("one.cbz"), "001.jpg", b"aa");
         write_cbz(&root.join("one_x2.cbz"), "001.jpg", b"bb");
         write_cbz(&root.join("vol2").join("two.cbz"), "001.jpg", b"cc");
-        let found = discover_comics(&root);
+        let (found, truncated) = discover_comics(&root);
+        assert!(!truncated);
         let names: Vec<_> = found
             .iter()
             .filter_map(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
@@ -821,6 +868,15 @@ mod tests {
         assert_eq!(r2.added, 1);
         assert_eq!(r2.existed, 1);
         assert_eq!(store.list().len(), 2);
+    }
+
+    #[test]
+    fn preview_scan_rejects_system_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let store = LibraryStore::open(&cfg).unwrap();
+        assert!(store.preview_scan(Path::new("/")).is_err());
+        assert!(store.preview_scan(Path::new("/System")).is_err());
     }
 
     #[test]

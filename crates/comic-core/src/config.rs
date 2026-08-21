@@ -110,21 +110,29 @@ impl AppConfig {
     /// Apply env overrides:
     /// - `COMIC_USE_MOCK=1|true` → force mock
     /// - `COMIC_USE_MOCK=0|false` → force prefer real (default)
-    /// - `COMIC_WAIFU2X_BIN` / `COMIC_MODELS_DIR` absolute paths
+    /// - `COMIC_WAIFU2X_BIN` / `COMIC_MODELS_DIR` absolute paths（仅 debug）
     /// - `COMIC_THIRD_PARTY` used by comic-engines path resolver
     pub fn apply_env(&mut self) {
+        self.apply_env_with(cfg!(not(debug_assertions)));
+    }
+
+    /// `release=true` 时忽略引擎二进制/模型类 env：模型与二进制等同可执行代码，
+    /// 发行包不应从启动环境加载未校验的替代品（调试构建保留以便开发）。
+    fn apply_env_with(&mut self, release: bool) {
         if let Ok(v) = std::env::var("COMIC_USE_MOCK") {
             let v = v.to_ascii_lowercase();
             self.use_mock_engine = matches!(v.as_str(), "1" | "true" | "yes" | "on");
         }
-        if let Ok(p) = std::env::var("COMIC_WAIFU2X_BIN") {
-            self.waifu2x_bin = Some(PathBuf::from(p));
-        }
-        if let Ok(p) = std::env::var("COMIC_MODELS_DIR") {
-            self.models_dir = Some(PathBuf::from(p));
-        }
-        if let Ok(p) = std::env::var("COMIC_UNRAR_BIN") {
-            self.unrar_bin = Some(PathBuf::from(p));
+        if !release {
+            if let Ok(p) = std::env::var("COMIC_WAIFU2X_BIN") {
+                self.waifu2x_bin = Some(PathBuf::from(p));
+            }
+            if let Ok(p) = std::env::var("COMIC_MODELS_DIR") {
+                self.models_dir = Some(PathBuf::from(p));
+            }
+            if let Ok(p) = std::env::var("COMIC_UNRAR_BIN") {
+                self.unrar_bin = Some(PathBuf::from(p));
+            }
         }
         if let Ok(m) = std::env::var("COMIC_ENHANCE_MODE") {
             self.enhance_mode = m.to_ascii_lowercase();
@@ -168,5 +176,25 @@ impl AppConfig {
         let mut cfg = Self::default();
         cfg.apply_env();
         cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_ignores_engine_env_overrides() {
+        // 直接测内部函数，不依赖测试 profile 的 debug_assertions
+        std::env::set_var("COMIC_WAIFU2X_BIN", "/tmp/pwn-waifu2x");
+        let mut cfg = AppConfig::default();
+        cfg.apply_env_with(true);
+        assert!(cfg.waifu2x_bin.is_none(), "release 不得读引擎 env");
+        cfg.apply_env_with(false);
+        assert_eq!(
+            cfg.waifu2x_bin.as_deref(),
+            Some(PathBuf::from("/tmp/pwn-waifu2x")).as_deref()
+        );
+        std::env::remove_var("COMIC_WAIFU2X_BIN");
     }
 }

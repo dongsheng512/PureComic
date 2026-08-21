@@ -76,6 +76,14 @@ impl RealEsrganCoreMlEngine {
 }
 
 fn open_rgb(input: &Path) -> Result<RgbImage, EngineError> {
+    // 先只读头部校验尺寸：超限直接拒绝，避免解码瞬间展开 GB 级像素缓冲
+    let (w, h) = image::ImageReader::open(input)
+        .map_err(|e| EngineError::Image(e.to_string()))?
+        .with_guessed_format()
+        .map_err(|e| EngineError::Image(e.to_string()))?
+        .into_dimensions()
+        .map_err(|e| EngineError::Image(e.to_string()))?;
+    crate::check_hard_dimensions(w, h)?;
     let dynimg = image::ImageReader::open(input)
         .map_err(|e| EngineError::Image(e.to_string()))?
         .with_guessed_format()
@@ -309,6 +317,7 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
                 tokio::fs::create_dir_all(&output_dir).await?;
                 let mut ok = 0u32;
                 let mut failed = 0u32;
+                let mut last_err: Option<EngineError> = None;
                 let mut entries: Vec<PathBuf> = std::fs::read_dir(&input_dir)
                     .map_err(|e| EngineError::Io(e.to_string()))?
                     .filter_map(|e| e.ok().map(|e| e.path()))
@@ -333,14 +342,25 @@ impl UpscaleEngine for RealEsrganCoreMlEngine {
                         Ok(Err(e)) => {
                             warn!(error = %e, file = %path.display(), "esrgan page failed");
                             failed += 1;
+                            if last_err.is_none() {
+                                last_err = Some(e);
+                            }
                         }
                         Err(e) => {
                             warn!(error = %e, "esrgan join failed");
                             failed += 1;
+                            if last_err.is_none() {
+                                last_err = Some(EngineError::Process(e.to_string()));
+                            }
                         }
                     }
                 }
                 info!(ok, failed, png, "realesrgan-coreml directory done");
+                if ok == 0 {
+                    return Err(last_err.unwrap_or_else(|| {
+                        EngineError::Process("realesrgan-coreml 未写出任何页".into())
+                    }));
+                }
                 Ok(EnhanceBatchResult {
                     pages_ok: ok,
                     pages_failed: failed,

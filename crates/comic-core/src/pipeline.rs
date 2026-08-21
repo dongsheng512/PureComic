@@ -160,6 +160,9 @@ pub async fn run_job(
 
         // 进度 tick 只更新内存 stats；落盘节流到 500ms，避免每页全量序列化数 MB JSON
         let mut last_save = std::time::Instant::now();
+        // 事件同样节流到 200ms：每页一 tick 会造成前端 listJobs 洪峰；
+        // 完成路径在 extract join 后另有最终 emit，不会丢尾帧
+        let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(200);
         while let Some(tick) = rx.recv().await {
             if cancel.is_cancelled() {
                 break;
@@ -171,7 +174,10 @@ pub async fn run_job(
                 let _ = m.save();
                 last_save = std::time::Instant::now();
             }
-            emit(&m, "extract", tick.current);
+            if last_emit.elapsed() >= std::time::Duration::from_millis(200) {
+                last_emit = std::time::Instant::now();
+                emit(&m, "extract", tick.current);
+            }
         }
 
         // 取消必须先置位 AtomicBool 再 abort watcher：否则 abort 可能抢在
@@ -264,7 +270,9 @@ pub async fn run_job(
     // CoreML 引擎输出无损中间 PNG，导出阶段统一按 output_format / quality 重编码
     if matches!(
         params.engine,
-        comic_engines::EngineKind::Waifu2xCoreMl | comic_engines::EngineKind::RealEsrganCoreMl
+        comic_engines::EngineKind::Waifu2xCoreMl
+            | comic_engines::EngineKind::RealEsrganCoreMl
+            | comic_engines::EngineKind::RealCuganCoreMl
     ) {
         params.output_format = Some("png".into());
     }
@@ -282,6 +290,13 @@ pub async fn run_job(
         emit(&m, "enhance", None);
     }
 
+    // ESRGAN 引擎内部还会把输入缩到 2560：stage 阶段直接用同一 cap，
+    // 避免「先 Lanczos 到 4096 编码 PNG、引擎解码后再缩 2560」的双重重采样
+    let input_cap = if matches!(params.engine, comic_engines::EngineKind::RealEsrganCoreMl) {
+        2560
+    } else {
+        cfg.engine_input_max_side
+    };
     let enhance_res = if cfg.use_directory_enhance() {
         info!(
             jobs = %cfg.resolved_waifu2x_jobs(),
@@ -292,7 +307,7 @@ pub async fn run_job(
             engine.as_ref(),
             &params,
             gpu.clone(),
-            cfg.engine_input_max_side,
+            input_cap,
             cancel.clone(),
             on_progress.clone(),
         )
@@ -308,7 +323,7 @@ pub async fn run_job(
             &params,
             cfg.enhance_concurrency.max(1),
             gpu.clone(),
-            cfg.engine_input_max_side,
+            input_cap,
             cancel.clone(),
             on_progress.clone(),
         )
@@ -613,6 +628,10 @@ fn stage_group_inputs(
 ) -> AppResult<()> {
     std::fs::create_dir_all(dest_dir)?;
     for (_, src) in group {
+        // hard_link/copy 均跟随 symlink；staging 输入不允许链接
+        if crate::security::is_symlink_path(src) {
+            continue;
+        }
         let Some(name) = src.file_name() else {
             continue;
         };

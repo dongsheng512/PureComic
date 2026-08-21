@@ -1,5 +1,5 @@
 # Pin waifu2x-ncnn-vulkan release assets here (fill after download).
-# Format: <sha256>  <relative-path>
+# Format: <sha256>  <path-relative-to-third_party/ncnn-vulkan/>
 # Example:
 c910e36d958382419dccc938dc35005368e1cb141f01f9cdb8c4ea1eda2398d2  waifu2x-ncnn-vulkan/bin/darwin-arm64/waifu2x-ncnn-vulkan
 b15c356a36bcbf6fb8c2f1404ca016fd917d4e45426bcf41f7a3867022fdd7b0  models-cunet/noise0_model.bin

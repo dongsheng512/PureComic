@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Download, extract, and pin waifu2x-ncnn-vulkan + models into third_party/.
+# Download, extract, and pin waifu2x-ncnn-vulkan + models into
+# third_party/ncnn-vulkan/ (optional CLI sidecar, not in the app bundle).
 #
 # Usage:
 #   ./scripts/fetch-waifu2x.sh              # current host platform
@@ -16,12 +17,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${COMIC_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-PIN_FILE="$ROOT/third_party/waifu2x.pin.json"
-THIRD="$ROOT/third_party"
-BIN_ROOT="$THIRD/waifu2x-ncnn-vulkan/bin"
-CACHE="$THIRD/.cache/waifu2x"
-CHECKSUMS="$THIRD/checksums.sha256"
-MODELS_DEST="$THIRD/models-cunet"
+VULKAN="$ROOT/third_party/ncnn-vulkan"
+PIN_FILE="$VULKAN/waifu2x.pin.json"
+THIRD="$VULKAN"
+BIN_ROOT="$VULKAN/waifu2x-ncnn-vulkan/bin"
+CACHE="$VULKAN/.cache/waifu2x"
+CHECKSUMS="$VULKAN/checksums.sha256"
+MODELS_DEST="$VULKAN/models-cunet"
 
 TARGET=""
 DO_ALL=0
@@ -266,7 +268,7 @@ main() {
   if [[ ! -f "$CHECKSUMS" ]] || ! grep -q 'waifu2x-ncnn-vulkan' "$CHECKSUMS" 2>/dev/null; then
     {
       echo "# Auto-updated by scripts/fetch-waifu2x.sh — do not hand-edit casually"
-      echo "# Format: <sha256>  <path-relative-to-third_party/>"
+      echo "# Format: <sha256>  <path-relative-to-third_party/ncnn-vulkan/>"
     } > "$CHECKSUMS"
   fi
 

@@ -238,6 +238,13 @@ pub fn is_engine_native_path(path: &Path) -> bool {
 /// Copy jpg/png/webp as-is; convert other formats (and 16-bit PNG, which
 /// waifu2x-ncnn handles poorly) to 8-bit PNG for the engine.
 pub fn write_engine_input(src: &Path, dest: &Path) -> AppResult<()> {
+    // copy/hard_link 都会跟随 symlink；漫画根之外的链接输入直接拒绝
+    if crate::security::is_symlink_path(src) {
+        return Err(AppError::path_traversal(format!(
+            "拒绝符号链接输入: {}",
+            src.display()
+        )));
+    }
     if is_engine_native_path(src) && !png_is_16bit(src) {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;

@@ -4,6 +4,14 @@ use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use std::path::{Component, Path, PathBuf};
 
+/// True when the path itself is a symbolic link（不跟随目标）。
+/// 文件夹漫画按「文件夹即漫画根」处理，页文件一律不允许链接出根。
+pub fn is_symlink_path(p: &Path) -> bool {
+    p.symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 pub fn sanitize_entry_path(name: &str) -> AppResult<PathBuf> {
     let path = Path::new(name);
     if path.is_absolute() {

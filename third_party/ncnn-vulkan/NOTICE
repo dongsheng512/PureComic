@@ -1,0 +1,28 @@
+ncnn-Vulkan sidecars (optional, not shipped in the product bundle)
+==================================================================
+
+Waifu2x (ncnn/Vulkan port)
+--------------------------
+Project: waifu2x-ncnn-vulkan
+Upstream: https://github.com/nihui/waifu2x-ncnn-vulkan
+License: MIT (see upstream repository)
+Original waifu2x: https://github.com/nagadomi/waifu2x
+Models: CUnet weights from the upstream release zip (`models-cunet/`).
+Verify model licenses before redistribution.
+
+Real-CUGAN (ncnn/Vulkan port)
+-----------------------------
+Project: realcugan-ncnn-vulkan
+Upstream: https://github.com/nihui/realcugan-ncnn-vulkan
+License: MIT (see upstream)
+Original Real-CUGAN: https://github.com/bilibili/ailab/tree/main/Real-CUGAN
+Models: `models-se`, `models-pro`, `models-nose` from the upstream release zip.
+
+ncnn
+----
+Upstream: https://github.com/Tencent/ncnn
+License: BSD 3-Clause (see upstream)
+
+These binaries and weights are downloaded by scripts/fetch-waifu2x.sh and
+scripts/fetch-realcugan.sh into this directory. They are not part of the
+macOS app bundle as of v0.4.0.

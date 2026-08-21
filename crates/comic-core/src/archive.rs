@@ -144,7 +144,8 @@ fn collect_folder_images(root: &Path) -> AppResult<Vec<String>> {
     let mut names = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let p = entry.path();
-        if p.is_file() && is_image_path(p) {
+        // symlink 页会把根外文件内容带进导出物，直接跳过
+        if p.is_file() && !crate::security::is_symlink_path(p) && is_image_path(p) {
             let rel = p
                 .strip_prefix(root)
                 .unwrap_or(p)
@@ -568,7 +569,28 @@ fn extract_cbr(
 
     let (names, has_ci, _warnings) = crate::unrar::list_rar_images(cfg, &manifest.source.path)?;
     let raw_dir = manifest.workdir.join("rar_raw");
-    crate::unrar::extract_rar_archive(cfg, &manifest.source.path, &raw_dir)?;
+
+    // 需要落盘的条目 = 图片页 +（可选）ComicInfo.xml；逐条受控解压，
+    // 不再使用整包 `unrar x`（穿越/覆盖行为依赖外部二进制版本）
+    let mut wanted = names.clone();
+    if has_ci {
+        if let Ok(entries) = crate::unrar::list_rar_entries(cfg, &manifest.source.path) {
+            if let Some(ci) = entries.iter().find(|e| {
+                let s = e.replace('\\', "/");
+                s.eq_ignore_ascii_case("ComicInfo.xml") || s.ends_with("/ComicInfo.xml")
+            }) {
+                wanted.push(ci.clone());
+            }
+        }
+    }
+    report_extract(
+        on_progress.as_deref_mut(),
+        0,
+        names.len() as u32,
+        Some("解压 CBR…"),
+        manifest,
+    );
+    crate::unrar::extract_rar_entries(cfg, &manifest.source.path, &wanted, &raw_dir, cancel)?;
 
     if has_ci {
         for cand in ["ComicInfo.xml", "comicinfo.xml"] {
@@ -608,6 +630,7 @@ fn extract_cbr(
     let in_dir = manifest.in_dir();
     let out_dir = manifest.out_dir();
     let raw = raw_dir.clone();
+    // 页面已按安全名落盘在 raw_dir，直接转换/拷贝为引擎输入
     let results: Vec<AppResult<(usize, PageRecord)>> = names
         .par_iter()
         .enumerate()
@@ -618,27 +641,7 @@ fn extract_cbr(
             let src = raw.join(name);
             let (in_path, out_path) =
                 engine_page_paths(&in_dir, &out_dir, idx, name, manifest.output.image_format);
-            if src.is_file() {
-                image_io::write_engine_input(&src, &in_path)?;
-            } else {
-                crate::unrar::extract_rar_file(cfg, &manifest.source.path, name, &in_path)?;
-                if !image_io::is_engine_native_path(&in_path) {
-                    let png = in_dir.join(format!("{idx:05}.png"));
-                    image_io::convert_file_to_engine_png(&in_path, &png)?;
-                    let _ = std::fs::remove_file(&in_path);
-                    return Ok((
-                        idx,
-                        PageRecord {
-                            index: idx as u32,
-                            name: name.clone(),
-                            status: PageStatus::Pending,
-                            in_path: Some(png.clone()),
-                            out_path: Some(out_dir.join(format!("{idx:05}.png"))),
-                            error: None,
-                        },
-                    ));
-                }
-            }
+            image_io::write_engine_input(&src, &in_path)?;
             Ok((
                 idx,
                 PageRecord {
@@ -704,6 +707,10 @@ fn extract_folder(
                 return Err(AppError::cancelled());
             }
             let src = root.join(name);
+            // collect 阶段已过滤 symlink；这里防 TOCTOU（校验后被换成链接）
+            if crate::security::is_symlink_path(&src) {
+                return Err(AppError::path_traversal(format!("拒绝符号链接页: {name}")));
+            }
             let (in_path, out_path) =
                 engine_page_paths(&in_dir, &out_dir, idx, name, manifest.output.image_format);
             image_io::write_engine_input(&src, &in_path)?;
@@ -925,17 +932,8 @@ pub fn expected_output_path(manifest: &JobManifest) -> PathBuf {
 /// Pack progress: (done, total, note).
 pub type ExportProgressCb<'a> = dyn FnMut(u32, u32, &str) + Send + 'a;
 
-/// 同目录下的临时路径（写完后原子 rename 到最终路径）。
-/// 导出用确定性名字：同一目标同时只有一个 writer。
-fn tmp_sibling(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map(|n| format!("{}.tmp", n.to_string_lossy()))
-        .unwrap_or_else(|| "output.tmp".into());
-    path.with_file_name(name)
-}
-
-/// 抽取用唯一临时名，避免并发同页交错写同一个 `.tmp`。
+/// 抽取/导出共用的唯一临时名：并发同目标不会互踩同一个 `.tmp`，
+/// 写完后原子 rename 到最终路径。
 fn unique_tmp_sibling(path: &Path) -> PathBuf {
     let name = path
         .file_name()
@@ -1037,10 +1035,7 @@ fn export_folder(
         )));
     }
     // 先写临时目录再原子 rename，崩溃不会留下「看似成功」的半截目录
-    let tmp_dir = tmp_sibling(dir);
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
-    }
+    let tmp_dir = unique_tmp_sibling(dir);
     std::fs::create_dir_all(&tmp_dir)?;
     let done_pages: Vec<_> = manifest
         .pages
@@ -1155,7 +1150,7 @@ fn export_zip(
     let progress = Mutex::new(on_progress);
     const CHUNK: usize = 8;
 
-    let tmp_path = tmp_sibling(path);
+    let tmp_path = unique_tmp_sibling(path);
     let file = File::create(&tmp_path)?;
     let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
     // Images are already compressed (JPEG/PNG/WebP). STORE is the CBZ convention
@@ -1255,6 +1250,36 @@ mod tests {
         assert_eq!(v.page_names[0], "a.png");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn folder_collect_skips_symlink_pages() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret_dir = tempfile::tempdir().unwrap();
+        let secret = secret_dir.path().join("id_rsa");
+        std::fs::write(&secret, b"secret-key-bytes").unwrap();
+
+        write_tiny_png(&dir.path().join("001.png"));
+        symlink(&secret, dir.path().join("002.jpg")).unwrap();
+
+        let cfg = AppConfig::default();
+        assert!(!crate::security::is_symlink_path(
+            &dir.path().join("001.png")
+        ));
+        assert!(crate::security::is_symlink_path(
+            &dir.path().join("002.jpg")
+        ));
+
+        let v = validate_source(dir.path(), &cfg).unwrap();
+        assert_eq!(
+            v.page_count, 1,
+            "symlink 页不得进入页列表: {:?}",
+            v.page_names
+        );
+        assert_eq!(v.page_names[0], "001.png");
+    }
+
     #[test]
     fn zip_cbz_roundtrip_export() {
         let dir = tempfile::tempdir().unwrap();
@@ -1281,6 +1306,16 @@ mod tests {
         assert_eq!(v.page_count, 2);
         assert!(v.has_comic_info);
         assert_eq!(v.page_names[0], "001.png");
+    }
+
+    #[test]
+    fn unique_tmp_siblings_differ() {
+        let p = Path::new("/tmp/out/out.cbz");
+        let a = unique_tmp_sibling(p);
+        let b = unique_tmp_sibling(p);
+        assert_ne!(a, b);
+        assert!(a.to_string_lossy().ends_with(".tmp"));
+        assert_eq!(a.parent(), p.parent());
     }
 
     #[test]

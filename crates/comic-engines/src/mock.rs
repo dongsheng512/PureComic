@@ -133,6 +133,14 @@ async fn process_one(
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
+    // 与 CoreML 引擎一致：decode 前按头部尺寸拒绝超限图
+    let (w, h) = image::ImageReader::open(input)
+        .map_err(|e| EngineError::Image(e.to_string()))?
+        .with_guessed_format()
+        .map_err(|e| EngineError::Image(e.to_string()))?
+        .into_dimensions()
+        .map_err(|e| EngineError::Image(e.to_string()))?;
+    crate::check_hard_dimensions(w, h)?;
     let img = image::open(input).map_err(|e| EngineError::Image(e.to_string()))?;
     let factor = scale.as_u8() as u32;
     let out = if factor <= 1 {

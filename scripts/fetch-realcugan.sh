@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Download realcugan-ncnn-vulkan + models-se/pro/nose into third_party/.
+# Download realcugan-ncnn-vulkan + models-se/pro/nose into
+# third_party/ncnn-vulkan/ (optional CLI sidecar, not in the app bundle).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${COMIC_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-PIN_FILE="$ROOT/third_party/realcugan.pin.json"
-THIRD="$ROOT/third_party"
-BIN_ROOT="$THIRD/realcugan-ncnn-vulkan/bin"
-CACHE="$THIRD/.cache/realcugan"
-DEST_ROOT="$THIRD/realcugan-ncnn-vulkan"
+VULKAN="$ROOT/third_party/ncnn-vulkan"
+PIN_FILE="$VULKAN/realcugan.pin.json"
+THIRD="$VULKAN"
+BIN_ROOT="$VULKAN/realcugan-ncnn-vulkan/bin"
+CACHE="$VULKAN/.cache/realcugan"
+DEST_ROOT="$VULKAN/realcugan-ncnn-vulkan"
 
 TARGET=""
 TAG_OVERRIDE=""

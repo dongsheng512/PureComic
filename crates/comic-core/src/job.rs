@@ -159,7 +159,7 @@ pub struct EnhanceOptions {
 impl Default for EnhanceOptions {
     fn default() -> Self {
         Self {
-            engine: EngineKind::Waifu2x,
+            engine: EngineKind::RealCuganCoreMl,
             preset: QualityPreset::Balanced,
             scale: ScaleFactor::X2,
             noise: 1,
@@ -168,6 +168,24 @@ impl Default for EnhanceOptions {
             gpu_id: None,
             cugan_model: "se".into(),
         }
+    }
+}
+
+/// Product engines are Core ML. Legacy Vulkan ids map to the matching Core ML engine.
+/// Opt-in Vulkan sidecars remain as `waifu2x-vulkan` / `realcugan-vulkan` for CLI.
+pub fn parse_engine_kind(id: &str) -> AppResult<EngineKind> {
+    match id.trim().to_ascii_lowercase().as_str() {
+        "anime4k2x" | "anime4k" => Err(AppError::unsupported(
+            "Anime4K 属于 MVP-B；请使用 realcugan-coreml、waifu2x-coreml 或 auto",
+        )),
+        "waifu2x" | "waifu2x-coreml" | "coreml" => Ok(EngineKind::Waifu2xCoreMl),
+        "waifu2x-vulkan" | "waifu2x-ncnn" => Ok(EngineKind::Waifu2x),
+        "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => Ok(EngineKind::RealEsrganCoreMl),
+        "realcugan-vulkan" | "realcugan-ncnn" => Ok(EngineKind::RealCugan),
+        "realcugan" | "cugan" | "realcugan-coreml" | "cugan-coreml" | "auto" | "" => {
+            Ok(EngineKind::RealCuganCoreMl)
+        }
+        other => Err(AppError::invalid(format!("未知引擎: {other}"))),
     }
 }
 
@@ -216,38 +234,69 @@ impl EnhanceOptions {
         }
     }
 
-    /// Real-CUGAN 参数归一化：包体只有 up2x/up3x/up4x，Nose 包固定 2×/n0，
-    /// Pro 包只训 n0/n3。把实际生效参数显式写进 manifest（引擎内部同规则仅兜底），
-    /// 避免 UI 显示 1× 实际出 2× 的静默偏差。返回是否发生改写。
+    /// 把实际生效参数显式写进 manifest，避免 UI 显示 1× 实际出 2× 的静默偏差。
     pub fn normalize_realcugan(&mut self) -> bool {
-        if self.engine != EngineKind::RealCugan {
-            return false;
-        }
-        let pack = match self.cugan_model.to_ascii_lowercase().as_str() {
-            "pro" => comic_engines::CuganModelPack::Pro,
-            "nose" => comic_engines::CuganModelPack::Nose,
-            _ => comic_engines::CuganModelPack::Se,
-        };
-        let mut changed = false;
-        let clamped = self.scale.as_u8().clamp(2, 4);
-        if clamped != self.scale.as_u8() {
-            changed = true;
-        }
-        self.scale = match ScaleFactor::try_from_u8(clamped) {
-            Ok(s) => s,
-            Err(_) => ScaleFactor::X2,
-        };
-        if pack == comic_engines::CuganModelPack::Nose {
-            if self.scale != ScaleFactor::X2 || self.noise != 0 {
-                changed = true;
+        match self.engine {
+            EngineKind::RealCuganCoreMl | EngineKind::Waifu2xCoreMl => {
+                let mut changed = false;
+                if self.scale != ScaleFactor::X2 {
+                    self.scale = ScaleFactor::X2;
+                    changed = true;
+                }
+                if self.noise < 0 {
+                    self.noise = 0;
+                    changed = true;
+                }
+                if self.tta {
+                    self.tta = false;
+                    changed = true;
+                }
+                changed
             }
-            self.scale = ScaleFactor::X2;
-            self.noise = 0;
-        } else if pack == comic_engines::CuganModelPack::Pro && self.noise > 0 && self.noise < 3 {
-            changed = true;
-            self.noise = 3;
+            EngineKind::RealEsrganCoreMl => {
+                let mut changed = false;
+                if self.scale != ScaleFactor::X4 {
+                    self.scale = ScaleFactor::X4;
+                    changed = true;
+                }
+                if self.tta {
+                    self.tta = false;
+                    changed = true;
+                }
+                changed
+            }
+            EngineKind::RealCugan => {
+                let pack = match self.cugan_model.to_ascii_lowercase().as_str() {
+                    "pro" => comic_engines::CuganModelPack::Pro,
+                    "nose" => comic_engines::CuganModelPack::Nose,
+                    _ => comic_engines::CuganModelPack::Se,
+                };
+                let mut changed = false;
+                let clamped = self.scale.as_u8().clamp(2, 4);
+                if clamped != self.scale.as_u8() {
+                    changed = true;
+                }
+                self.scale = match ScaleFactor::try_from_u8(clamped) {
+                    Ok(s) => s,
+                    Err(_) => ScaleFactor::X2,
+                };
+                if pack == comic_engines::CuganModelPack::Nose {
+                    if self.scale != ScaleFactor::X2 || self.noise != 0 {
+                        changed = true;
+                    }
+                    self.scale = ScaleFactor::X2;
+                    self.noise = 0;
+                } else if pack == comic_engines::CuganModelPack::Pro
+                    && self.noise > 0
+                    && self.noise < 3
+                {
+                    changed = true;
+                    self.noise = 3;
+                }
+                changed
+            }
+            _ => false,
         }
-        changed
     }
 }
 
@@ -651,22 +700,7 @@ impl CreateJobRequest {
         };
         let mut options = EnhanceOptions::from_preset(preset);
         if let Some(eng) = &self.engine {
-            options.engine = match eng.as_str() {
-                "anime4k2x" | "anime4k" => {
-                    return Err(AppError::unsupported(
-                        "Anime4K 属于 MVP-B；请使用 waifu2x 或 auto",
-                    ));
-                }
-                "waifu2x" | "auto" | "" => EngineKind::Waifu2x,
-                "waifu2x-coreml" | "coreml" => EngineKind::Waifu2xCoreMl,
-                "realesrgan-coreml" | "esrgan-coreml" | "esrgan-anime" => {
-                    EngineKind::RealEsrganCoreMl
-                }
-                "realcugan" | "cugan" => EngineKind::RealCugan,
-                other => {
-                    return Err(AppError::invalid(format!("未知引擎: {other}")));
-                }
-            };
+            options.engine = parse_engine_kind(eng)?;
         }
         if let Some(s) = self.enhance.scale {
             options.scale = ScaleFactor::try_from_u8(s).map_err(AppError::invalid)?;
@@ -771,6 +805,46 @@ mod tests {
         assert_eq!(f.noise, 0);
         let b = EnhanceOptions::from_preset(QualityPreset::Balanced);
         assert_eq!(b.noise, 1);
+        assert_eq!(b.engine, EngineKind::RealCuganCoreMl);
+    }
+
+    #[test]
+    fn parse_engine_kind_maps_vulkan_ids_to_coreml() {
+        assert_eq!(
+            parse_engine_kind("realcugan").unwrap(),
+            EngineKind::RealCuganCoreMl
+        );
+        assert_eq!(
+            parse_engine_kind("waifu2x").unwrap(),
+            EngineKind::Waifu2xCoreMl
+        );
+        assert_eq!(
+            parse_engine_kind("auto").unwrap(),
+            EngineKind::RealCuganCoreMl
+        );
+        assert_eq!(
+            parse_engine_kind("realcugan-vulkan").unwrap(),
+            EngineKind::RealCugan
+        );
+        assert_eq!(
+            parse_engine_kind("waifu2x-vulkan").unwrap(),
+            EngineKind::Waifu2x
+        );
+    }
+
+    #[test]
+    fn normalize_coreml_forces_2x() {
+        let mut o = EnhanceOptions {
+            engine: EngineKind::RealCuganCoreMl,
+            scale: ScaleFactor::X4,
+            noise: -1,
+            tta: true,
+            ..Default::default()
+        };
+        assert!(o.normalize_realcugan());
+        assert_eq!(o.scale, ScaleFactor::X2);
+        assert_eq!(o.noise, 0);
+        assert!(!o.tta);
     }
 
     #[test]

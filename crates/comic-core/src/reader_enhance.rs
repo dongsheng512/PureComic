@@ -74,23 +74,28 @@ pub struct EnhanceCacheClearResult {
 
 pub fn cache_signature(options: Option<&EnhanceOptionsDto>) -> AppResult<String> {
     let opts = options_from_dto(options.cloned())?;
-    let engine = match &options.and_then(|o| o.engine.as_deref()) {
-        Some("realesrgan-coreml") | Some("esrgan-coreml") | Some("esrgan-anime") => {
-            "realesrgan-coreml"
-        }
-        _ => "waifu2x-coreml",
+    let engine = match crate::job::parse_engine_kind(
+        options
+            .and_then(|o| o.engine.as_deref())
+            .unwrap_or("realcugan-coreml"),
+    )
+    .unwrap_or(comic_engines::EngineKind::RealCuganCoreMl)
+    {
+        comic_engines::EngineKind::RealEsrganCoreMl => "realesrgan-coreml",
+        comic_engines::EngineKind::Waifu2xCoreMl => "waifu2x-coreml",
+        _ => "realcugan-coreml",
     };
-    let model = if engine == "realesrgan-coreml" {
-        "anime-6b-4x-v2"
-    } else {
-        "anime-2x-v4"
+    let model = match engine {
+        "realesrgan-coreml" => "anime-6b-4x-v2",
+        "realcugan-coreml" => "se-2x-v2",
+        _ => "anime-2x-v4",
     };
     // 实际解析到的模型文件：请求 n3 而本机只有 n2 时回退推理，键必须反映
     // 真实模型，否则日后装上 n3 模型后旧缓存继续冒充
-    let resolved_model = if engine == "realesrgan-coreml" {
-        comic_engines::resolve_realesrgan_coreml_model()
-    } else {
-        comic_engines::resolve_waifu2x_coreml_model_for_noise(opts.noise)
+    let resolved_model = match engine {
+        "realesrgan-coreml" => comic_engines::resolve_realesrgan_coreml_model(),
+        "realcugan-coreml" => comic_engines::resolve_realcugan_coreml_model_for_noise(opts.noise),
+        _ => comic_engines::resolve_waifu2x_coreml_model_for_noise(opts.noise),
     };
     let model_tag = resolved_model
         .as_deref()
@@ -533,12 +538,13 @@ pub async fn enhance_pages(
         return Err(AppError::cancelled());
     }
     let mut opts = options_from_dto(options.clone())?;
-    opts.engine = match options.as_ref().and_then(|o| o.engine.as_deref()) {
-        Some("realesrgan-coreml") | Some("esrgan-coreml") | Some("esrgan-anime") => {
-            comic_engines::EngineKind::RealEsrganCoreMl
-        }
-        _ => comic_engines::EngineKind::Waifu2xCoreMl,
-    };
+    opts.engine = crate::job::parse_engine_kind(
+        options
+            .as_ref()
+            .and_then(|o| o.engine.as_deref())
+            .unwrap_or("realcugan-coreml"),
+    )
+    .unwrap_or(comic_engines::EngineKind::RealCuganCoreMl);
     let params = reader_engine_params(&opts);
     let sig = cache_signature(options.as_ref())?;
     let names = crate::reader::listed_pages(source, cfg)
@@ -748,9 +754,9 @@ mod tests {
     }
 
     #[test]
-    fn signature_defaults_to_waifu2x_coreml() {
+    fn signature_defaults_to_realcugan_coreml() {
         let a = cache_signature(None).unwrap();
-        assert!(a.starts_with("waifu2x-coreml-"), "{a}");
+        assert!(a.starts_with("realcugan-coreml-"), "{a}");
         let b = cache_signature(Some(&EnhanceOptionsDto {
             engine: Some("realesrgan-coreml".into()),
             ..Default::default()
@@ -763,7 +769,24 @@ mod tests {
             ..Default::default()
         }))
         .unwrap();
-        assert!(remapped.starts_with("waifu2x-coreml-"), "{remapped}");
+        assert!(remapped.starts_with("realcugan-coreml-"), "{remapped}");
+        let w2x = cache_signature(Some(&EnhanceOptionsDto {
+            engine: Some("waifu2x".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(w2x.starts_with("waifu2x-coreml-"), "{w2x}");
+        let cug = cache_signature(Some(&EnhanceOptionsDto {
+            engine: Some("realcugan-coreml".into()),
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(cug.starts_with("realcugan-coreml-"), "{cug}");
+        assert_eq!(
+            a.split('-').take(2).collect::<Vec<_>>(),
+            ["realcugan", "coreml"]
+        );
+        assert_ne!(w2x, cug);
     }
 
     #[test]
