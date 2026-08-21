@@ -42,6 +42,29 @@ if [[ -d "$OUT" || -f "$OUT" ]]; then
   exit 0
 fi
 
+# 快路径:优先拉取本仓库 Release 的预转换包(免 uv/torch/coremltools);
+# 失败则回落到源权重本地转换
+PKG_URL="$(python3 -c "import json; d=json.load(open(r'''$PIN''')).get('package'); print(d['url'] if d else '')")"
+PKG_SHA="$(python3 -c "import json; d=json.load(open(r'''$PIN''')).get('package'); print(d['zip_sha256'] if d else '')")"
+if [[ -n "$PKG_URL" ]]; then
+  PKG_ZIP="$CACHE/$OUT_NAME.zip"
+  if curl -fsL --retry 3 -o "$PKG_ZIP" "$PKG_URL"; then
+    got="$(sha256_file "$PKG_ZIP")"
+    if [[ "$got" == "$PKG_SHA" ]]; then
+      unzip -q -o "$PKG_ZIP" -d "$DEST"
+      if [[ -d "$OUT" ]]; then
+        echo "done (hosted package): $OUT"
+        exit 0
+      fi
+      echo "hosted package unpack missing $OUT, falling back to conversion" >&2
+    else
+      echo "hosted package sha256 mismatch ($got != $PKG_SHA), falling back to conversion" >&2
+    fi
+  else
+    echo "hosted package unavailable, falling back to conversion" >&2
+  fi
+fi
+
 # 转换脚本自带数值校验（fp16 vs fp32 PSNR ≥40dB），失败即非零退出
 uv run --with torch --with coremltools --with pillow --with numpy \
   python3 "$ROOT/scripts/convert-animevideo-coreml.py" \

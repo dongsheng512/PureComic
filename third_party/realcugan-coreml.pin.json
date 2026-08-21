@@ -28,5 +28,31 @@
       "mlpackage": "up2x_denoise3x.mlpackage",
       "noise": 3
     }
-  ]
+  ],
+  "packages": {
+    "comment": "预转换 fp16 mlprogram 包(本仓库 Release coreml-packages-v1)。zip_sha256 校验通过后解包到 models[].mlpackage。",
+    "base_url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-packages-v1/",
+    "items": [
+      {
+        "mlpackage": "up2x_conservative.mlpackage",
+        "zip_sha256": "9c451a956e5736cd7ced59119ae8d8f2ea113277be6e064ba5c972b13b007182",
+        "bytes": 2390326
+      },
+      {
+        "mlpackage": "up2x_denoise1x.mlpackage",
+        "zip_sha256": "322508cef25941069be8e0002e7e2c8d068249e0e55cf854e6e1c5f5e41385a6",
+        "bytes": 2390532
+      },
+      {
+        "mlpackage": "up2x_denoise2x.mlpackage",
+        "zip_sha256": "50420667b37f3053f2dbf70da7296f5455389dbcff34311ecbd2e63aa68b0be6",
+        "bytes": 2389723
+      },
+      {
+        "mlpackage": "up2x_denoise3x.mlpackage",
+        "zip_sha256": "4f7a01241716630ebd6fb04ae8686e179b271eaf883211f8d88d8c6a7e566fb9",
+        "bytes": 2388612
+      }
+    ]
+  }
 }

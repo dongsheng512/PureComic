@@ -44,6 +44,45 @@ if [[ "$need_convert" -eq 0 ]]; then
   exit 0
 fi
 
+# 快路径:优先拉取本仓库 Release 的预转换包(免 torch/coremltools);
+# 失败则回落到源权重本地转换
+fetch_hosted_packages() {
+  python3 - "$PIN" "$DEST" <<'PY' || return 1
+import hashlib, json, os, subprocess, sys
+pin = json.load(open(sys.argv[1]))
+dest = sys.argv[2]
+pkgs = pin.get("packages")
+if not pkgs:
+    sys.exit(1)
+for it in pkgs["items"]:
+    d = os.path.join(dest, it["mlpackage"])
+    if os.path.isdir(d):
+        continue
+    zdir = os.path.join(dest, ".cache-zip")
+    os.makedirs(zdir, exist_ok=True)
+    z = os.path.join(zdir, it["mlpackage"] + ".zip")
+    subprocess.run(
+        ["curl", "-fL", "--retry", "3", "-o", z, pkgs["base_url"] + it["mlpackage"] + ".zip"],
+        check=True,
+    )
+    h = hashlib.sha256(open(z, "rb").read()).hexdigest()
+    if h != it["zip_sha256"]:
+        print(f"zip sha256 mismatch: {it['mlpackage']}", file=sys.stderr)
+        sys.exit(1)
+    subprocess.run(["unzip", "-q", "-o", z, "-d", dest], check=True)
+    if not os.path.isdir(d):
+        print(f"unpack missing dir: {it['mlpackage']}", file=sys.stderr)
+        sys.exit(1)
+print("hosted packages ok")
+PY
+}
+
+if fetch_hosted_packages; then
+  echo "done (hosted packages)"
+  exit 0
+fi
+echo "hosted packages unavailable, falling back to source conversion"
+
 if [[ ! -f "$ZIP" ]] || [[ "$(sha256_file "$ZIP")" != "$ZIP_SHA" ]]; then
   echo "fetch $ZIP_URL"
   curl -fL --retry 3 -o "$ZIP" "$ZIP_URL"

@@ -15,5 +15,11 @@
       "pad": 10,
       "precision": "fp16"
     }
-  ]
+  ],
+  "package": {
+    "comment": "预转换 fp16 mlprogram 包(本仓库 Release coreml-packages-v1),免 torch 转换路径。",
+    "url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-packages-v1/realesr_animevideov3_x4.mlpackage.zip",
+    "zip_sha256": "f367b98011837578ec2068412a80ecbc8ae413f0c9c930cb720404c8605bd1a0",
+    "bytes": 1168044
+  }
 }
