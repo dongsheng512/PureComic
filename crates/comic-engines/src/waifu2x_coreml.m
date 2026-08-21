@@ -55,8 +55,9 @@ static int comic_w2x_ensure_inputs(void) {
     }
     NSError *err = nil;
     NSArray<NSNumber *> *shape = @[ @3, @(kW2xIn), @(kW2xIn) ];
-    g_in0 = [[MLMultiArray alloc] initWithShape:shape dataType:MLMultiArrayDataTypeDouble error:&err];
-    g_in1 = [[MLMultiArray alloc] initWithShape:shape dataType:MLMultiArrayDataTypeDouble error:&err];
+    /* R2-C：fp16 模型包 + Float32 I/O（原 Double） */
+    g_in0 = [[MLMultiArray alloc] initWithShape:shape dataType:MLMultiArrayDataTypeFloat32 error:&err];
+    g_in1 = [[MLMultiArray alloc] initWithShape:shape dataType:MLMultiArrayDataTypeFloat32 error:&err];
     if (!g_in0 || !g_in1) {
         g_in0 = nil;
         g_in1 = nil;
@@ -78,11 +79,11 @@ static void comic_w2x_warmup(MLModel *model) {
     const NSInteger sc = g_in0.strides[0].integerValue;
     const NSInteger sh = g_in0.strides[1].integerValue;
     const NSInteger sw = g_in0.strides[2].integerValue;
-    double *din = (double *)g_in0.dataPointer;
+    float *din = (float *)g_in0.dataPointer;
     for (NSInteger c = 0; c < 3; c++) {
         for (NSInteger y = 0; y < kW2xIn; y++) {
             for (NSInteger x = 0; x < kW2xIn; x++) {
-                din[c * sc + y * sh + x * sw] = 0.5; /* 中性灰 */
+                din[c * sc + y * sh + x * sw] = 0.5f; /* 中性灰 */
             }
         }
     }
@@ -130,9 +131,8 @@ int comic_w2x_coreml_load(const char *model_path) {
         }
         MLModelConfiguration *cfg = [[MLModelConfiguration alloc] init];
         /* 与 ESRGAN 对齐：FastPrediction 削减每页上百次小推理的 per-call 开销，
-           低精度累加减小 GPU 中间精度成本。Double I/O 下两者可能无效或微改数值，
-           留环境开关供 A/B（COMIC_W2X_FASTPRED=0 / COMIC_W2X_LOWPREC=0 关闭），
-           验收后收口默认值。 */
+           低精度累加减小 GPU 中间精度成本。R2-C 已切 Float32 I/O；
+           留环境开关供 A/B（COMIC_W2X_FASTPRED=0 / COMIC_W2X_LOWPREC=0 关闭）。 */
         cfg.computeUnits = MLComputeUnitsAll;
         const char *env = getenv("COMIC_W2X_LOWPREC");
         const BOOL use_lowprec = !(env && strcmp(env, "0") == 0);
@@ -141,8 +141,8 @@ int comic_w2x_coreml_load(const char *model_path) {
             cfg.allowLowPrecisionAccumulationOnGPU = YES;
         }
         /* FastPrediction 在 MLOptimizationHints.specializationStrategy（macOS 15+）。
-           本机 1200×1600 Double I/O 实测默认开会慢约 40%，故 opt-in：
-           COMIC_W2X_FASTPRED=1 才打开。 */
+           历史（Double I/O 时期）默认开会慢约 40%，故 opt-in：COMIC_W2X_FASTPRED=1
+           才打开。R2-C 换 fp16+Float32 后如需收口默认值，必须先重测。 */
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
         env = getenv("COMIC_W2X_FASTPRED");
         const BOOL use_fastpred = env && strcmp(env, "1") == 0;
@@ -183,18 +183,18 @@ static void comic_w2x_sample(
     int x,
     int y,
     int add_eta,
-    double *r,
-    double *g,
-    double *b
+    float *r,
+    float *g,
+    float *b
 ) {
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= w) x = w - 1;
     if (y >= h) y = h - 1;
     const unsigned char *p = rgb + ((size_t)y * (size_t)w + (size_t)x) * 3;
-    *r = (double)p[0] / 255.0;
-    *g = (double)p[1] / 255.0;
-    *b = (double)p[2] / 255.0;
+    *r = (float)p[0] / 255.0f;
+    *g = (float)p[1] / 255.0f;
+    *b = (float)p[2] / 255.0f;
     if (add_eta) {
         *r += kClipEta8;
         *g += kClipEta8;
@@ -206,19 +206,19 @@ static int comic_w2x_expand(
     const unsigned char *rgb,
     int w,
     int h,
-    double **out_chw,
+    float **out_chw,
     int *out_ew,
     int *out_eh
 ) {
     const int ew = w + 2 * kW2xShrink;
     const int eh = h + 2 * kW2xShrink;
     const size_t plane = (size_t)ew * (size_t)eh;
-    double *arr = (double *)malloc(3 * plane * sizeof(double));
+    float *arr = (float *)malloc(3 * plane * sizeof(float));
     if (!arr) {
         return -1;
     }
-    memset(arr, 0, 3 * plane * sizeof(double));
-    double r, g, b;
+    memset(arr, 0, 3 * plane * sizeof(float));
+    float r, g, b;
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             comic_w2x_sample(rgb, w, h, x, y, 1, &r, &g, &b);
@@ -302,7 +302,7 @@ static int comic_w2x_origins(int w, int h, int **xs, int **ys, int *n_out) {
 
 static void comic_w2x_fill_tile(
     MLMultiArray *arr,
-    const double *expanded,
+    const float *expanded,
     int ew,
     int eh,
     int ox,
@@ -312,13 +312,13 @@ static void comic_w2x_fill_tile(
     const NSInteger sc = arr.strides[0].integerValue;
     const NSInteger sh = arr.strides[1].integerValue;
     const NSInteger sw = arr.strides[2].integerValue;
-    double *din = (double *)arr.dataPointer;
+    float *din = (float *)arr.dataPointer;
     for (int ch = 0; ch < 3; ch++) {
         for (int y = 0; y < kW2xIn; y++) {
-            const double *src = expanded + (size_t)ch * plane + (size_t)(oy + y) * (size_t)ew + (size_t)ox;
+            const float *src = expanded + (size_t)ch * plane + (size_t)(oy + y) * (size_t)ew + (size_t)ox;
             if (sw == 1) {
-                double *dst = din + ch * sc + y * sh;
-                memcpy(dst, src, (size_t)kW2xIn * sizeof(double));
+                float *dst = din + ch * sc + y * sh;
+                memcpy(dst, src, (size_t)kW2xIn * sizeof(float));
             } else {
                 for (int x = 0; x < kW2xIn; x++) {
                     din[ch * sc + y * sh + x * sw] = src[x];
@@ -451,7 +451,7 @@ int comic_w2x_coreml_enhance_rgb(
             src = padded;
         }
 
-        double *expanded = NULL;
+        float *expanded = NULL;
         int ew = 0, eh = 0;
         if (comic_w2x_expand(src, pw, ph, &expanded, &ew, &eh) != 0) {
             free(padded);
