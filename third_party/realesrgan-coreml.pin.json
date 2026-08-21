@@ -1,9 +1,9 @@
 {
-  "comment": "john-rocky Real-ESRGAN Anime 4x re-quantized to fp16 (R2-C, 2026-08-21) via scripts/re-export-fp16-coreml.py; weights-only quantization, Image I/O unchanged, ~-50% size. SHA256 = fp16 artifact from the 2026-08-21 rerun (differs from appendix B historical export; per-plan latest --verify wins). WARNING: url still points to the official fp32 Google Drive source; fetch will hard-fail on sha256 until the fp16 file is hosted at a fixed URL. Local dev: file already in third_party/realesrgan-coreml/.",
+  "comment": "john-rocky Real-ESRGAN Anime 4x re-quantized to fp16 (R2-C, 2026-08-21) via scripts/re-export-fp16-coreml.py; weights-only quantization, Image I/O unchanged, ~-50% size. SHA256 = fp16 artifact from the 2026-08-21 rerun (differs from appendix B historical export; per-plan latest --verify wins). Hosted on this repo's release coreml-fp16-v1. Source model BSD-3 (xinntao/Real-ESRGAN).",
   "models": [
     {
       "name": "RealESRGAN_x4plus_anime_6B.mlmodel",
-      "url": "https://drive.google.com/uc?export=download&id=1qXdLx46Lpqya7Txc5Wvgkd2Dqlnqm3Qm",
+      "url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-fp16-v1/RealESRGAN_x4plus_anime_6B.mlmodel",
       "sha256": "f6220a4f14a6a938ea5519e409e8daa03c6c4466005ce962fd67f6bf6836e694",
       "bytes": 8952740,
       "precision": "fp16"

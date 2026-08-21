@@ -1,31 +1,31 @@
 {
-  "comment": "waifu2x-ios official 2x anime models re-exported to fp16 (R2-C, 2026-08-21). Same filenames as fp32 originals; waifu2x_coreml.m uses Float32 multiArray I/O since this swap. SHA256 = fp16 artifacts from scripts/re-export-fp16-coreml.py (byte-stable across runs). WARNING: url still points to the official fp32 source; fetch will hard-fail on sha256 until fp16 files are hosted at a fixed URL. Local dev: files are already in third_party/waifu2x-coreml/.",
+  "comment": "waifu2x-ios official 2x anime models re-exported to fp16 (R2-C, 2026-08-21). Same filenames as fp32 originals; waifu2x_coreml.m uses Float32 multiArray I/O since this swap. SHA256 = fp16 artifacts from scripts/re-export-fp16-coreml.py (byte-stable across runs). Hosted on this repo's release coreml-fp16-v1.",
   "source": "https://github.com/imxieyi/waifu2x-ios",
   "models": [
     {
       "name": "up_anime_noise0_scale2x_model.mlmodel",
-      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise0_scale2x_model.mlmodel",
+      "url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-fp16-v1/up_anime_noise0_scale2x_model.mlmodel",
       "sha256": "408812131f47995c8fb72fe82ab8f5d6628398bd47fe98348e97bb89285c2b9f",
       "bytes": 1106060,
       "precision": "fp16"
     },
     {
       "name": "up_anime_noise1_scale2x_model.mlmodel",
-      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise1_scale2x_model.mlmodel",
+      "url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-fp16-v1/up_anime_noise1_scale2x_model.mlmodel",
       "sha256": "4e3b2fdd2b5e9333322e093357ef40d7ba900b233322076076ea3873effeec55",
       "bytes": 1106060,
       "precision": "fp16"
     },
     {
       "name": "up_anime_noise2_scale2x_model.mlmodel",
-      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise2_scale2x_model.mlmodel",
+      "url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-fp16-v1/up_anime_noise2_scale2x_model.mlmodel",
       "sha256": "4179844a2aa11e3cd0fdd3c3da1e27ccb82f785a2b31466af5befa2d397f5423",
       "bytes": 1106060,
       "precision": "fp16"
     },
     {
       "name": "up_anime_noise3_scale2x_model.mlmodel",
-      "url": "https://media.githubusercontent.com/media/imxieyi/waifu2x-ios/master/waifu2x/models/up_anime_noise3_scale2x_model.mlmodel",
+      "url": "https://github.com/dongsheng512/PureComic/releases/download/coreml-fp16-v1/up_anime_noise3_scale2x_model.mlmodel",
       "sha256": "4612a3ee9cf5e707c01b84ab9ad9620e279f2a996740c4d79bb592badf1178f2",
       "bytes": 1106060,
       "precision": "fp16"
