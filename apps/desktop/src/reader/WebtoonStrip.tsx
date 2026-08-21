@@ -235,6 +235,8 @@ function StripEngine({
 export function WebtoonStrip(props: Props) {
   const metricRef = useRef<{ index: number; ratio: number } | null>(null);
   const [layoutWidth, setLayoutWidth] = useState(props.contentWidth);
+  const contentWidthRef = useRef(props.contentWidth);
+  contentWidthRef.current = props.contentWidth;
 
   useEffect(() => {
     if (props.contentWidth <= 0) return;
@@ -243,8 +245,9 @@ export function WebtoonStrip(props: Props) {
     return () => window.clearTimeout(timer);
   }, [layoutWidth, props.contentWidth]);
 
+  // 换书立刻对齐当前宽度；宽度抖动由上面的 debounce 处理，不要把 contentWidth 放进本 effect。
   useEffect(() => {
-    setLayoutWidth(props.contentWidth);
+    setLayoutWidth(contentWidthRef.current);
   }, [props.sourceKey]);
 
   return (

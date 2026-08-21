@@ -9,18 +9,13 @@ import {
   createJob,
   doctor as fetchDoctor,
   estimateDisk,
+  errorMessage,
   probeResume,
   exportDiagnostics,
   getEngineStatus,
   listEngines,
-  listJobs,
-  onJobProgress,
   openOutputFolder,
-  listLibrary,
   addLibraryPath,
-  removeLibraryEntry,
-  previewLibraryScan,
-  importLibraryPaths,
   removeJob,
   validateSource,
   takePendingOpenPaths,
@@ -31,18 +26,20 @@ import {
   saveExternalOpenRemember,
   titleFromPath,
 } from "./externalOpen";
-import { stateLabel, t, type Messages } from "./i18n";
+import { stateLabel, t } from "./i18n";
 import { loadReaderBg, readerBgPreset } from "./reader/prefs";
 import { EnhanceView } from "./enhance/EnhanceView";
 import {
   formatBytes,
+  migrateBatchEngineId,
   type Container,
   type ImgFmt,
   type Preset,
 } from "./enhance/enhanceViewModel";
-import { LibraryView, pickComicFiles, pickFolder } from "./library/LibraryView";
-import { loadImportSettings, saveImportSettings } from "./library/prefs";
+import { LibraryView } from "./library/LibraryView";
 import { ComicReader, type ReaderSession } from "./reader/ComicReader";
+import { ACTIVE_JOB_STATES, useJobs } from "./useJobs";
+import { useLibrary } from "./useLibrary";
 import { rememberMainWindowGeometry, restoreMainWindowGeometry } from "./reader/smartFit";
 import { setNativeWindowBg, startWindowDrag } from "./windowDrag";
 import type {
@@ -50,10 +47,8 @@ import type {
   DoctorReport,
   EngineInfo,
   EngineStatus,
-  JobState,
   JobStatus,
   LibraryEntry,
-  LibraryScanPreview,
   ResumeHint,
   ValidateResult,
 } from "./types";
@@ -73,36 +68,6 @@ function readTheme(): Theme {
 
 const THEME_BG = { light: "#FFFFFF", dark: "#212121" } as const;
 
-function yieldToPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
-}
-
-function fillMsg(tpl: string, vars: Record<string, string | number>): string {
-  return tpl.replace(/\{(\w+)\}/g, (_, k: string) => String(vars[k] ?? ""));
-}
-
-function findLibraryByPath(list: LibraryEntry[], path: string): LibraryEntry | undefined {
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const n = norm(path);
-  return list.find((e) => norm(e.path) === n);
-}
-
-function noticeForUpsert(i18n: Messages, before: LibraryEntry | undefined, entry: LibraryEntry): string {
-  if (!before) {
-    return fillMsg(i18n.libraryNoticeAdded, { title: entry.title, pages: entry.pageCount });
-  }
-  if (before.pageCount !== entry.pageCount) {
-    return fillMsg(i18n.libraryNoticeUpdated, {
-      title: entry.title,
-      from: before.pageCount,
-      to: entry.pageCount,
-    });
-  }
-  return fillMsg(i18n.libraryNoticeExists, { title: entry.title, pages: entry.pageCount });
-}
-
 function applyTheme(theme: Theme) {
   const bg = THEME_BG[theme];
   const reading = document.documentElement.hasAttribute("data-reader-open");
@@ -120,40 +85,7 @@ function applyTheme(theme: Theme) {
 }
 
 function errMsg(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (typeof e === "string") return e;
-  return String(e);
-}
-
-/** 进行中的任务状态（空闲时轮询退避，避免常驻全量重渲染） */
-const ACTIVE_JOB_STATES: readonly JobState[] = [
-  "pending",
-  "validating",
-  "extracting",
-  "running",
-  "finalizing",
-  "cancelling",
-];
-
-/** jobs 列表浅比较：仅关注影响 UI 的字段 */
-function jobsEqual(a: JobStatus[], b: JobStatus[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i];
-    const y = b[i];
-    if (
-      x.jobId !== y.jobId ||
-      x.state !== y.state ||
-      x.pagesDone !== y.pagesDone ||
-      x.pagesTotal !== y.pagesTotal ||
-      x.stage !== y.stage ||
-      x.error !== y.error ||
-      x.outputPath !== y.outputPath
-    ) {
-      return false;
-    }
-  }
-  return true;
+  return errorMessage(e);
 }
 
 export default function App() {
@@ -175,8 +107,8 @@ export default function App() {
     }
   });
   const [preset, setPreset] = useState<Preset>("balanced");
-  const [engineId, setEngineId] = useState("realcugan");
-  const [cuganModel, setCuganModel] = useState("se");
+  const [engineId, setEngineId] = useState("realcugan-coreml");
+  const cuganModel = "se";
   const [catalog, setCatalog] = useState<EngineInfo[]>([]);
   const [scale, setScale] = useState<number>(2);
   const [noise, setNoise] = useState<-1 | 0 | 1 | 2 | 3>(1);
@@ -187,7 +119,7 @@ export default function App() {
   const [estimate, setEstimate] = useState<DiskEstimate | null>(null);
   const [estimateLoading, setEstimateLoading] = useState(false);
   const [resumeHint, setResumeHint] = useState<ResumeHint | null>(null);
-  const [jobs, setJobs] = useState<JobStatus[]>([]);
+  const { jobs, refreshJobs } = useJobs();
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -206,7 +138,6 @@ export default function App() {
   } | null>(null);
   const [importRemember, setImportRemember] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
-  const libraryRef = useRef<LibraryEntry[]>([]);
   const readerSessionRef = useRef<ReaderSession | null>(null);
 
   const openReader = useCallback((session: ReaderSession) => {
@@ -216,16 +147,6 @@ export default function App() {
     readerSessionRef.current = session;
     setError(null);
     setImportPrompt(null);
-  }, []);
-
-  const pathInLibrary = useCallback((path: string) => {
-    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-    const n = norm(path);
-    return libraryRef.current.some((e) => {
-      const ep = norm(e.path);
-      // 全等，或互为祖先/后代（按路径段边界，避免 /Users/a/X 误匹配 /Volumes/b/X）
-      return ep === n || ep.startsWith(n + "/") || n.startsWith(ep + "/");
-    });
   }, []);
 
   const [readerPrefsRev, setReaderPrefsRev] = useState(0);
@@ -241,31 +162,34 @@ export default function App() {
 
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [diagPath, setDiagPath] = useState<string | null>(null);
-  const [library, setLibrary] = useState<LibraryEntry[]>([]);
-  const [libraryScan, setLibraryScan] = useState(false);
-  const [libraryImporting, setLibraryImporting] = useState(false);
-  const [libraryImportProgress, setLibraryImportProgress] = useState<{
-    done: number;
-    total: number;
-  } | null>(null);
-  const [libraryNotice, setLibraryNotice] = useState<string | null>(null);
-  const [scanPreview, setScanPreview] = useState<LibraryScanPreview | null>(null);
+  const {
+    library,
+    libraryRef,
+    libraryScan,
+    libraryImporting,
+    libraryImportProgress,
+    libraryNotice,
+    setLibraryNotice,
+    scanPreview,
+    refreshLibrary,
+    ingestPath,
+    onLibAddFile,
+    onLibAddFolder,
+    onLibScan,
+    onLibCancelScan,
+    onLibConfirmScan,
+    onLibRemove,
+  } = useLibrary({ i18n, setError, setTab });
 
-  useEffect(() => {
-    if (!libraryNotice || libraryImporting) return;
-    const timer = window.setTimeout(() => setLibraryNotice(null), 5000);
-    return () => window.clearTimeout(timer);
-  }, [libraryNotice, libraryImporting]);
-
-  const refreshLibrary = useCallback(async () => {
-    try {
-      const list = await listLibrary();
-      setLibrary(list);
-      libraryRef.current = list;
-    } catch {
-      /* backend not ready */
-    }
-  }, []);
+  const pathInLibrary = useCallback((path: string) => {
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+    const n = norm(path);
+    return libraryRef.current.some((e) => {
+      const ep = norm(e.path);
+      // 全等，或互为祖先/后代（按路径段边界，避免 /Users/a/X 误匹配 /Volumes/b/X）
+      return ep === n || ep.startsWith(n + "/") || n.startsWith(ep + "/");
+    });
+  }, [libraryRef]);
 
   const closeReader = useCallback(() => {
     const session = readerSessionRef.current;
@@ -297,49 +221,6 @@ export default function App() {
     }
     setImportPrompt({ path, title: session.title || titleFromPath(path) });
   }, [finishCloseReader, pathInLibrary, refreshLibrary]);
-
-  const ingestPath = useCallback(
-    async (path: string): Promise<LibraryEntry | null> => {
-      setError(null);
-      setLibraryImporting(true);
-      setLibraryImportProgress(null);
-      await yieldToPaint();
-      try {
-        const before = findLibraryByPath(libraryRef.current, path);
-        const entry = await addLibraryPath(path);
-        await refreshLibrary();
-        setLibraryNotice(noticeForUpsert(i18n, before, entry));
-        return entry;
-      } catch {
-        try {
-          setLibraryScan(true);
-          const preview = await previewLibraryScan(path);
-          setScanPreview(preview);
-          setTab("library");
-        } catch (e) {
-          setError(errMsg(e));
-        } finally {
-          setLibraryScan(false);
-        }
-        return null;
-      } finally {
-        setLibraryImporting(false);
-      }
-    },
-    [i18n, refreshLibrary],
-  );
-
-  const refreshJobs = useCallback(async () => {
-    try {
-      const list = await listJobs();
-      // 浅比较：无变化时不触发 setState，避免空闲状态 1.5s 一次全量重渲染
-      setJobs((prev) => (jobsEqual(prev, list) ? prev : list));
-    } catch {
-      /* backend not ready */
-    }
-  }, []);
-
-  const jobsActive = jobs.some((j) => ACTIVE_JOB_STATES.includes(j.state));
 
   const refreshDoctor = useCallback(async () => {
     try {
@@ -396,38 +277,7 @@ export default function App() {
     };
   }, [openExternalPath]);
 
-  // 监控目录：进入应用时轻量自动扫描并导入新书
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const { watchFolders } = loadImportSettings();
-      if (watchFolders.length === 0) return;
-      for (const root of watchFolders) {
-        if (cancelled) return;
-        try {
-          const preview = await previewLibraryScan(root);
-          const fresh = preview.candidates
-            .filter((c) => !c.alreadyInLibrary)
-            .map((c) => c.path);
-          if (fresh.length === 0) continue;
-          const r = await importLibraryPaths(fresh);
-          if (!cancelled && r.added > 0) {
-            setLibraryNotice(r.message);
-            await refreshLibrary();
-          }
-        } catch {
-          /* watch is best-effort */
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshLibrary]);
-
-  useEffect(() => {
-    refreshLibrary();
-    refreshJobs();
     getEngineStatus()
       .then(setEngine)
       .catch(() =>
@@ -441,16 +291,13 @@ export default function App() {
     listEngines()
       .then((c) => {
         setCatalog(c);
-        const savedRaw = localStorage.getItem("comic.engine");
-        const saved =
-          savedRaw === "realcugan" || savedRaw === "waifu2x" ? savedRaw : null;
-        const savedModel = localStorage.getItem("comic.cuganModel");
+        const saved = migrateBatchEngineId(localStorage.getItem("comic.engine"));
         const batch = c.filter(
-          (e) => e.id === "realcugan" || e.id === "waifu2x",
+          (e) => e.id === "realcugan-coreml" || e.id === "waifu2x-coreml",
         );
         const pick =
           batch.find((e) => e.id === saved && e.available) ??
-          batch.find((e) => e.id === "realcugan" && e.available) ??
+          batch.find((e) => e.id === "realcugan-coreml" && e.available) ??
           batch.find((e) => e.available) ??
           batch[0];
         if (pick) {
@@ -462,31 +309,10 @@ export default function App() {
             }
           }
           setEngineId(pick.id);
-          const mid =
-            savedModel && pick.models.some((m) => m.id === savedModel)
-              ? savedModel
-              : pick.models.find((m) => m.id === "nose")?.id ??
-                pick.models[0]?.id ??
-                "nose";
-          setCuganModel(mid);
         }
       })
       .catch(() => undefined);
-    const timer = setInterval(
-      refreshJobs,
-      jobsActive ? 1500 : 15000, // 空闲时低频兜底轮询
-    );
-    let unlisten: (() => void) | undefined;
-    onJobProgress(() => {
-      refreshJobs();
-    }).then((u) => {
-      unlisten = u;
-    });
-    return () => {
-      clearInterval(timer);
-      unlisten?.();
-    };
-  }, [refreshJobs, refreshLibrary, jobsActive]);
+  }, []);
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -710,36 +536,13 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      const scales = info?.scales ?? [1, 2];
+      const scales = info?.scales ?? [2];
       setScale((prev) =>
         scales.includes(prev) ? prev : scales.includes(2) ? 2 : scales[0] ?? 2,
       );
-      if (id === "realcugan") {
-        const mid =
-          info?.models.find((m) => m.id === "nose")?.id ??
-          info?.models[0]?.id ??
-          "nose";
-        const keep = info?.models.some((m) => m.id === cuganModel);
-        const next = keep ? cuganModel : mid;
-        setCuganModel(next);
-        try {
-          localStorage.setItem("comic.cuganModel", next);
-        } catch {
-          /* ignore */
-        }
-      }
     },
-    [catalog, cuganModel],
+    [catalog],
   );
-
-  const onCuganModelChange = useCallback((id: string) => {
-    setCuganModel(id);
-    try {
-      localStorage.setItem("comic.cuganModel", id);
-    } catch {
-      /* ignore */
-    }
-  }, []);
 
   const openSourceReader = useCallback(() => {
     if (!source) return;
@@ -822,96 +625,6 @@ export default function App() {
   ];
   const runningJobCount = jobs.filter((j) => canShowCancel(j.state)).length;
 
-  const onLibAddFile = useCallback(async () => {
-    const paths = await pickComicFiles();
-    if (paths.length === 0) return;
-    setLibraryImporting(true);
-    setLibraryImportProgress({ done: 0, total: paths.length });
-    setError(null);
-    await yieldToPaint();
-    try {
-      let done = 0;
-      let lastNotice: string | null = null;
-      const prior = libraryRef.current;
-      for (const p of paths) {
-        try {
-          const before = findLibraryByPath(prior, p);
-          const entry = await addLibraryPath(p);
-          lastNotice = noticeForUpsert(i18n, before, entry);
-        } catch {
-          /* single fail continues */
-        }
-        done += 1;
-        setLibraryImportProgress({ done, total: paths.length });
-      }
-      await refreshLibrary();
-      setLibraryNotice(paths.length === 1 ? lastNotice : `已处理 ${paths.length} 个文件`);
-    } catch (e) {
-      setError(errMsg(e));
-    } finally {
-      setLibraryImporting(false);
-      setLibraryImportProgress(null);
-    }
-  }, [i18n, refreshLibrary]);
-
-  const onLibAddFolder = useCallback(async () => {
-    const p = await pickFolder();
-    if (p) await ingestPath(p);
-  }, [ingestPath]);
-
-  const onLibScan = useCallback(
-    async (opts?: { addToWatch?: boolean }) => {
-      const p = await pickFolder();
-      if (!p) return;
-      if (opts?.addToWatch) {
-        const settings = loadImportSettings();
-        if (!settings.watchFolders.includes(p)) {
-          saveImportSettings({ ...settings, watchFolders: [...settings.watchFolders, p] });
-        }
-      }
-      setLibraryScan(true);
-      setError(null);
-      try {
-        setScanPreview(await previewLibraryScan(p));
-      } catch (e) {
-        setError(errMsg(e));
-      } finally {
-        setLibraryScan(false);
-      }
-    },
-    [],
-  );
-
-  const onLibCancelScan = useCallback(() => setScanPreview(null), []);
-
-  const onLibConfirmScan = useCallback(
-    async (paths: string[]) => {
-      if (paths.length === 0) return;
-      setLibraryImporting(true);
-      setLibraryImportProgress({ done: 0, total: paths.length });
-      setError(null);
-      try {
-        const batch = 8;
-        let lastMsg = "";
-        for (let i = 0; i < paths.length; i += batch) {
-          const slice = paths.slice(i, i + batch);
-          const r = await importLibraryPaths(slice);
-          lastMsg = r.message;
-          setLibraryImportProgress({ done: Math.min(paths.length, i + slice.length), total: paths.length });
-        }
-        setLibraryNotice(lastMsg || `已导入 ${paths.length} 本`);
-        setScanPreview(null);
-        await refreshLibrary();
-      } catch (e) {
-        setError(errMsg(e));
-      } finally {
-        setLibraryImporting(false);
-        setLibraryImportProgress(null);
-      }
-    },
-    [refreshLibrary],
-  );
-
   const onLibOpen = useCallback(
     (e: LibraryEntry) => {
       if (e.missing) return;
@@ -933,15 +646,6 @@ export default function App() {
       setTab("enhance");
     },
     [applySource],
-  );
-
-  const onLibRemove = useCallback(
-    (e: LibraryEntry) => {
-      void removeLibraryEntry(e.id)
-        .then(refreshLibrary)
-        .catch((err) => setError(errMsg(err)));
-    },
-    [refreshLibrary],
   );
 
   const onExternalImportAdd = useCallback(async () => {
@@ -1218,7 +922,6 @@ export default function App() {
             catalog={catalog}
             scale={scale}
             noise={noise}
-            tta={tta}
             engine={engine}
             busy={busy}
             activeJob={activeSourceJob}
@@ -1231,10 +934,8 @@ export default function App() {
             onOpenReader={openSourceReader}
             onPresetChange={onPresetChange}
             onEngineChange={onEngineChange}
-            onCuganModelChange={onCuganModelChange}
             onScaleChange={setScale}
             onNoiseChange={setNoise}
-            onTtaChange={setTta}
             onContainerChange={setContainer}
             onImageFormatChange={setImageFormat}
             onStart={start}

@@ -16,15 +16,37 @@ type EngineCard = {
 
 function engineCards(i18n: Messages, catalog: EngineInfo[]): EngineCard[] {
   const list = catalog.length
-    ? catalog.filter((e) => e.id === "realcugan" || e.id === "waifu2x")
+    ? catalog.filter((e) => e.id === "realcugan-coreml" || e.id === "waifu2x-coreml")
     : [
-        { id: "realcugan", label: i18n.engineCugan, available: true, detail: "", scales: [1, 2, 3, 4], models: [] },
-        { id: "waifu2x", label: i18n.engineWaifu2x, available: true, detail: "", scales: [1, 2], models: [] },
+        {
+          id: "realcugan-coreml",
+          label: i18n.engineCugan,
+          available: true,
+          detail: "",
+          scales: [2],
+          models: [],
+        },
+        {
+          id: "waifu2x-coreml",
+          label: i18n.engineWaifu2x,
+          available: true,
+          detail: "",
+          scales: [2],
+          models: [],
+        },
       ];
   return list.map((e) => ({
     id: e.id,
-    name: e.id === "realcugan" ? "Real-CUGAN" : e.id === "waifu2x" ? "Waifu2x" : e.label,
-    desc: e.id === "realcugan" ? i18n.engineCuganTag : i18n.engineWaifuTag,
+    name:
+      e.id === "realcugan-coreml" || e.id === "realcugan"
+        ? "Real-CUGAN"
+        : e.id === "waifu2x-coreml" || e.id === "waifu2x"
+          ? "Waifu2x"
+          : e.label,
+    desc:
+      e.id === "realcugan-coreml" || e.id === "realcugan"
+        ? i18n.engineCuganTag
+        : i18n.engineWaifuTag,
     maxScale: e.scales.length ? Math.max(...e.scales) : 2,
     available: e.available,
     detail: e.detail,

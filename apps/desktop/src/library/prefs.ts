@@ -1,5 +1,5 @@
 export type LibrarySort = "recent" | "added" | "title" | "progress";
-export type LibraryFilter = "all" | "reading" | "unread" | "missing";
+export type LibraryFilter = "all" | "reading" | "unread" | "finished" | "missing";
 export type LibraryViewMode = "grid" | "list";
 
 export type LibraryImportSettings = {
@@ -57,7 +57,15 @@ export function saveLibrarySort(v: LibrarySort) {
 export function loadLibraryFilter(): LibraryFilter {
   try {
     const v = localStorage.getItem(FILTER_KEY);
-    if (v === "all" || v === "reading" || v === "unread" || v === "missing") return v;
+    if (
+      v === "all" ||
+      v === "reading" ||
+      v === "unread" ||
+      v === "finished" ||
+      v === "missing"
+    ) {
+      return v;
+    }
   } catch {
     /* ignore */
   }

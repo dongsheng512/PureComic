@@ -39,7 +39,6 @@ export type EnhanceViewProps = {
   catalog: EngineInfo[];
   scale: number;
   noise: -1 | 0 | 1 | 2 | 3;
-  tta: boolean;
   engine: EngineStatus | null;
   busy: boolean;
   activeJob: JobStatus | null;
@@ -54,10 +53,8 @@ export type EnhanceViewProps = {
   onOpenReader: () => void;
   onPresetChange: (p: Preset) => void;
   onEngineChange: (id: string) => void;
-  onCuganModelChange: (id: string) => void;
   onScaleChange: (s: number) => void;
   onNoiseChange: (n: -1 | 0 | 1 | 2 | 3) => void;
-  onTtaChange: (v: boolean) => void;
   onContainerChange: (c: Container) => void;
   onImageFormatChange: (f: ImgFmt) => void;
   onStart: () => void;
@@ -72,7 +69,7 @@ export type EnhanceViewProps = {
 export function EnhanceView(props: EnhanceViewProps) {
   const { i18n } = props;
   const scales =
-    props.catalog.find((e) => e.id === props.engineId)?.scales ?? [1, 2];
+    props.catalog.find((e) => e.id === props.engineId)?.scales ?? [2];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -130,13 +127,8 @@ export function EnhanceView(props: EnhanceViewProps) {
             <AdvancedEnhanceSettings
               i18n={i18n}
               engineId={props.engineId}
-              catalog={props.catalog}
-              cuganModel={props.cuganModel}
               noise={props.noise}
-              tta={props.tta}
-              onCuganModelChange={props.onCuganModelChange}
               onNoiseChange={props.onNoiseChange}
-              onTtaChange={props.onTtaChange}
             />
           </div>
         </section>

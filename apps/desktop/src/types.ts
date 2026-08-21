@@ -126,6 +126,8 @@ export type LibraryScanCandidate = {
 
 export type LibraryScanPreview = {
   root: string;
+  /** true = 命中访问/候选上限被截断，结果可能不完整 */
+  truncated: boolean;
   candidates: LibraryScanCandidate[];
 };
 

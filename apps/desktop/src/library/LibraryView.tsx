@@ -74,6 +74,29 @@ function kindLabel(kind: string): string {
   }
 }
 
+/**
+ * 标题清洗：「[谷围南亭]001-005」→ 主标题「谷围南亭 001-005」。
+ * 只剥离首个成对括号组并拼接余部；无括号则原样返回。
+ */
+function splitTitle(title: string): string {
+  const m = title.trim().match(/^\s*[[【(（]\s*([^\]】)）]*)\s*[\]】)）]\s*(.*)$/);
+  if (m && m[1].trim()) {
+    const rest = m[2].trim();
+    return rest ? `${m[1].trim()} ${rest}` : m[1].trim();
+  }
+  return title.trim();
+}
+
+/** 已增强：有导出产物，或增强状态非初始值 */
+function isEnhanced(e: LibraryEntry): boolean {
+  return Boolean(e.outputPath) || !["", "none"].includes(e.enhanceState || "");
+}
+
+/** 已读完：读过且页码到达末页（pageIndex 为 0 基） */
+function isFinished(e: LibraryEntry, page: number): boolean {
+  return page > 0 && e.pageCount > 0 && page >= e.pageCount - 1;
+}
+
 function LibraryView({
   entries,
   dragOver,
@@ -206,9 +229,11 @@ function LibraryView({
       list = list.filter((e) => e.title.toLowerCase().includes(q) || e.path.toLowerCase().includes(q));
     }
     if (filter === "reading") {
-      list = list.filter((e) => progressOf(e) > 0 && !e.missing);
+      list = list.filter((e) => progressOf(e) > 0 && !isFinished(e, progressOf(e)) && !e.missing);
     } else if (filter === "unread") {
       list = list.filter((e) => progressOf(e) <= 0 && !e.missing);
+    } else if (filter === "finished") {
+      list = list.filter((e) => isFinished(e, progressOf(e)) && !e.missing);
     } else if (filter === "missing") {
       list = list.filter((e) => e.missing);
     }
@@ -440,6 +465,7 @@ function LibraryView({
                 { id: "all" as const, label: i18n.libraryFilterAll },
                 { id: "reading" as const, label: i18n.libraryFilterReading },
                 { id: "unread" as const, label: i18n.libraryFilterUnread },
+                { id: "finished" as const, label: i18n.libraryFinished },
               ] as const
             ).map((f) => (
               <button
@@ -550,13 +576,18 @@ function LibraryView({
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-ink-900 dark:text-fg">{e.title}</p>
+                      <p className="truncate text-sm font-medium text-ink-900 dark:text-fg" title={e.title}>
+                        {splitTitle(e.title)}
+                      </p>
                       <p className="truncate text-[11px] text-ink-500 dark:text-fg-muted">
-                        {kindLabel(e.kind)}
+                        <span className="lib-badge">{kindLabel(e.kind)}</span>
                         {e.pageCount > 0 ? ` · ${e.pageCount} ${i18n.libraryPages}` : ""}
-                        {page > 0 ? ` · ${page + 1}` : ""}
+                        {page > 0 ? ` · ${page + 1}/${e.pageCount || "?"}` : ""}
                         {e.missing ? ` · ${i18n.libraryMissing}` : ""}
                       </p>
+                      {page > 0 && !e.missing && e.pageCount > 0 && (
+                        <ProgressBar value={page} total={e.pageCount} />
+                      )}
                     </div>
                   </button>
                   <button type="button" className="btn-card-enhance !opacity-100" disabled={e.missing} onClick={() => onEnhance(e)}>
@@ -607,23 +638,28 @@ function LibraryView({
                         <div className="grid h-full place-items-center text-[10px] text-ink-400">{kindLabel(e.kind)}</div>
                       )}
                       <div className="cover-scrim">
-                        <p className="truncate text-[11px] font-medium leading-tight text-ink-900 dark:text-fg" title={e.path}>
-                          {e.title}
+                        <p className="truncate text-[11px] font-medium leading-tight text-ink-900 dark:text-fg" title={e.title}>
+                          {splitTitle(e.title)}
                         </p>
                         <p className="truncate text-[9px] leading-tight text-ink-500 dark:text-fg-muted">
-                          {kindLabel(e.kind)}
+                          <span className="lib-badge">{kindLabel(e.kind)}</span>
+                          {isEnhanced(e) && <span className="lib-badge lib-badge-enhanced">{i18n.libraryEnhancedBadge}</span>}
                           {e.pageCount > 0 ? ` · ${e.pageCount} ${i18n.libraryPages}` : ""}
-                          {page > 0 ? ` · ${page + 1}` : ""}
+                          {page > 0 ? ` · ${page + 1}/${e.pageCount || "?"}` : ""}
                           {e.missing ? ` · ${i18n.libraryMissing}` : ""}
                         </p>
+                        {page > 0 && !e.missing && e.pageCount > 0 && (
+                          <ProgressBar value={page} total={e.pageCount} />
+                        )}
                       </div>
                     </div>
                   </button>
-                  <div className="card-action-scrim" aria-hidden="true" />
+                  {/* 悬浮操作：左上角黑玻璃组，hover 展开 */}
                   <div className="card-action-bar">
                     <button
                       type="button"
                       className="btn-card-enhance"
+                      title={i18n.libraryEnhance}
                       disabled={e.missing}
                       onClick={(ev) => {
                         ev.stopPropagation();
@@ -637,6 +673,7 @@ function LibraryView({
                       className="btn-card-remove"
                       title={i18n.libraryRemoveHint}
                       aria-label={i18n.libraryRemove}
+                      disabled={e.missing}
                       onClick={(ev) => {
                         ev.stopPropagation();
                         onRemove(e);
@@ -671,6 +708,16 @@ function LibraryView({
           {addTip.text}
         </div>
       )}
+    </div>
+  );
+}
+
+/** 细进度条：value 为 0 基已读页 */
+function ProgressBar({ value, total }: { value: number; total: number }) {
+  const pct = total > 0 ? Math.min(100, Math.max(0, Math.round(((value + 1) / total) * 100))) : 0;
+  return (
+    <div className="lib-progress" aria-hidden="true">
+      <div className="lib-progress-fill" style={{ width: `${pct}%` }} />
     </div>
   );
 }

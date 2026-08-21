@@ -1,54 +1,39 @@
 import { useState } from "react";
 import type { Messages } from "../i18n";
-import type { EngineInfo } from "../types";
-import { Field, Segmented, SelectBox } from "./controls";
+import { Field, SelectBox } from "./controls";
 
 type Props = {
   i18n: Messages;
   engineId: string;
-  catalog: EngineInfo[];
-  cuganModel: string;
   noise: -1 | 0 | 1 | 2 | 3;
-  tta: boolean;
-  onCuganModelChange: (id: string) => void;
   onNoiseChange: (n: -1 | 0 | 1 | 2 | 3) => void;
-  onTtaChange: (v: boolean) => void;
 };
 
-/** 高级设置：CUGAN 模型 / 降噪 / TTA，默认折叠，不干扰主路径 */
+/** 高级设置：降噪，默认折叠 */
 export function AdvancedEnhanceSettings({
   i18n,
   engineId,
-  catalog,
-  cuganModel,
   noise,
-  tta,
-  onCuganModelChange,
   onNoiseChange,
-  onTtaChange,
 }: Props) {
   const [open, setOpen] = useState(false);
-  const isCugan = engineId === "realcugan";
-  const models =
-    catalog.find((e) => e.id === engineId)?.models ??
-    (isCugan ? [{ id: "se", label: "SE" }] : [{ id: "cunet", label: "CUnet" }]);
-  const noiseOptions = [
-    { id: "-1", label: isCugan ? i18n.noiseConservative : i18n.noiseOff },
-    { id: "0", label: i18n.noise0 },
-    { id: "1", label: i18n.noise1 },
-    { id: "2", label: i18n.noise2 },
-    { id: "3", label: i18n.noise3 },
-  ];
-  // 折叠时展示当前高级参数摘要，免展开即可确认
+  const isCugan = engineId === "realcugan-coreml" || engineId === "realcugan";
+  const noiseOptions = isCugan
+    ? [
+        { id: "0", label: i18n.noiseConservative },
+        { id: "1", label: i18n.noise1 },
+        { id: "2", label: i18n.noise2 },
+        { id: "3", label: i18n.noise3 },
+      ]
+    : [
+        { id: "0", label: i18n.noise0 },
+        { id: "1", label: i18n.noise1 },
+        { id: "2", label: i18n.noise2 },
+        { id: "3", label: i18n.noise3 },
+      ];
   const noiseLabel = noiseOptions.find((o) => o.id === String(noise))?.label ?? "";
   const summaryParts: string[] = [];
-  if (isCugan) {
-    summaryParts.push(
-      models.find((m) => m.id === cuganModel)?.label ?? cuganModel.toUpperCase(),
-    );
-  }
   if (noiseLabel) summaryParts.push(`${i18n.noise} ${noiseLabel}`);
-  summaryParts.push(`TTA ${tta ? i18n.ttaOn : i18n.ttaOff}`);
 
   return (
     <div className="rounded-xl border border-ink-200 dark:border-white/[0.08]">
@@ -77,33 +62,14 @@ export function AdvancedEnhanceSettings({
       </button>
       {open && (
         <div className="space-y-4 border-t border-ink-200 px-3.5 py-4 dark:border-white/[0.08]">
-          {isCugan && (
-            <Field label={i18n.cuganPack} hint={i18n.cuganPackHint}>
-              <Segmented
-                value={cuganModel}
-                onChange={onCuganModelChange}
-                options={models.map((m) => ({ id: m.id, label: m.label }))}
-              />
-            </Field>
-          )}
           <Field
             label={i18n.noise}
             hint={isCugan ? i18n.noiseHintCugan : i18n.noiseHint}
           >
             <SelectBox
-              value={String(noise)}
+              value={String(noise < 0 ? 0 : noise)}
               onChange={(v) => onNoiseChange(Number(v) as -1 | 0 | 1 | 2 | 3)}
               options={noiseOptions}
-            />
-          </Field>
-          <Field label={i18n.tta} hint={i18n.ttaCostHint}>
-            <Segmented
-              value={tta ? "on" : "off"}
-              onChange={(v) => onTtaChange(v === "on")}
-              options={[
-                { id: "off", label: i18n.ttaOff },
-                { id: "on", label: i18n.ttaOn },
-              ]}
             />
           </Field>
         </div>

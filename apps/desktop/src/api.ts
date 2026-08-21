@@ -27,6 +27,55 @@ import type {
  * Always pass camelCase keys from the frontend (jobId, pageIndex, outDir, …).
  */
 
+/** 后端 AppError 的 IPC 形态（error.rs 派生 Serialize） */
+export type AppIpcError = { code: string; message: string; detail?: string };
+
+const CANCELLED_TEXT = "任务已取消";
+
+/**
+ * 归一化 invoke 错误。兼容三种形态：
+ * 1. 后端序列化的 `{code,message,detail}` 对象（当前）
+ * 2. 包装层把对象塞进 `{message: "<json 字符串>"}`（迁移期）
+ * 3. 纯字符串
+ */
+export function asAppError(e: unknown): AppIpcError {
+  if (e && typeof e === "object") {
+    const o = e as Record<string, unknown>;
+    if (typeof o.code === "string" && typeof o.message === "string") {
+      return {
+        code: o.code,
+        message: o.message,
+        ...(typeof o.detail === "string" ? { detail: o.detail } : {}),
+      };
+    }
+    if (typeof o.message === "string") {
+      try {
+        const p = JSON.parse(o.message) as Record<string, unknown>;
+        if (p && typeof p.code === "string" && typeof p.message === "string") {
+          return {
+            code: p.code,
+            message: p.message,
+            ...(typeof p.detail === "string" ? { detail: p.detail } : {}),
+          };
+        }
+      } catch {
+        /* plain text message */
+      }
+      return { code: "UNKNOWN", message: o.message };
+    }
+  }
+  return { code: "UNKNOWN", message: typeof e === "string" ? e : String(e) };
+}
+
+export function errorMessage(e: unknown): string {
+  return asAppError(e).message;
+}
+
+export function isCancelledError(e: unknown): boolean {
+  const err = asAppError(e);
+  return err.code === "CANCELLED" || err.message.startsWith(CANCELLED_TEXT);
+}
+
 export async function createJob(req: CreateJobRequest): Promise<CreateJobResult> {
   return invoke("create_job", { req });
 }

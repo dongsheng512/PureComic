@@ -97,10 +97,10 @@ export function prefHasExplicitView(source: string): boolean {
 const READER_ENGINE_KEY = "comic.reader.engine";
 
 /** 阅读器可用的引擎（仅用于类型收窄） */
-export type ReaderEngineId = "waifu2x-coreml" | "realesrgan-coreml";
+export type ReaderEngineId = "realcugan-coreml" | "waifu2x-coreml" | "realesrgan-coreml";
 
 export function isReaderEngine(id: string): id is ReaderEngineId {
-  return id === "waifu2x-coreml" || id === "realesrgan-coreml";
+  return id === "realcugan-coreml" || id === "waifu2x-coreml" || id === "realesrgan-coreml";
 }
 
 export function loadReaderEngine(): ReaderEngineId {
@@ -113,7 +113,7 @@ export function loadReaderEngine(): ReaderEngineId {
   } catch {
     /* ignore */
   }
-  return "waifu2x-coreml";
+  return "realcugan-coreml";
 }
 
 export function saveReaderEngine(engineId: ReaderEngineId) {
@@ -133,7 +133,7 @@ export function loadEnhanceNoise(): 0 | 1 | 2 | 3 {
   } catch {
     /* ignore */
   }
-  return 3;
+  return 0;
 }
 
 export function saveEnhanceNoise(noise: 0 | 1 | 2 | 3) {

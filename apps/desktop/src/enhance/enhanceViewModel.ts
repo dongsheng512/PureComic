@@ -71,6 +71,20 @@ export type AccelInfo = {
   gpu: boolean;
 };
 
+export const BATCH_ENGINE_IDS = ["realcugan-coreml", "waifu2x-coreml"] as const;
+
+export function isBatchEngineId(id: string): boolean {
+  return id === "realcugan-coreml" || id === "waifu2x-coreml";
+}
+
+/** 旧 Vulkan id 迁到 Core ML；无法识别则返回 null */
+export function migrateBatchEngineId(raw: string | null): string | null {
+  if (!raw) return null;
+  if (raw === "realcugan" || raw === "realcugan-coreml") return "realcugan-coreml";
+  if (raw === "waifu2x" || raw === "waifu2x-coreml") return "waifu2x-coreml";
+  return isBatchEngineId(raw) ? raw : null;
+}
+
 /** 把后端 detail 长文本拆成徽章 + 详情需要的结构化字段 */
 export function parseAccelInfo(
   catalog: EngineInfo[],
@@ -89,23 +103,21 @@ export function parseAccelInfo(
       : "";
   const ready = selected ? selected.available : (fallback?.available ?? false);
   const engineLabel =
-    engineId === "realcugan"
+    engineId === "realcugan-coreml" || engineId === "realcugan"
       ? "Real-CUGAN"
-      : engineId === "waifu2x"
+      : engineId === "waifu2x-coreml" || engineId === "waifu2x"
         ? "Waifu2x"
         : (selected?.label ?? engineId);
   const binary =
-    engineId === "realcugan"
-      ? "realcugan-ncnn-vulkan"
-      : engineId === "waifu2x"
-        ? "waifu2x-ncnn-vulkan"
+    engineId === "realcugan-coreml" || engineId === "realcugan"
+      ? "Real-CUGAN Core ML"
+      : engineId === "waifu2x-coreml" || engineId === "waifu2x"
+        ? "Waifu2x Core ML"
         : engineId;
-  const modelLabel =
-    engineId === "realcugan"
-      ? cuganModel.toUpperCase()
-      : (selected?.models[0]?.label ?? "");
+  const modelLabel = selected?.models.find((m) => m.id === cuganModel)?.label ?? selected?.models[0]?.label ?? "";
   const gpu =
-    ready && (engineId === "realcugan" || engineId === "waifu2x" || /vulkan|metal|gpu/i.test(blob));
+    ready &&
+    (engineId.includes("coreml") || /core ml|ane|metal|gpu|vulkan/i.test(blob));
   return {
     ready,
     engineLabel,
