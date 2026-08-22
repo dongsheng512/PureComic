@@ -557,10 +557,32 @@ html.dark {
 /* AI 开关连体胶囊 [✨|▾]:左=增强开关,发丝线分隔,右=快速设置。
    关 = 幽灵灰;开 = 淡蓝实心填充 + 白图标(方案 A);
    忙 = 外圈 conic 进度环(纯 transform 旋转,替代旧 box-shadow 呼吸)。 */
-/* AI 快速设置弹层:固定宽度,窄窗口不越出左缘 */
+/* AI 快速设置弹层:分区自带留白,覆盖菜单默认 py-1 */
 .reader-menu-ai {
-  @apply w-[248px];
+  display: flex;
+  flex-direction: column;
+  width: 260px;
   max-width: calc(100vw - 16px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* 弹层分区通用:水平留白与底部发丝线 */
+.reader-menu-ai > * {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.ai-section {
+  @apply px-3.5 py-2.5;
+}
+
+.ai-section + .ai-section {
+  border-top: 1px solid var(--hairline-light, rgba(0, 0, 0, 0.07));
+}
+
+html.dark .ai-section + .ai-section {
+  border-top-color: rgba(255, 255, 255, 0.07);
 }
 
 .reader-ai-capsule {
@@ -696,7 +718,7 @@ html.dark .ai-seg-thumb {
 }
 
 .ai-engine-item {
-  @apply flex min-h-8 w-full items-center justify-between gap-2 rounded-[7px] px-2 text-left transition;
+  @apply flex min-h-9 w-full items-center justify-between gap-2 rounded-[7px] px-2.5 text-left transition;
   color: var(--ink-muted);
   cursor: pointer;
 }
@@ -861,8 +883,10 @@ html.dark .reader-range::-webkit-slider-thumb {
 
 /* 清除缓存：次级文本 → 悬停红 → 行内二次确认（红） */
 .ai-clear-btn {
-  @apply mt-2 inline-flex items-center gap-1.5 text-[11px] text-ink-500 transition
-    hover:text-red-600 dark:text-fg-muted dark:hover:text-red-400;
+  @apply flex w-full items-center justify-center gap-1.5 rounded-lg border border-ink-200 py-1.5 text-[11px]
+    text-ink-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600
+    dark:border-white/[0.08] dark:text-fg-muted dark:hover:border-red-500/30 dark:hover:bg-red-500/10
+    dark:hover:text-red-400;
 }
 
 .ai-clear-btn.is-confirm {

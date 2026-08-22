@@ -130,9 +130,9 @@ function AiEnginePanel(p: {
 }) {
   return (
     <>
-      <div>
+      <div className="ai-section">
         <p className="ai-block-title">{p.i18n.engine}</p>
-        <div className="ai-engine-list" role="radiogroup" aria-label={p.i18n.engine}>
+        <div className="ai-engine-list mt-2" role="radiogroup" aria-label={p.i18n.engine}>
           {p.engineOptions.map((eng) => (
             <button
               key={eng.id}
@@ -156,9 +156,9 @@ function AiEnginePanel(p: {
           ))}
         </div>
       </div>
-      <div>
+      <div className="ai-section">
         <p className="ai-block-title">{p.i18n.readerNoiseLevel}</p>
-        <div className="ai-seg ai-seg-sm mt-1.5" role="radiogroup" aria-label={p.i18n.readerNoiseLevel}>
+        <div className="ai-seg ai-seg-sm mt-2" role="radiogroup" aria-label={p.i18n.readerNoiseLevel}>
           <span
             className="ai-seg-thumb"
             aria-hidden="true"
@@ -189,7 +189,7 @@ function AiEnginePanel(p: {
         </div>
       </div>
       {p.handleClearClick && (
-        <div className="mt-3">
+        <div className="ai-section">
           <p className="ai-block-title">{p.i18n.readerAiCache}</p>
           <div className="mt-1.5 flex items-baseline justify-between gap-2">
             <span className="text-[12px] text-ink-500 dark:text-fg-muted">
@@ -199,12 +199,12 @@ function AiEnginePanel(p: {
               {p.cacheLine}
             </span>
           </div>
-          <div className="reader-cache-bar mt-1.5" aria-hidden="true">
+          <div className="reader-cache-bar mt-2" aria-hidden="true">
             <span style={{ width: `${p.cachePct ?? 0}%` }} />
           </div>
           <button
             type="button"
-            className={`ai-clear-btn ${p.clearConfirming ? "is-confirm" : ""}`}
+            className={`ai-clear-btn mt-2.5 ${p.clearConfirming ? "is-confirm" : ""}`}
             onClick={() => p.handleClearClick?.()}
           >
             {p.clearingCache ? (
@@ -627,8 +627,8 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                       role="menu"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <div className="flex items-center justify-between px-3 pb-1 pt-2.5">
-                        <span className="text-[11px] font-medium text-ink-800 dark:text-fg">
+                      <div className="ai-section flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-ink-800 dark:text-fg">
                           {i18n.readerAiLabel}
                         </span>
                         <span
