@@ -121,6 +121,14 @@ export function IconShowBar() {
   );
 }
 
+export function IconChevronDown() {
+  return (
+    <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" aria-hidden="true">
+      <path d="m5.5 8 4.5 4.5L14.5 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function IconMore() {
   return (
     <svg viewBox="0 0 20 20" className={iconClass()} fill="currentColor" aria-hidden="true">

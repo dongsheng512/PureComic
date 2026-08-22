@@ -77,6 +77,7 @@
   "readerAiBusy": "优化中...",
   "readerAiOn": "AI画质",
   "readerAiLabel": "AI 画质",
+  "readerAiOff": "未开启",
   "readerAiModel": "增强模型",
   "readerAiCache": "AI 缓存",
   "readerAiCacheLabel": "已增强缓存",

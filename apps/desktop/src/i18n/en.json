@@ -77,6 +77,7 @@
   "readerAiBusy": "Enhancing…",
   "readerAiOn": "AI quality",
   "readerAiLabel": "AI Quality",
+  "readerAiOff": "Off",
   "readerAiModel": "Enhance model",
   "readerAiCache": "AI cache",
   "readerAiCacheLabel": "Enhanced cache",

@@ -543,67 +543,136 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
 
 /* —— AI 画质：与旁边阅读模式组同高、同层级 —— */
 :root {
-  --ai-accent: #128a64;
-  --ai-accent-soft: rgba(18, 138, 100, 0.16);
+  --ai-accent: #4da3ff;
+  --ai-accent-soft: rgba(77, 163, 255, 0.16);
   --ai-dot-halo: rgba(245, 245, 246, 0.95);
 }
 html.dark {
-  --ai-accent: #21ad7f;
-  --ai-accent-soft: rgba(33, 173, 127, 0.2);
+  --ai-accent: #5aabff;
+  --ai-accent-soft: rgba(90, 171, 255, 0.22);
   --ai-dot-halo: rgba(22, 23, 28, 0.95);
 }
 
 /* 默认使用与 reader-seg 相同的浅灰底，避免白色按钮显得发虚 */
-.reader-ai-trigger {
-  @apply relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent
-    text-ink-700 transition dark:bg-white/[0.06] dark:text-fg-muted;
-  background: rgba(0, 0, 0, 0.08);
-  box-shadow: none;
+/* AI 开关连体胶囊 [✨|▾]:左=增强开关,发丝线分隔,右=快速设置。
+   关 = 幽灵灰;开 = 淡蓝实心填充 + 白图标(方案 A);
+   忙 = 外圈 conic 进度环(纯 transform 旋转,替代旧 box-shadow 呼吸)。 */
+.reader-ai-capsule {
+  @apply relative inline-flex h-7 items-center rounded-full transition;
+  background: rgba(0, 0, 0, 0.06);
 }
 
-.reader-ai-trigger:hover:not(:disabled) {
-  @apply bg-black/[0.12] dark:bg-white/[0.1];
-  box-shadow: none;
+html.dark .reader-ai-capsule {
+  background: rgba(255, 255, 255, 0.07);
 }
 
-.reader-ai-trigger:active:not(:disabled) {
-  @apply bg-black/[0.16] dark:bg-white/[0.14];
-  box-shadow: none;
-}
-
-.reader-ai-trigger:disabled {
-  @apply pointer-events-none opacity-35;
-}
-
-.reader-ai-trigger.is-on {
-  color: var(--ai-accent);
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-
-.reader-ai-trigger.is-busy {
-  animation: reader-ai-glow 1.5s ease-in-out infinite;
-}
-
-@keyframes reader-ai-glow {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 var(--ai-accent-soft);
-  }
-  50% {
-    box-shadow: 0 0 0 5px transparent;
-  }
-}
-
-html.dark .reader-ai-trigger.is-on {
-  background: var(--surface-high);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
-}
-
-.reader-ai-dot {
-  @apply absolute bottom-px right-px h-[5px] w-[5px] rounded-full;
+.reader-ai-capsule.is-on {
   background: var(--ai-accent);
-  box-shadow: 0 0 0 2px var(--ai-dot-halo);
+  box-shadow: 0 1px 3px rgba(77, 163, 255, 0.4);
+}
+
+html.dark .reader-ai-capsule.is-on {
+  box-shadow: 0 1px 3px rgba(90, 171, 255, 0.3);
+}
+
+.reader-ai-capsule > button {
+  @apply relative z-10 inline-flex h-7 w-7 items-center justify-center transition;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+html.dark .reader-ai-capsule > button {
+  color: var(--fg-muted);
+}
+
+.reader-ai-capsule > button:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+html.dark .reader-ai-capsule > button:hover:not(:disabled) {
+  color: var(--ink-soft);
+}
+
+.reader-ai-capsule > button:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.reader-ai-capsule > button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(77, 163, 255, 0.45);
+  border-radius: 9999px;
+}
+
+.reader-ai-capsule.is-on > button,
+.reader-ai-capsule.is-on > button:hover:not(:disabled) {
+  color: #fff;
+}
+
+.reader-ai-trigger svg {
+  transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 点亮瞬间 sparkle 弹跳 */
+.reader-ai-capsule.is-on .reader-ai-trigger svg {
+  animation: reader-ai-pop 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes reader-ai-pop {
+  0% {
+    transform: scale(0.7);
+  }
+  60% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.reader-ai-capsule-sep {
+  @apply relative z-10 h-3.5 shrink-0;
+  width: 1px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.reader-ai-capsule.is-on .reader-ai-capsule-sep {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.reader-ai-more {
+  width: 20px !important;
+}
+
+.reader-ai-ring {
+  position: absolute;
+  inset: -3.5px;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0;
+  background: conic-gradient(
+    from 0deg,
+    var(--ai-accent) 0turn 0.25turn,
+    transparent 0.25turn
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  padding: 2px;
+}
+
+.reader-ai-capsule.is-busy .reader-ai-ring {
+  opacity: 0.9;
+  animation: reader-ai-spin 0.9s linear infinite;
+}
+
+@keyframes reader-ai-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* 区块标题：12pt secondary */
@@ -646,25 +715,56 @@ html.dark .ai-seg-thumb {
   border-radius: 7px;
 }
 
-/* 引擎分段：40pt 高，主标签 + 副标签 */
-.ai-seg-lg {
-  @apply h-10;
+/* 引擎切换：竖排列表（引擎名长短不一，横排分段宽度不足，改为上下排列） */
+.ai-engine-list {
+  @apply mt-1.5 flex flex-col gap-[2px] rounded-[9px] p-[2px];
+  background: rgba(120, 120, 128, 0.12);
 }
 
-.ai-seg-lg .ai-seg-thumb {
-  width: calc((100% / var(--ai-seg-n, 2)) - 2px);
+.ai-engine-item {
+  @apply flex min-h-8 w-full items-center justify-between gap-2 rounded-[7px] px-2 text-left transition;
+  color: var(--ink-muted);
+  cursor: pointer;
 }
 
-.ai-seg-lg .ai-seg-item {
-  @apply flex-col gap-px;
+.ai-engine-item:hover:not(.is-active) {
+  color: var(--ink);
+  background: rgba(120, 120, 128, 0.1);
 }
 
-.ai-seg-main {
-  @apply text-[13px] font-medium leading-tight;
+/* 选中行：白色浮起（同分段 thumb 质感），深色用 14% 白 */
+.ai-engine-item.is-active {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
 }
 
-.ai-seg-sub {
-  @apply text-[10px] leading-tight text-ink-500 dark:text-fg-muted;
+.ai-engine-item:focus-visible {
+  outline: 2px solid var(--ai-accent);
+  outline-offset: -2px;
+}
+
+html.dark .ai-engine-item {
+  color: var(--fg-muted);
+}
+
+html.dark .ai-engine-item:hover:not(.is-active) {
+  color: var(--ink-soft);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+html.dark .ai-engine-item.is-active {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--ink-soft);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.ai-engine-main {
+  @apply min-w-0 truncate text-[13px] font-medium leading-tight;
+}
+
+.ai-engine-sub {
+  @apply shrink-0 truncate text-[10px] leading-tight text-ink-500 dark:text-fg-muted;
 }
 
 /* 去噪分段：28pt 高，四等分单行 */

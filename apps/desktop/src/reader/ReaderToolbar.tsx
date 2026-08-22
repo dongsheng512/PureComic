@@ -1,9 +1,10 @@
-import type { CSSProperties, Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
 import { stateLabel, type Messages } from "../i18n";
 import type { EnhanceCacheStats, JobStatus, ReaderState } from "../types";
 import { setNativeWindowBg, startWindowDrag } from "../windowDrag";
 import {
   IconBack,
+  IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
   IconDoublePage,
@@ -77,9 +78,7 @@ export type ReaderToolbarProps = {
   showingAi: boolean;
   pageEnhancing: boolean;
   toggleAi: () => void;
-  enhanceOn: boolean;
   engineOptions: EngineOption[];
-  engineIndex: number;
   engineId: string;
   persistEngine: (id: string) => void;
   engineSwitchHint: boolean;
@@ -143,9 +142,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     sliderPage,
     showingAi,
     pageEnhancing,
-    enhanceOn,
     engineOptions,
-    engineIndex,
     engineId,
     engineSwitchHint,
     cacheStats,
@@ -165,6 +162,33 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     jobId,
     smartSessionKeyRef,
   } = p;
+
+  const [aiMenuOpen, setAiMenuOpen] = useState(false);
+  const aiRef = useRef<HTMLDivElement>(null);
+  const aiPopRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!aiMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (aiRef.current && !aiRef.current.contains(t)) setAiMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAiMenuOpen(false);
+    };
+    const timer = window.setTimeout(() => {
+      document.addEventListener("mousedown", onDoc);
+      document.addEventListener("keydown", onKey);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [aiMenuOpen]);
+
+  const aiEngineMain =
+    engineOptions.find((eng) => eng.id === engineId)?.main ?? engineId;
 
   const readingModeSeg = (
     <div className="reader-seg" role="group" aria-label={i18n.readerMode}>
@@ -447,20 +471,116 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
 
             <div className="relative z-20 ml-auto flex shrink-0 items-center gap-1 pointer-events-auto">
               {!barTiny && (
-                <div className="relative z-50">
-                  <button
-                    type="button"
-                    className={`reader-ai-trigger ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
-                    disabled={visibleIndexes.length === 0}
-                    aria-label={i18n.readerAiTooltip}
-                    onMouseEnter={(e) => showTip(e, i18n.readerAiTooltip)}
-                    onMouseLeave={hideTip}
-                    aria-pressed={showingAi}
-                    onClick={() => p.toggleAi()}
+                <div className="relative z-50" ref={aiRef}>
+                  <div
+                    className={`reader-ai-capsule ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
                   >
-                    <IconSparkles />
-                    {showingAi && <span className="reader-ai-dot" aria-hidden="true" />}
-                  </button>
+                    {pageEnhancing && <span className="reader-ai-ring" aria-hidden="true" />}
+                    <button
+                      type="button"
+                      className="reader-ai-trigger"
+                      disabled={visibleIndexes.length === 0}
+                      aria-label={i18n.readerAiTooltip}
+                      aria-pressed={showingAi}
+                      onMouseEnter={(e) => showTip(e, i18n.readerAiTooltip)}
+                      onMouseLeave={hideTip}
+                      onClick={() => p.toggleAi()}
+                    >
+                      <IconSparkles />
+                    </button>
+                    <span className="reader-ai-capsule-sep" aria-hidden="true" />
+                    <button
+                      type="button"
+                      className="reader-ai-more"
+                      disabled={visibleIndexes.length === 0}
+                      aria-label={i18n.engine}
+                      aria-expanded={aiMenuOpen}
+                      onMouseEnter={(e) => showTip(e, i18n.engine)}
+                      onMouseLeave={hideTip}
+                      onClick={() => setAiMenuOpen((v) => !v)}
+                    >
+                      <IconChevronDown />
+                    </button>
+                  </div>
+                  {aiMenuOpen && (
+                    <div
+                      ref={aiPopRef}
+                      className="reader-menu reader-menu-wide"
+                      role="menu"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center justify-between px-3 pb-1 pt-2.5">
+                        <span className="text-[11px] font-medium text-ink-800 dark:text-fg">
+                          {i18n.readerAiLabel}
+                        </span>
+                        <span
+                          className={`text-[10px] tabular-nums ${
+                            showingAi ? "" : "text-ink-400 dark:text-fg-muted"
+                          }`}
+                          style={showingAi ? { color: "var(--ai-accent)" } : undefined}
+                        >
+                          {showingAi ? aiEngineMain : i18n.readerAiOff}
+                        </span>
+                      </div>
+                      <p className="ai-block-title px-3">{i18n.engine}</p>
+                      <div className="ai-engine-list mx-1 mt-1 mb-1" role="radiogroup" aria-label={i18n.engine}>
+                        {engineOptions.map((eng) => (
+                          <button
+                            key={eng.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={engineId === eng.id}
+                            className="ai-engine-item"
+                            onClick={() => {
+                              p.persistEngine(eng.id);
+                              setAiMenuOpen(false);
+                            }}
+                          >
+                            <span className="ai-engine-main">{eng.main}</span>
+                            <span className="ai-engine-sub">{eng.sub}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {(engineId === "realcugan-coreml" || engineId === "waifu2x-coreml") && (
+                        <>
+                          <p className="ai-block-title px-3 pt-1">{i18n.readerNoiseLevel}</p>
+                          <div
+                            className="ai-seg ai-seg-sm mx-1 mt-1.5 mb-2"
+                            role="radiogroup"
+                            aria-label={i18n.readerNoiseLevel}
+                          >
+                            <span
+                              className="ai-seg-thumb"
+                              aria-hidden="true"
+                              style={{ transform: `translateX(calc(100% * ${noiseLevel}))` }}
+                            />
+                            {(
+                              [
+                                [0, i18n.readerNoiseLight],
+                                [1, i18n.readerNoiseStandard],
+                                [2, i18n.readerNoiseStrong],
+                                [3, i18n.readerNoiseMax],
+                              ] as const
+                            ).map(([n, label]) => (
+                              <button
+                                key={n}
+                                type="button"
+                                role="radio"
+                                aria-checked={noiseLevel === n}
+                                className={`ai-seg-item ${noiseLevel === n ? "is-active" : ""}`}
+                                onClick={() => {
+                                  p.persistNoise(n);
+                                  setAiMenuOpen(false);
+                                }}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -544,29 +664,22 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         <IconSparkles className="h-3 w-3" />
                         {i18n.readerAiLabel}
                       </p>
-                      <div className={`mt-2 flex flex-col gap-3 ${enhanceOn ? "" : "pointer-events-none opacity-40"}`}>
+                      {/* 引擎/降噪随时可改：作为偏好保存，下次开启 AI 时生效 */}
+                      <div className="mt-2 flex flex-col gap-3">
                         <div>
                           <p className="ai-block-title">{i18n.engine}</p>
-                          <div className="ai-seg ai-seg-lg mt-1.5" role="radiogroup" aria-label={i18n.engine}>
-                            <span
-                              className="ai-seg-thumb"
-                              aria-hidden="true"
-                              style={{
-                                width: `calc(${100 / Math.max(engineOptions.length, 1)}% - 2px)`,
-                                transform: `translateX(calc(100% * ${engineIndex}))`,
-                              }}
-                            />
+                          <div className="ai-engine-list" role="radiogroup" aria-label={i18n.engine}>
                             {engineOptions.map((eng) => (
                               <button
                                 key={eng.id}
                                 type="button"
                                 role="radio"
                                 aria-checked={engineId === eng.id}
-                                className="ai-seg-item"
+                                className={`ai-engine-item ${engineId === eng.id ? "is-active" : ""}`}
                                 onClick={() => p.persistEngine(eng.id)}
                               >
-                                <span className="ai-seg-main">{eng.main}</span>
-                                <span className="ai-seg-sub">{eng.sub}</span>
+                                <span className="ai-engine-main">{eng.main}</span>
+                                <span className="ai-engine-sub">{eng.sub}</span>
                               </button>
                             ))}
                           </div>
