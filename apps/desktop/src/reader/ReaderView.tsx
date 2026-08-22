@@ -878,11 +878,10 @@ export function ReaderView({
         setSliderDragValue={setSliderDragValue}
         sliderPage={sliderPage}
         showingAi={showingAi}
+        enhanceOn={enhance.enhanceOn}
         pageEnhancing={pageEnhancing}
         toggleAi={enhance.toggleAi}
-        enhanceOn={enhance.enhanceOn}
         engineOptions={enhance.engineOptions}
-        engineIndex={enhance.engineIndex}
         engineId={enhance.engineId}
         persistEngine={enhance.persistEngine}
         engineSwitchHint={enhance.engineSwitchHint}

@@ -76,6 +76,7 @@ export type ReaderToolbarProps = {
   setSliderDragValue: Dispatch<SetStateAction<number | null>>;
   sliderPage: number;
   showingAi: boolean;
+  enhanceOn: boolean;
   pageEnhancing: boolean;
   toggleAi: () => void;
   engineOptions: EngineOption[];
@@ -109,6 +110,79 @@ export type ReaderToolbarProps = {
   sourceRef: MutableRefObject<string>;
   refreshState: (jid: string | null, src: string | null) => void;
 };
+
+function AiEnginePanel(p: {
+  i18n: Messages;
+  engineOptions: EngineOption[];
+  engineId: string;
+  persistEngine: (id: string) => void;
+  noiseLevel: 0 | 1 | 2 | 3;
+  persistNoise: (n: 0 | 1 | 2 | 3) => void;
+  onPick?: () => void;
+}) {
+  return (
+    <>
+      <div>
+        <p className="ai-block-title">{p.i18n.engine}</p>
+        <div className="ai-engine-list" role="radiogroup" aria-label={p.i18n.engine}>
+          {p.engineOptions.map((eng) => (
+            <button
+              key={eng.id}
+              type="button"
+              role="radio"
+              aria-checked={p.engineId === eng.id}
+              className={`ai-engine-item ${p.engineId === eng.id ? "is-active" : ""}`}
+              onClick={() => {
+                p.persistEngine(eng.id);
+                p.onPick?.();
+              }}
+            >
+              <span className="ai-engine-main">{eng.main}</span>
+              {p.engineId === eng.id && (
+                <span className="ai-check" aria-hidden="true">
+                  ✓
+                </span>
+              )}
+              <span className="ai-engine-sub">{eng.sub}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div>
+        <p className="ai-block-title">{p.i18n.readerNoiseLevel}</p>
+        <div className="ai-seg ai-seg-sm mt-1.5" role="radiogroup" aria-label={p.i18n.readerNoiseLevel}>
+          <span
+            className="ai-seg-thumb"
+            aria-hidden="true"
+            style={{ transform: `translateX(calc(100% * ${p.noiseLevel}))` }}
+          />
+          {(
+            [
+              [0, p.i18n.readerNoiseLight],
+              [1, p.i18n.readerNoiseStandard],
+              [2, p.i18n.readerNoiseStrong],
+              [3, p.i18n.readerNoiseMax],
+            ] as const
+          ).map(([n, label]) => (
+            <button
+              key={n}
+              type="button"
+              role="radio"
+              aria-checked={p.noiseLevel === n}
+              className={`ai-seg-item ${p.noiseLevel === n ? "is-active" : ""}`}
+              onClick={() => {
+                p.persistNoise(n);
+                p.onPick?.();
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
 
 export function ReaderToolbar(p: ReaderToolbarProps) {
   const {
@@ -144,6 +218,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     pageEnhancing,
     engineOptions,
     engineId,
+    enhanceOn,
     engineSwitchHint,
     cacheStats,
     noiseLevel,
@@ -473,7 +548,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
               {!barTiny && (
                 <div className="relative z-50" ref={aiRef}>
                   <div
-                    className={`reader-ai-capsule ${showingAi ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
+                    className={`reader-ai-capsule ${(enhanceOn || showingAi) ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
                   >
                     {pageEnhancing && <span className="reader-ai-ring" aria-hidden="true" />}
                     <button
@@ -486,13 +561,16 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                       onMouseLeave={hideTip}
                       onClick={() => p.toggleAi()}
                     >
-                      <IconSparkles />
+                      {pageEnhancing ? (
+                        <span className="reader-ai-spin" aria-hidden="true" />
+                      ) : (
+                        <IconSparkles />
+                      )}
                     </button>
                     <span className="reader-ai-capsule-sep" aria-hidden="true" />
                     <button
                       type="button"
                       className="reader-ai-more"
-                      disabled={visibleIndexes.length === 0}
                       aria-label={i18n.engine}
                       aria-expanded={aiMenuOpen}
                       onMouseEnter={(e) => showTip(e, i18n.engine)}
@@ -523,62 +601,15 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         </span>
                       </div>
                       <p className="ai-block-title px-3">{i18n.engine}</p>
-                      <div className="ai-engine-list mx-1 mt-1 mb-1" role="radiogroup" aria-label={i18n.engine}>
-                        {engineOptions.map((eng) => (
-                          <button
-                            key={eng.id}
-                            type="button"
-                            role="radio"
-                            aria-checked={engineId === eng.id}
-                            className="ai-engine-item"
-                            onClick={() => {
-                              p.persistEngine(eng.id);
-                              setAiMenuOpen(false);
-                            }}
-                          >
-                            <span className="ai-engine-main">{eng.main}</span>
-                            <span className="ai-engine-sub">{eng.sub}</span>
-                          </button>
-                        ))}
-                      </div>
-                      {(engineId === "realcugan-coreml" || engineId === "waifu2x-coreml") && (
-                        <>
-                          <p className="ai-block-title px-3 pt-1">{i18n.readerNoiseLevel}</p>
-                          <div
-                            className="ai-seg ai-seg-sm mx-1 mt-1.5 mb-2"
-                            role="radiogroup"
-                            aria-label={i18n.readerNoiseLevel}
-                          >
-                            <span
-                              className="ai-seg-thumb"
-                              aria-hidden="true"
-                              style={{ transform: `translateX(calc(100% * ${noiseLevel}))` }}
-                            />
-                            {(
-                              [
-                                [0, i18n.readerNoiseLight],
-                                [1, i18n.readerNoiseStandard],
-                                [2, i18n.readerNoiseStrong],
-                                [3, i18n.readerNoiseMax],
-                              ] as const
-                            ).map(([n, label]) => (
-                              <button
-                                key={n}
-                                type="button"
-                                role="radio"
-                                aria-checked={noiseLevel === n}
-                                className={`ai-seg-item ${noiseLevel === n ? "is-active" : ""}`}
-                                onClick={() => {
-                                  p.persistNoise(n);
-                                  setAiMenuOpen(false);
-                                }}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      )}
+<AiEnginePanel
+                        i18n={i18n}
+                        engineOptions={engineOptions}
+                        engineId={engineId}
+                        persistEngine={p.persistEngine}
+                        noiseLevel={noiseLevel}
+                        persistNoise={p.persistNoise}
+                        onPick={() => setAiMenuOpen(false)}
+                      />
                     </div>
                   )}
                 </div>
@@ -659,70 +690,20 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         )}
                       </div>
                     )}
-                    <div className="px-3 pb-1 pt-2">
-                      <p className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
-                        <IconSparkles className="h-3 w-3" />
-                        {i18n.readerAiLabel}
-                      </p>
-                      {/* 引擎/降噪随时可改：作为偏好保存，下次开启 AI 时生效 */}
-                      <div className="mt-2 flex flex-col gap-3">
-                        <div>
-                          <p className="ai-block-title">{i18n.engine}</p>
-                          <div className="ai-engine-list" role="radiogroup" aria-label={i18n.engine}>
-                            {engineOptions.map((eng) => (
-                              <button
-                                key={eng.id}
-                                type="button"
-                                role="radio"
-                                aria-checked={engineId === eng.id}
-                                className={`ai-engine-item ${engineId === eng.id ? "is-active" : ""}`}
-                                onClick={() => p.persistEngine(eng.id)}
-                              >
-                                <span className="ai-engine-main">{eng.main}</span>
-                                {engineId === eng.id && (
-                                  <span className="ai-check" aria-hidden="true">
-                                    ✓
-                                  </span>
-                                )}
-                                <span className="ai-engine-sub">{eng.sub}</span>
-                              </button>
-                            ))}
-                          </div>
-                          {engineSwitchHint && cacheStats && cacheStats.bytes > 0 && (
-                            <p className="ai-hint">{i18n.readerAiEngineCacheHint}</p>
-                          )}
-                        </div>
-                        <div>
-                          <p className="ai-block-title">{i18n.readerNoiseLevel}</p>
-                          <div className="ai-seg ai-seg-sm mt-1.5" role="radiogroup" aria-label={i18n.readerNoiseLevel}>
-                            <span
-                              className="ai-seg-thumb"
-                              aria-hidden="true"
-                              style={{ transform: `translateX(calc(100% * ${noiseLevel}))` }}
-                            />
-                            {(
-                              [
-                                [0, i18n.readerNoiseLight],
-                                [1, i18n.readerNoiseStandard],
-                                [2, i18n.readerNoiseStrong],
-                                [3, i18n.readerNoiseMax],
-                              ] as const
-                            ).map(([n, label]) => (
-                              <button
-                                key={n}
-                                type="button"
-                                role="radio"
-                                aria-checked={noiseLevel === n}
-                                className={`ai-seg-item ${noiseLevel === n ? "is-active" : ""}`}
-                                onClick={() => p.persistNoise(n)}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="mt-3">
+                    <div className="flex flex-col gap-3 px-3 pb-1 pt-2">
+                      {/* 引擎/降噪/缓存随时可改：作为偏好保存，下次开启 AI 时生效 */}
+                      <AiEnginePanel
+                        i18n={i18n}
+                        engineOptions={engineOptions}
+                        engineId={engineId}
+                        persistEngine={p.persistEngine}
+                        noiseLevel={noiseLevel}
+                        persistNoise={p.persistNoise}
+                      />
+                      {engineSwitchHint && cacheStats && cacheStats.bytes > 0 && (
+                        <p className="ai-hint">{i18n.readerAiEngineCacheHint}</p>
+                      )}
+                      <div>
                         <p className="ai-block-title">{i18n.readerAiCache}</p>
                         <div className="mt-1.5 flex items-baseline justify-between gap-2">
                           <span className="text-[12px] text-ink-500 dark:text-fg-muted">

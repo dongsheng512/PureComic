@@ -643,32 +643,6 @@ html.dark .reader-ai-capsule > button:hover:not(:disabled) {
   width: 20px !important;
 }
 
-/* 忙态：高光横扫填充面(形状安全,替代旋转胶囊环——非圆形旋转会甩出边界变形) */
-.reader-ai-capsule.is-busy {
-  overflow: hidden;
-}
-
-.reader-ai-capsule.is-busy::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  background: linear-gradient(
-    105deg,
-    transparent 32%,
-    rgba(255, 255, 255, 0.5) 50%,
-    transparent 68%
-  );
-  transform: translateX(-120%);
-  animation: reader-ai-sweep 1.2s ease-in-out infinite;
-}
-
-@keyframes reader-ai-sweep {
-  to {
-    transform: translateX(120%);
-  }
-}
-
 /* 区块标题：12pt secondary */
 .ai-block-title {
   @apply text-[12px] font-medium text-ink-500 dark:text-fg-muted;
