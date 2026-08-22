@@ -557,6 +557,12 @@ html.dark {
 /* AI 开关连体胶囊 [✨|▾]:左=增强开关,发丝线分隔,右=快速设置。
    关 = 幽灵灰;开 = 淡蓝实心填充 + 白图标(方案 A);
    忙 = 外圈 conic 进度环(纯 transform 旋转,替代旧 box-shadow 呼吸)。 */
+/* AI 快速设置弹层:固定宽度,窄窗口不越出左缘 */
+.reader-menu-ai {
+  @apply w-[248px];
+  max-width: calc(100vw - 16px);
+}
+
 .reader-ai-capsule {
   @apply relative inline-flex h-7 items-center rounded-full transition;
   background: rgba(0, 0, 0, 0.06);

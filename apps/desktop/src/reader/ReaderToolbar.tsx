@@ -118,6 +118,14 @@ function AiEnginePanel(p: {
   persistEngine: (id: string) => void;
   noiseLevel: 0 | 1 | 2 | 3;
   persistNoise: (n: 0 | 1 | 2 | 3) => void;
+  engineSwitchHint?: boolean;
+  cacheStats?: EnhanceCacheStats | null;
+  cacheLine?: string;
+  cachePct?: number;
+  clearingCache?: boolean;
+  clearConfirming?: boolean;
+  handleClearClick?: () => void;
+  cacheSizeText?: (stats: EnhanceCacheStats | null) => string;
   onPick?: () => void;
 }) {
   return (
@@ -180,6 +188,38 @@ function AiEnginePanel(p: {
           ))}
         </div>
       </div>
+      {p.handleClearClick && (
+        <div className="mt-3">
+          <p className="ai-block-title">{p.i18n.readerAiCache}</p>
+          <div className="mt-1.5 flex items-baseline justify-between gap-2">
+            <span className="text-[12px] text-ink-500 dark:text-fg-muted">
+              {p.i18n.readerAiCacheLabel}
+            </span>
+            <span className="text-[12px] tabular-nums text-ink-800 dark:text-fg">
+              {p.cacheLine}
+            </span>
+          </div>
+          <div className="reader-cache-bar mt-1.5" aria-hidden="true">
+            <span style={{ width: `${p.cachePct ?? 0}%` }} />
+          </div>
+          <button
+            type="button"
+            className={`ai-clear-btn ${p.clearConfirming ? "is-confirm" : ""}`}
+            onClick={() => p.handleClearClick?.()}
+          >
+            {p.clearingCache ? (
+              <>
+                <span className="reader-ai-spin" aria-hidden="true" />
+                {p.i18n.readerAiClearing}
+              </>
+            ) : p.clearConfirming ? (
+              p.i18n.readerAiClearConfirm.replace("{size}", p.cacheSizeText?.(p.cacheStats ?? null) ?? "")
+            ) : (
+              p.i18n.readerAiCacheClear
+            )}
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -583,7 +623,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                   {aiMenuOpen && (
                     <div
                       ref={aiPopRef}
-                      className="reader-menu reader-menu-wide"
+                      className="reader-menu reader-menu-ai"
                       role="menu"
                       onClick={(e) => e.stopPropagation()}
                     >
@@ -600,7 +640,6 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                           {showingAi ? aiEngineMain : i18n.readerAiOff}
                         </span>
                       </div>
-                      <p className="ai-block-title px-3">{i18n.engine}</p>
 <AiEnginePanel
                         i18n={i18n}
                         engineOptions={engineOptions}
@@ -608,6 +647,14 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         persistEngine={p.persistEngine}
                         noiseLevel={noiseLevel}
                         persistNoise={p.persistNoise}
+                        engineSwitchHint={engineSwitchHint}
+                        cacheStats={cacheStats}
+                        cacheLine={cacheLine}
+                        cachePct={cachePct}
+                        clearingCache={clearingCache}
+                        clearConfirming={clearConfirming}
+                        handleClearClick={() => void p.handleClearClick()}
+                        cacheSizeText={p.cacheSizeText}
                         onPick={() => setAiMenuOpen(false)}
                       />
                     </div>
@@ -690,50 +737,6 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         )}
                       </div>
                     )}
-                    <div className="flex flex-col gap-3 px-3 pb-1 pt-2">
-                      {/* 引擎/降噪/缓存随时可改：作为偏好保存，下次开启 AI 时生效 */}
-                      <AiEnginePanel
-                        i18n={i18n}
-                        engineOptions={engineOptions}
-                        engineId={engineId}
-                        persistEngine={p.persistEngine}
-                        noiseLevel={noiseLevel}
-                        persistNoise={p.persistNoise}
-                      />
-                      {engineSwitchHint && cacheStats && cacheStats.bytes > 0 && (
-                        <p className="ai-hint">{i18n.readerAiEngineCacheHint}</p>
-                      )}
-                      <div>
-                        <p className="ai-block-title">{i18n.readerAiCache}</p>
-                        <div className="mt-1.5 flex items-baseline justify-between gap-2">
-                          <span className="text-[12px] text-ink-500 dark:text-fg-muted">
-                            {i18n.readerAiCacheLabel}
-                          </span>
-                          <span className="text-[12px] tabular-nums text-ink-800 dark:text-fg">
-                            {cacheLine}
-                          </span>
-                        </div>
-                        <div className="reader-cache-bar mt-1.5" aria-hidden="true">
-                          <span style={{ width: `${cachePct}%` }} />
-                        </div>
-                        <button
-                          type="button"
-                          className={`ai-clear-btn ${clearConfirming ? "is-confirm" : ""}`}
-                          onClick={() => void p.handleClearClick()}
-                        >
-                          {clearingCache ? (
-                            <>
-                              <span className="reader-ai-spin" aria-hidden="true" />
-                              {i18n.readerAiClearing}
-                            </>
-                          ) : clearConfirming ? (
-                            i18n.readerAiClearConfirm.replace("{size}", p.cacheSizeText(cacheStats))
-                          ) : (
-                            i18n.readerAiCacheClear
-                          )}
-                        </button>
-                      </div>
-                    </div>
                     <div className="mt-3 border-t border-ink-100 px-3 pt-3 dark:border-white/[0.08]">
                       <p className="px-0 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                         {i18n.readerBg}
@@ -788,6 +791,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         })}
                       </div>
                     </div>
+
                     <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
                     <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                       {i18n.readerFitScreen}
