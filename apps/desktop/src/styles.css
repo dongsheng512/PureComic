@@ -543,13 +543,13 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
 
 /* —— AI 画质：与旁边阅读模式组同高、同层级 —— */
 :root {
-  --ai-accent: #4da3ff;
-  --ai-accent-soft: rgba(77, 163, 255, 0.16);
+  --ai-accent: #6cb3ff;
+  --ai-accent-soft: rgba(108, 179, 255, 0.18);
   --ai-dot-halo: rgba(245, 245, 246, 0.95);
 }
 html.dark {
-  --ai-accent: #5aabff;
-  --ai-accent-soft: rgba(90, 171, 255, 0.22);
+  --ai-accent: #7fc0ff;
+  --ai-accent-soft: rgba(127, 192, 255, 0.24);
   --ai-dot-halo: rgba(22, 23, 28, 0.95);
 }
 
@@ -596,11 +596,11 @@ html.dark .reader-ai-capsule {
 
 .reader-ai-capsule.is-on {
   background: var(--ai-accent);
-  box-shadow: 0 1px 3px rgba(77, 163, 255, 0.4);
+  box-shadow: 0 1px 3px rgba(108, 179, 255, 0.42);
 }
 
 html.dark .reader-ai-capsule.is-on {
-  box-shadow: 0 1px 3px rgba(90, 171, 255, 0.3);
+  box-shadow: 0 1px 3px rgba(127, 192, 255, 0.28);
 }
 
 .reader-ai-capsule > button {
