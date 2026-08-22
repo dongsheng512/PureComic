@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
 import { stateLabel, type Messages } from "../i18n";
 import type { EnhanceCacheStats, JobStatus, ReaderState } from "../types";
 import { setNativeWindowBg, startWindowDrag } from "../windowDrag";
@@ -114,10 +114,10 @@ export type ReaderToolbarProps = {
 function AiEnginePanel(p: {
   i18n: Messages;
   engineOptions: EngineOption[];
-  engineId: string;
-  persistEngine: (id: string) => void;
-  noiseLevel: 0 | 1 | 2 | 3;
-  persistNoise: (n: 0 | 1 | 2 | 3) => void;
+  engineValue: string;
+  noiseValue: 0 | 1 | 2 | 3;
+  onSelectEngine: (id: string) => void;
+  onSelectNoise: (n: 0 | 1 | 2 | 3) => void;
   engineSwitchHint?: boolean;
   cacheStats?: EnhanceCacheStats | null;
   cacheLine?: string;
@@ -138,15 +138,12 @@ function AiEnginePanel(p: {
               key={eng.id}
               type="button"
               role="radio"
-              aria-checked={p.engineId === eng.id}
-              className={`ai-engine-item ${p.engineId === eng.id ? "is-active" : ""}`}
-              onClick={() => {
-                p.persistEngine(eng.id);
-                p.onPick?.();
-              }}
+              aria-checked={p.engineValue === eng.id}
+              className={`ai-engine-item ${p.engineValue === eng.id ? "is-active" : ""}`}
+              onClick={() => p.onSelectEngine(eng.id)}
             >
               <span className="ai-engine-main">{eng.main}</span>
-              {p.engineId === eng.id && (
+              {p.engineValue === eng.id && (
                 <span className="ai-check" aria-hidden="true">
                   ✓
                 </span>
@@ -162,7 +159,7 @@ function AiEnginePanel(p: {
           <span
             className="ai-seg-thumb"
             aria-hidden="true"
-            style={{ transform: `translateX(calc(100% * ${p.noiseLevel}))` }}
+            style={{ transform: `translateX(calc(100% * ${p.noiseValue}))` }}
           />
           {(
             [
@@ -176,12 +173,9 @@ function AiEnginePanel(p: {
               key={n}
               type="button"
               role="radio"
-              aria-checked={p.noiseLevel === n}
-              className={`ai-seg-item ${p.noiseLevel === n ? "is-active" : ""}`}
-              onClick={() => {
-                p.persistNoise(n);
-                p.onPick?.();
-              }}
+              aria-checked={p.noiseValue === n}
+              className={`ai-seg-item ${p.noiseValue === n ? "is-active" : ""}`}
+              onClick={() => p.onSelectNoise(n)}
             >
               {label}
             </button>
@@ -260,6 +254,8 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     engineId,
     enhanceOn,
     engineSwitchHint,
+    persistEngine,
+    persistNoise,
     cacheStats,
     noiseLevel,
     cacheLine,
@@ -279,17 +275,32 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
   } = p;
 
   const [aiMenuOpen, setAiMenuOpen] = useState(false);
+  // 弹层内的草稿选择:收回菜单时才统一提交(AI 开启时由此触发一次重优化)
+  const [draftEngineId, setDraftEngineId] = useState<string | null>(null);
+  const [draftNoise, setDraftNoise] = useState<0 | 1 | 2 | 3 | null>(null);
   const aiRef = useRef<HTMLDivElement>(null);
   const aiPopRef = useRef<HTMLDivElement>(null);
 
+  const aiEngineMain =
+    engineOptions.find((eng) => eng.id === engineId)?.main ?? engineId;
+
+  const closeAiMenu = useCallback(() => {
+    setAiMenuOpen(false);
+    if (draftEngineId && draftEngineId !== engineId) persistEngine(draftEngineId);
+    if (draftNoise != null && draftNoise !== noiseLevel) persistNoise(draftNoise);
+    setDraftEngineId(null);
+    setDraftNoise(null);
+  }, [draftEngineId, draftNoise, engineId, noiseLevel, persistEngine, persistNoise]);
+
+  // 弹层打开期间挂外部点击/Esc 关闭;依赖 closeAiMenu 保证提交的是最新草稿
   useEffect(() => {
     if (!aiMenuOpen) return;
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (aiRef.current && !aiRef.current.contains(t)) setAiMenuOpen(false);
+      if (aiRef.current && !aiRef.current.contains(t)) closeAiMenu();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setAiMenuOpen(false);
+      if (e.key === "Escape") closeAiMenu();
     };
     const timer = window.setTimeout(() => {
       document.addEventListener("mousedown", onDoc);
@@ -300,10 +311,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [aiMenuOpen]);
-
-  const aiEngineMain =
-    engineOptions.find((eng) => eng.id === engineId)?.main ?? engineId;
+  }, [aiMenuOpen, closeAiMenu]);
 
   const readingModeSeg = (
     <div className="reader-seg" role="group" aria-label={i18n.readerMode}>
@@ -615,7 +623,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                       aria-expanded={aiMenuOpen}
                       onMouseEnter={(e) => showTip(e, i18n.engine)}
                       onMouseLeave={hideTip}
-                      onClick={() => setAiMenuOpen((v) => !v)}
+                      onClick={() => (aiMenuOpen ? closeAiMenu() : setAiMenuOpen(true))}
                     >
                       <IconChevronDown />
                     </button>
@@ -643,10 +651,10 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
 <AiEnginePanel
                         i18n={i18n}
                         engineOptions={engineOptions}
-                        engineId={engineId}
-                        persistEngine={p.persistEngine}
-                        noiseLevel={noiseLevel}
-                        persistNoise={p.persistNoise}
+                        engineValue={draftEngineId ?? engineId}
+                        noiseValue={draftNoise ?? noiseLevel}
+                        onSelectEngine={(id) => setDraftEngineId(id)}
+                        onSelectNoise={(n) => setDraftNoise(n)}
                         engineSwitchHint={engineSwitchHint}
                         cacheStats={cacheStats}
                         cacheLine={cacheLine}
@@ -655,7 +663,6 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         clearConfirming={clearConfirming}
                         handleClearClick={() => void p.handleClearClick()}
                         cacheSizeText={p.cacheSizeText}
-                        onPick={() => setAiMenuOpen(false)}
                       />
                     </div>
                   )}
