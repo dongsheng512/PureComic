@@ -643,35 +643,29 @@ html.dark .reader-ai-capsule > button:hover:not(:disabled) {
   width: 20px !important;
 }
 
-.reader-ai-ring {
+/* 忙态：高光横扫填充面(形状安全,替代旋转胶囊环——非圆形旋转会甩出边界变形) */
+.reader-ai-capsule.is-busy {
+  overflow: hidden;
+}
+
+.reader-ai-capsule.is-busy::after {
+  content: "";
   position: absolute;
-  inset: -3.5px;
-  border-radius: 9999px;
-  pointer-events: none;
-  opacity: 0;
-  background: conic-gradient(
-    from 0deg,
-    var(--ai-accent) 0turn 0.25turn,
-    transparent 0.25turn
+  inset: 0;
+  z-index: 5;
+  background: linear-gradient(
+    105deg,
+    transparent 32%,
+    rgba(255, 255, 255, 0.5) 50%,
+    transparent 68%
   );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box exclude,
-    linear-gradient(#000 0 0);
-  padding: 2px;
+  transform: translateX(-120%);
+  animation: reader-ai-sweep 1.2s ease-in-out infinite;
 }
 
-.reader-ai-capsule.is-busy .reader-ai-ring {
-  opacity: 0.9;
-  animation: reader-ai-spin 0.9s linear infinite;
-}
-
-@keyframes reader-ai-spin {
+@keyframes reader-ai-sweep {
   to {
-    transform: rotate(360deg);
+    transform: translateX(120%);
   }
 }
 
@@ -732,11 +726,18 @@ html.dark .ai-seg-thumb {
   background: rgba(120, 120, 128, 0.1);
 }
 
-/* 选中行：白色浮起（同分段 thumb 质感），深色用 14% 白 */
+/* 选中行：品牌色软底 + 主名着色(白底菜单上白卡浮起不可见,故改 tint) */
 .ai-engine-item.is-active {
-  background: #fff;
-  color: var(--ink);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+  background: var(--ai-accent-soft);
+}
+
+.ai-engine-item.is-active .ai-engine-main {
+  color: var(--ai-accent);
+}
+
+.ai-engine-item .ai-check {
+  @apply shrink-0 text-[11px] font-semibold leading-none;
+  color: var(--ai-accent);
 }
 
 .ai-engine-item:focus-visible {

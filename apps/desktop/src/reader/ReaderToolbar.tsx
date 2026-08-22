@@ -679,6 +679,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                                 onClick={() => p.persistEngine(eng.id)}
                               >
                                 <span className="ai-engine-main">{eng.main}</span>
+                                {engineId === eng.id && (
+                                  <span className="ai-check" aria-hidden="true">
+                                    ✓
+                                  </span>
+                                )}
                                 <span className="ai-engine-sub">{eng.sub}</span>
                               </button>
                             ))}
