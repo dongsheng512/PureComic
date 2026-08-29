@@ -62,7 +62,11 @@ impl EngineHub {
         let waifu2x = resolve_waifu2x_paths(waifu2x_bin, waifu2x_models).and_then(|p| {
             let mut eng = Waifu2xEngine::new(p.binary, p.models_dir);
             // 接线 checksums.sha256 完整性校验（此前 expected_sha256 恒为 None，形同虚设）
-            eng.expected_sha256 = crate::paths::expected_binary_sha256(&p.third_party);
+            eng.expected_sha256 = crate::paths::expected_binary_sha256(
+                &p.third_party,
+                "waifu2x-ncnn-vulkan",
+                crate::paths::binary_name(),
+            );
             match eng.is_available() {
                 EngineAvailability::Ready => Some(Arc::new(eng)),
                 _ => None,
@@ -77,7 +81,12 @@ impl EngineHub {
         let animevideo_coreml =
             resolve_animevideo_coreml_model().map(|p| Arc::new(AnimeVideoCoreMlEngine::new(p)));
         let realcugan = resolve_realcugan_paths().and_then(|p| {
-            let eng = RealCuganEngine::new(p.binary, p.models_root);
+            let mut eng = RealCuganEngine::new(p.binary, p.models_root);
+            eng.expected_sha256 = crate::paths::expected_binary_sha256(
+                &p.third_party,
+                "realcugan-ncnn-vulkan",
+                crate::paths::realcugan_binary_name(),
+            );
             match eng.is_available() {
                 EngineAvailability::Ready => Some(Arc::new(eng)),
                 _ => None,

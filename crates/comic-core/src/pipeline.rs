@@ -341,16 +341,18 @@ pub async fn run_job(
         return mark_cancelled(&manifest).await;
     }
 
-    {
+    // 全败判定：读 guard 必须先释放再取写锁——tokio RwLock 嵌套等待会自死锁
+    let all_failed = {
         let m = manifest.read().await;
-        if m.stats.pages_done == 0 && m.stats.pages_total > 0 {
-            let mut m = manifest.write().await;
-            m.state = JobState::Failed;
-            m.error = Some(AppError::internal("全部页增强失败"));
-            m.stats.finished_at = Some(Utc::now());
-            m.save()?;
-            return Err(AppError::internal("全部页增强失败"));
-        }
+        m.stats.pages_done == 0 && m.stats.pages_total > 0
+    };
+    if all_failed {
+        let mut m = manifest.write().await;
+        m.state = JobState::Failed;
+        m.error = Some(AppError::internal("全部页增强失败"));
+        m.stats.finished_at = Some(Utc::now());
+        m.save()?;
+        return Err(AppError::internal("全部页增强失败"));
     }
 
     {

@@ -542,20 +542,23 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
 }
 
 /* —— AI 画质：与旁边阅读模式组同高、同层级 —— */
+/* AI 专属绿：开启态用「淡绿 tint 底 + 深绿图标」组合（纯淡绿底配白图标对比度不足）；
+   与全局主操作蓝(#6bb6ff/H207°)和成功色 teal(#0f766e/H173°) 在色相上均拉开距离(H≈158°)。
+   浅色取 #1f7d57：白字/白图标对比 5.1:1（11px 小字 AA 需 4.5:1）。 */
 :root {
-  --ai-accent: #6cb3ff;
-  --ai-accent-soft: rgba(108, 179, 255, 0.18);
+  --ai-accent: #1f7d57;
+  --ai-accent-soft: rgba(69, 172, 134, 0.16);
   --ai-dot-halo: rgba(245, 245, 246, 0.95);
 }
 html.dark {
-  --ai-accent: #7fc0ff;
-  --ai-accent-soft: rgba(127, 192, 255, 0.24);
+  --ai-accent: #7ad8ac;
+  --ai-accent-soft: rgba(122, 216, 172, 0.2);
   --ai-dot-halo: rgba(22, 23, 28, 0.95);
 }
 
 /* 默认使用与 reader-seg 相同的浅灰底，避免白色按钮显得发虚 */
 /* AI 开关连体胶囊 [✨|▾]:左=增强开关,发丝线分隔,右=快速设置。
-   关 = 幽灵灰;开 = 淡蓝实心填充 + 白图标(方案 A);
+   关 = 幽灵灰;开 = 淡绿 tint 底 + 发丝描边 + 深绿图标(纯淡绿底配白图标对比度不足);
    忙 = 外圈 conic 进度环(纯 transform 旋转,替代旧 box-shadow 呼吸)。 */
 /* AI 快速设置弹层:分区自带留白,覆盖菜单默认 py-1 */
 .reader-menu-ai {
@@ -595,12 +598,12 @@ html.dark .reader-ai-capsule {
 }
 
 .reader-ai-capsule.is-on {
-  background: var(--ai-accent);
-  box-shadow: 0 1px 3px rgba(108, 179, 255, 0.42);
+  background: var(--ai-accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(69, 172, 134, 0.35);
 }
 
 html.dark .reader-ai-capsule.is-on {
-  box-shadow: 0 1px 3px rgba(127, 192, 255, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(122, 216, 172, 0.4);
 }
 
 .reader-ai-capsule > button {
@@ -627,13 +630,17 @@ html.dark .reader-ai-capsule > button:hover:not(:disabled) {
 
 .reader-ai-capsule > button:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px rgba(77, 163, 255, 0.45);
+  box-shadow: inset 0 0 0 2px rgba(43, 154, 110, 0.5);
   border-radius: 9999px;
+}
+
+html.dark .reader-ai-capsule > button:focus-visible {
+  box-shadow: inset 0 0 0 2px rgba(122, 216, 172, 0.55);
 }
 
 .reader-ai-capsule.is-on > button,
 .reader-ai-capsule.is-on > button:hover:not(:disabled) {
-  color: #fff;
+  color: var(--ai-accent);
 }
 
 .reader-ai-trigger svg {
@@ -664,7 +671,11 @@ html.dark .reader-ai-capsule > button:hover:not(:disabled) {
 }
 
 .reader-ai-capsule.is-on .reader-ai-capsule-sep {
-  background: rgba(255, 255, 255, 0.4);
+  background: rgba(69, 172, 134, 0.35);
+}
+
+html.dark .reader-ai-capsule.is-on .reader-ai-capsule-sep {
+  background: rgba(122, 216, 172, 0.4);
 }
 
 .reader-ai-more {
@@ -792,6 +803,42 @@ html.dark .ai-engine-item.is-active {
   @apply mt-1.5 text-[10px] text-ink-500 dark:text-fg-muted;
 }
 
+/* 草稿未应用提示条：引擎/降噪与当前不一致时出现；紧邻 ai-section，
+   继承其 border-top 分隔线，底色用 AI 淡绿 tint 强化"待应用"状态 */
+.ai-apply-bar {
+  @apply flex items-center gap-3;
+  background: var(--ai-accent-soft);
+}
+
+.ai-apply-summary {
+  @apply truncate text-[12px] font-medium text-ink-800 dark:text-fg;
+}
+
+.ai-apply-note {
+  @apply mt-0.5 truncate text-[10px] text-ink-500 dark:text-fg-muted;
+}
+
+.ai-btn-discard {
+  @apply inline-flex h-7 items-center rounded-full border border-ink-300 bg-white px-2.5 text-[11px] font-medium text-ink-700 transition hover:bg-ink-100
+    dark:border-white/[0.12] dark:bg-transparent dark:text-fg-muted dark:hover:bg-white/[0.08];
+}
+
+.ai-btn-apply {
+  @apply inline-flex h-7 items-center rounded-full px-3 text-[11px] font-semibold transition;
+  background: var(--ai-accent);
+  /* 浅色 accent #1f7d57 上白字 5.1:1，满足 11px 小字 AA */
+  color: #ffffff;
+}
+
+.ai-btn-apply:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+/* 暗色 accent 为淡绿，白字对比不足 → 深绿字（同开关圆钮处理） */
+html.dark .ai-btn-apply {
+  color: #10241a;
+}
+
 /* 主开关：iOS 风格 Switch */
 .ai-switch {
   @apply relative inline-flex h-[26px] w-[44px] shrink-0 items-center rounded-full p-[2px] transition-colors duration-200;
@@ -815,6 +862,12 @@ html.dark .ai-engine-item.is-active {
 
 .ai-switch.is-on .ai-switch-knob {
   transform: translateX(18px);
+}
+
+/* 暗色下 accent 为淡绿，白钮对比不足 → 深绿钮（浅色模式深绿钮对 #1f7d57 底约 4.5:1） */
+html.dark .ai-switch.is-on .ai-switch-knob {
+  background: #10241a;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 /* 缓存用量：4pt 进度条（页数覆盖率），track gray 20%，fill accent */

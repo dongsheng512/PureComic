@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "comic-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "comic-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "comic-engines"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "cc",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "purecomic"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "comic-core",
  "comic-engines",

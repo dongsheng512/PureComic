@@ -15,6 +15,11 @@ export const ACTIVE_JOB_STATES: readonly JobState[] = [
   "cancelling",
 ];
 
+/** error 是每次 IPC 重新反序列化的对象，必须按内容比较，否则引用恒不等使轮询去重失效 */
+function errKey(e: JobStatus["error"] | undefined): string {
+  return e ? `${e.code}|${e.message}` : "";
+}
+
 /** jobs 列表浅比较：仅关注影响 UI 的字段 */
 export function jobsEqual(a: JobStatus[], b: JobStatus[]): boolean {
   if (a.length !== b.length) return false;
@@ -27,7 +32,7 @@ export function jobsEqual(a: JobStatus[], b: JobStatus[]): boolean {
       x.pagesDone !== y.pagesDone ||
       x.pagesTotal !== y.pagesTotal ||
       x.stage !== y.stage ||
-      x.error !== y.error ||
+      errKey(x.error) !== errKey(y.error) ||
       x.outputPath !== y.outputPath ||
       x.message !== y.message ||
       x.etaSec !== y.etaSec

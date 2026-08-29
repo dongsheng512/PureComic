@@ -19,10 +19,19 @@ const SCALE: u32 = 2;
 /// 2× output buffer stays bounded (4096² → 8192² RGB8 ≈ 201MB).
 const ENGINE_INPUT_CAP: u32 = 4096;
 
+/// 单页推理超时；超时后批锁移交后台等待，后续批次快速失败直到线程退出
+const PAGE_PREDICT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// 模型加载（首次含同步编译）超时
+const MODEL_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// 串行化「load + 整批推理」：C 侧模型是进程级单例，
 /// 并发批次用不同 noise 时后者会把全局模型换掉，导致前批结果错误。
 static COREML_BATCH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// 推理/加载线程卡死标志：置位期间新批次立即报错（而不是排队等死锁），
+/// 卡死线程退出后由后台任务自动清除。
+static COREML_POISONED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 mod ffi {
@@ -287,10 +296,21 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
         req: EnhanceBatchRequest,
         cancel: CancellationToken,
     ) -> Result<EnhanceBatchResult, EngineError> {
-        let _guard = tokio::select! {
+        use std::sync::atomic::Ordering;
+        // 先查取消：毒化期间用户取消任务应归类 Cancelled 而非卡死错误
+        if cancel.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
+        if COREML_POISONED.load(Ordering::Relaxed) {
+            return Err(EngineError::Process(
+                "Core ML 推理此前超时未返回，引擎可能卡死；请重启应用后再试".into(),
+            ));
+        }
+        // Option 包裹：推理/加载超时后把锁移交给后台任务，等卡死线程退出再释放
+        let mut guard = Some(tokio::select! {
             g = COREML_BATCH_LOCK.lock() => g,
             _ = cancel.cancelled() => return Err(EngineError::Cancelled),
-        };
+        });
         let noise = match &req {
             EnhanceBatchRequest::SingleFile { params, .. }
             | EnhanceBatchRequest::Directory { params, .. } => params.noise_level,
@@ -299,15 +319,54 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
             EnhanceBatchRequest::SingleFile { params, .. }
             | EnhanceBatchRequest::Directory { params, .. } => wants_png(params),
         };
-        self.load_for_noise(noise)?;
+        // 模型加载（首次含同步编译）限时；卡死时置毒标记并交接锁
+        {
+            let engine = self.clone();
+            let mut load_guard = guard.take();
+            let mut loader = tokio::task::spawn_blocking(move || {
+                let r = engine.load_for_noise(noise);
+                (r, load_guard.take())
+            });
+            match tokio::time::timeout(MODEL_LOAD_TIMEOUT, &mut loader).await {
+                Ok(Ok((r, g))) => {
+                    guard = g;
+                    r?;
+                }
+                Ok(Err(join)) => return Err(EngineError::Process(join.to_string())),
+                Err(_) => {
+                    COREML_POISONED.store(true, Ordering::Relaxed);
+                    tokio::spawn(async move {
+                        let _ = loader.await;
+                        COREML_POISONED.store(false, Ordering::Relaxed);
+                    });
+                    warn!("waifu2x-coreml model load timed out");
+                    return Err(EngineError::Timeout(MODEL_LOAD_TIMEOUT));
+                }
+            }
+        }
         match req {
             EnhanceBatchRequest::SingleFile { input, output, .. } => {
                 let inp = input.clone();
                 let outp = output.clone();
                 let cancel2 = cancel.clone();
-                tokio::task::spawn_blocking(move || run_file(&inp, &outp, png, &cancel2))
-                    .await
-                    .map_err(|e| EngineError::Process(e.to_string()))??;
+                let mut handle =
+                    tokio::task::spawn_blocking(move || run_file(&inp, &outp, png, &cancel2));
+                match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle).await {
+                    Ok(r) => {
+                        r.map_err(|e| EngineError::Process(e.to_string()))??;
+                    }
+                    Err(_) => {
+                        COREML_POISONED.store(true, Ordering::Relaxed);
+                        let g = guard.take();
+                        tokio::spawn(async move {
+                            let _g = g;
+                            let _ = handle.await;
+                            COREML_POISONED.store(false, Ordering::Relaxed);
+                        });
+                        warn!("waifu2x-coreml predict timed out");
+                        return Err(EngineError::Timeout(PAGE_PREDICT_TIMEOUT));
+                    }
+                }
                 Ok(EnhanceBatchResult {
                     pages_ok: 1,
                     pages_failed: 0,
@@ -342,21 +401,36 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
                     let p2 = path.clone();
                     let d2 = dest.clone();
                     let c2 = cancel.clone();
-                    match tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, &c2)).await {
-                        Ok(Ok(())) => ok += 1,
-                        Ok(Err(e)) => {
+                    let mut handle =
+                        tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, &c2));
+                    match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle).await {
+                        Ok(Ok(Ok(()))) => ok += 1,
+                        Ok(Ok(Err(e))) => {
                             warn!(error = %e, file = %path.display(), "coreml page failed");
                             failed += 1;
                             if last_err.is_none() {
                                 last_err = Some(e);
                             }
                         }
-                        Err(e) => {
+                        Ok(Err(join)) => {
+                            let e = EngineError::Process(join.to_string());
                             warn!(error = %e, "coreml join failed");
                             failed += 1;
                             if last_err.is_none() {
-                                last_err = Some(EngineError::Process(e.to_string()));
+                                last_err = Some(e);
                             }
+                        }
+                        Err(_) => {
+                            // 页级超时：置毒 + 锁交接，整批中止
+                            COREML_POISONED.store(true, Ordering::Relaxed);
+                            let g = guard.take();
+                            tokio::spawn(async move {
+                                let _g = g;
+                                let _ = handle.await;
+                                COREML_POISONED.store(false, Ordering::Relaxed);
+                            });
+                            warn!(file = %path.display(), "coreml predict timed out");
+                            return Err(EngineError::Timeout(PAGE_PREDICT_TIMEOUT));
                         }
                     }
                 }

@@ -21,6 +21,9 @@ type Args = {
   setPageEditing: Dispatch<SetStateAction<boolean>>;
   moreOpen: boolean;
   setMoreOpen: Dispatch<SetStateAction<boolean>>;
+  /** AI 设置弹层开着：Esc 只关弹层，不落到关阅读器/退全屏等链路 */
+  aiMenuOpen: boolean;
+  closeAiMenu: () => void;
   toggleAi: () => void;
 };
 
@@ -43,6 +46,8 @@ export function useKeyboardNav(args: Args) {
     setPageEditing,
     moreOpen,
     setMoreOpen,
+    aiMenuOpen,
+    closeAiMenu,
     toggleAi,
   } = args;
 
@@ -92,6 +97,9 @@ export function useKeyboardNav(args: Args) {
         if (pageEditing) {
           e.preventDefault();
           setPageEditing(false);
+        } else if (aiMenuOpen) {
+          e.preventDefault();
+          closeAiMenu();
         } else if (moreOpen) {
           e.preventDefault();
           setMoreOpen(false);
@@ -127,6 +135,8 @@ export function useKeyboardNav(args: Args) {
     setPageEditing,
     moreOpen,
     setMoreOpen,
+    aiMenuOpen,
+    closeAiMenu,
     toggleAi,
   ]);
 }

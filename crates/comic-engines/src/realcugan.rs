@@ -1,7 +1,7 @@
 //! realcugan-ncnn-vulkan sidecar (SE/PRO/NOSE packs).
 
 use crate::{
-    EngineAvailability, EngineError, EngineKind, EngineStatus, EnhanceBatchRequest,
+    verify_sha256, EngineAvailability, EngineError, EngineKind, EngineStatus, EnhanceBatchRequest,
     EnhanceBatchResult, GpuInfo, UpscaleEngine,
 };
 use async_trait::async_trait;
@@ -53,6 +53,8 @@ pub struct RealCuganEngine {
     pub binary: PathBuf,
     pub models_root: PathBuf,
     pub page_timeout: Duration,
+    /// checksums.sha256 pin 的期望值；接线后二进制被替换即拒绝执行
+    pub expected_sha256: Option<String>,
 }
 
 impl RealCuganEngine {
@@ -61,6 +63,7 @@ impl RealCuganEngine {
             binary,
             models_root,
             page_timeout: Duration::from_secs(180),
+            expected_sha256: None,
         }
     }
 
@@ -79,6 +82,9 @@ impl RealCuganEngine {
     fn check_integrity(&self) -> Result<(), EngineError> {
         if !self.binary.is_file() {
             return Err(EngineError::BinaryIntegrity);
+        }
+        if let Some(ref sum) = self.expected_sha256 {
+            verify_sha256(&self.binary, sum)?;
         }
         if !self.pack_dir(CuganModelPack::Se).is_dir()
             && !self.pack_dir(CuganModelPack::Pro).is_dir()
@@ -112,7 +118,7 @@ impl UpscaleEngine for RealCuganEngine {
             Ok(()) => EngineAvailability::Ready,
             Err(EngineError::BinaryIntegrity) => {
                 if self.binary.is_file() {
-                    EngineAvailability::Unavailable("未找到 Real-CUGAN 模型目录".into())
+                    EngineAvailability::ChecksumMismatch
                 } else {
                     EngineAvailability::MissingBinary
                 }
@@ -288,9 +294,21 @@ impl UpscaleEngine for RealCuganEngine {
             acc
         });
         let stderr_abort = stderr_task.abort_handle();
+        // 目录批基线：输出目录可能预存续跑产物，成功计数只认本次新增；
+        // 页级失败数 = 输入页数 - 本次产出（引擎单页失败时退出码仍为 0）
+        let out_baseline = if is_dir {
+            count_files(&output).unwrap_or(0)
+        } else {
+            0
+        };
+        let expected_pages = if is_dir {
+            count_files(&input).unwrap_or(0).max(1)
+        } else {
+            1
+        };
         let timeout = if is_dir {
             // 按输入页数估算整批耗时（同 waifu2x），固定 64 页预算会误杀慢 GPU 大书
-            let pages = count_files(&input).unwrap_or(0).max(1) as u32;
+            let pages = expected_pages;
             self.page_timeout
                 .saturating_mul((pages / 8).max(1))
                 .saturating_mul(2)
@@ -309,23 +327,41 @@ impl UpscaleEngine for RealCuganEngine {
                 }
                 status = child.wait() => {
                     let status = status.map_err(|e| EngineError::Process(e.to_string()))?;
-                    let err_text = stderr_task.await.unwrap_or_default();
+                    // stderr 残留句柄可能让 join 挂起：限时取已累计内容，避免成功批被误判 Timeout
+                    let err_text = match tokio::time::timeout(Duration::from_secs(3), stderr_task)
+                        .await
+                    {
+                        Ok(Ok(text)) => text,
+                        _ => String::new(),
+                    };
                     if status.success() {
                         let pages_ok = if is_dir {
-                            count_files(&output).unwrap_or(0)
+                            count_files(&output)
+                                .unwrap_or(0)
+                                .saturating_sub(out_baseline)
+                                .min(expected_pages)
                         } else if output.is_file() {
                             1
                         } else {
                             0
                         };
+                        let pages_failed = expected_pages.saturating_sub(pages_ok);
+                        let mut message = if err_text.is_empty() {
+                            None
+                        } else {
+                            Some(truncate(&err_text, 512))
+                        };
+                        if pages_failed > 0 {
+                            let note = format!("引擎输出 {pages_ok}/{expected_pages} 页");
+                            message = Some(match message {
+                                Some(m) => format!("{m} | {note}"),
+                                None => note,
+                            });
+                        }
                         Ok(EnhanceBatchResult {
                             pages_ok,
-                            pages_failed: 0,
-                            message: if err_text.is_empty() {
-                                None
-                            } else {
-                                Some(truncate(&err_text, 512))
-                            },
+                            pages_failed,
+                            message,
                         })
                     } else {
                         warn!(%status, %err_text, "realcugan failed");
@@ -356,6 +392,11 @@ impl UpscaleEngine for RealCuganEngine {
 }
 
 async fn kill_child_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
+    // 子进程已退出（可能已被 wait 回收）则不再发组信号：
+    // pid 复用后负 pid 会命中无关进程组
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
     #[cfg(unix)]
     if let Some(pid) = pid {
         unsafe {

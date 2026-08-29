@@ -30,7 +30,7 @@ import {
 import { alignIndex, jobFileName, type LoadedPage } from "./readerNav";
 import { fitWindowToPageUrls, restoreDefaultWindowMinSize } from "./smartFit";
 
-type EngineOption = { id: string; main: string; sub: string };
+type EngineOption = { id: string; main: string; sub: string; noise?: boolean };
 
 export type ReaderToolbarProps = {
   i18n: Messages;
@@ -43,6 +43,9 @@ export type ReaderToolbarProps = {
   barTiny: boolean;
   moreOpen: boolean;
   setMoreOpen: Dispatch<SetStateAction<boolean>>;
+  /** 弹层开关/关闭逻辑留在本组件（草稿状态在此），但键盘导航与藏栏需要访问 */
+  aiMenuOpenRef: MutableRefObject<boolean>;
+  aiMenuCloseRef: MutableRefObject<() => void>;
   fullscreen: boolean;
   temporary: boolean;
   displayTitle: string | null;
@@ -118,6 +121,8 @@ function AiEnginePanel(p: {
   noiseValue: 0 | 1 | 2 | 3;
   onSelectEngine: (id: string) => void;
   onSelectNoise: (n: 0 | 1 | 2 | 3) => void;
+  /** 当前（草稿）引擎是否支持降噪；不支持时隐藏降噪区块 */
+  noiseSupported?: boolean;
   engineSwitchHint?: boolean;
   cacheStats?: EnhanceCacheStats | null;
   cacheLine?: string;
@@ -153,35 +158,37 @@ function AiEnginePanel(p: {
           ))}
         </div>
       </div>
-      <div className="ai-section">
-        <p className="ai-block-title">{p.i18n.readerNoiseLevel}</p>
-        <div className="ai-seg ai-seg-sm mt-2" role="radiogroup" aria-label={p.i18n.readerNoiseLevel}>
-          <span
-            className="ai-seg-thumb"
-            aria-hidden="true"
-            style={{ transform: `translateX(calc(100% * ${p.noiseValue}))` }}
-          />
-          {(
-            [
-              [0, p.i18n.readerNoiseLight],
-              [1, p.i18n.readerNoiseStandard],
-              [2, p.i18n.readerNoiseStrong],
-              [3, p.i18n.readerNoiseMax],
-            ] as const
-          ).map(([n, label]) => (
-            <button
-              key={n}
-              type="button"
-              role="radio"
-              aria-checked={p.noiseValue === n}
-              className={`ai-seg-item ${p.noiseValue === n ? "is-active" : ""}`}
-              onClick={() => p.onSelectNoise(n)}
-            >
-              {label}
-            </button>
-          ))}
+      {p.noiseSupported !== false && (
+        <div className="ai-section">
+          <p className="ai-block-title">{p.i18n.readerNoiseLevel}</p>
+          <div className="ai-seg ai-seg-sm mt-2" role="radiogroup" aria-label={p.i18n.readerNoiseLevel}>
+            <span
+              className="ai-seg-thumb"
+              aria-hidden="true"
+              style={{ transform: `translateX(calc(100% * ${p.noiseValue}))` }}
+            />
+            {(
+              [
+                [0, p.i18n.readerNoiseLight],
+                [1, p.i18n.readerNoiseStandard],
+                [2, p.i18n.readerNoiseStrong],
+                [3, p.i18n.readerNoiseMax],
+              ] as const
+            ).map(([n, label]) => (
+              <button
+                key={n}
+                type="button"
+                role="radio"
+                aria-checked={p.noiseValue === n}
+                className={`ai-seg-item ${p.noiseValue === n ? "is-active" : ""}`}
+                onClick={() => p.onSelectNoise(n)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
       {p.handleClearClick && (
         <div className="ai-section">
           <p className="ai-block-title">{p.i18n.readerAiCache}</p>
@@ -212,6 +219,9 @@ function AiEnginePanel(p: {
               p.i18n.readerAiCacheClear
             )}
           </button>
+          {p.engineSwitchHint && (
+            <p className="ai-hint">{p.i18n.readerAiEngineCacheHint}</p>
+          )}
         </div>
       )}
     </>
@@ -226,6 +236,8 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     barTiny,
     moreOpen,
     setMoreOpen,
+    aiMenuOpenRef,
+    aiMenuCloseRef,
     fullscreen,
     temporary,
     displayTitle,
@@ -284,13 +296,81 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
   const aiEngineMain =
     engineOptions.find((eng) => eng.id === engineId)?.main ?? engineId;
 
-  const closeAiMenu = useCallback(() => {
-    setAiMenuOpen(false);
+  // 草稿对应引擎（决定降噪区块显隐）：优先草稿，回落当前引擎
+  const effectiveEngineId = draftEngineId ?? engineId;
+  const effectiveEngine =
+    engineOptions.find((eng) => eng.id === effectiveEngineId);
+  const noiseSupported = effectiveEngine?.noise ?? true;
+
+  const engineDirty = Boolean(draftEngineId && draftEngineId !== engineId);
+  const noiseDirty =
+    noiseSupported && draftNoise != null && draftNoise !== noiseLevel;
+  const aiDirty = engineDirty || noiseDirty;
+
+  // 胶囊 tooltip 动态化：关闭 / 处理中 / 当前页已增强
+  const aiTipText = !enhanceOn
+    ? i18n.readerAiTooltip
+    : showingAi
+      ? i18n.readerAiTipEnhanced
+      : pageEnhancing
+        ? i18n.readerAiTipWorking
+        : i18n.readerAiTooltip;
+
+  // 草稿变更摘要，如「Real-ESRGAN · 降噪 强」
+  const noiseLabelFor = (n: 0 | 1 | 2 | 3) =>
+    n === 0
+      ? i18n.readerNoiseLight
+      : n === 1
+        ? i18n.readerNoiseStandard
+        : n === 2
+          ? i18n.readerNoiseStrong
+          : i18n.readerNoiseMax;
+  const aiDirtyParts: string[] = [];
+  if (engineDirty) aiDirtyParts.push(effectiveEngine?.main ?? draftEngineId ?? "");
+  if (noiseDirty && draftNoise != null) {
+    aiDirtyParts.push(`${i18n.readerNoiseLevel} ${noiseLabelFor(draftNoise)}`);
+  }
+  const aiDirtySummary = aiDirtyParts.join(" · ");
+
+  const commitDrafts = useCallback(() => {
     if (draftEngineId && draftEngineId !== engineId) persistEngine(draftEngineId);
-    if (draftNoise != null && draftNoise !== noiseLevel) persistNoise(draftNoise);
+    // 目标引擎不支持降噪时丢弃草稿降噪档（避免无效果参数写入）
+    const targetNoise =
+      engineOptions.find((eng) => eng.id === (draftEngineId ?? engineId))?.noise ??
+      true;
+    if (targetNoise && draftNoise != null && draftNoise !== noiseLevel) {
+      persistNoise(draftNoise);
+    }
     setDraftEngineId(null);
     setDraftNoise(null);
-  }, [draftEngineId, draftNoise, engineId, noiseLevel, persistEngine, persistNoise]);
+  }, [draftEngineId, draftNoise, engineId, engineOptions, noiseLevel, persistEngine, persistNoise]);
+
+  const closeAiMenu = useCallback(() => {
+    setAiMenuOpen(false);
+    commitDrafts();
+  }, [commitDrafts]);
+
+  // 向宿主（ReaderView）暴露弹层开关状态与关闭动作：
+  // 键盘导航的 Esc 优先关弹层、藏栏时收起弹层都依赖它
+  useEffect(() => {
+    aiMenuOpenRef.current = aiMenuOpen;
+    aiMenuCloseRef.current = closeAiMenu;
+  }, [aiMenuOpen, closeAiMenu, aiMenuOpenRef, aiMenuCloseRef]);
+
+  // 藏栏时收起弹层（提交草稿），避免"逻辑上仍开着"的监听器残留
+  useEffect(() => {
+    if (barHidden && aiMenuOpen) closeAiMenu();
+  }, [barHidden, aiMenuOpen, closeAiMenu]);
+
+  const discardDrafts = useCallback(() => {
+    setDraftEngineId(null);
+    setDraftNoise(null);
+  }, []);
+
+  const applyDraftsAndClose = useCallback(() => {
+    setAiMenuOpen(false);
+    commitDrafts();
+  }, [commitDrafts]);
 
   // 弹层打开期间挂外部点击/Esc 关闭;依赖 closeAiMenu 保证提交的是最新草稿
   useEffect(() => {
@@ -300,7 +380,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
       if (aiRef.current && !aiRef.current.contains(t)) closeAiMenu();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeAiMenu();
+      if (e.key === "Escape") {
+        // 阻断到 window 层(useKeyboardNav)的冒泡：Esc 语义已被本弹层消费
+        e.stopPropagation();
+        closeAiMenu();
+      }
     };
     const timer = window.setTimeout(() => {
       document.addEventListener("mousedown", onDoc);
@@ -603,9 +687,9 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                       type="button"
                       className="reader-ai-trigger"
                       disabled={visibleIndexes.length === 0}
-                      aria-label={i18n.readerAiTooltip}
-                      aria-pressed={showingAi}
-                      onMouseEnter={(e) => showTip(e, i18n.readerAiTooltip)}
+                      aria-label={aiTipText}
+                      aria-pressed={enhanceOn}
+                      onMouseEnter={(e) => showTip(e, aiTipText)}
                       onMouseLeave={hideTip}
                       onClick={() => p.toggleAi()}
                     >
@@ -623,7 +707,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                       aria-expanded={aiMenuOpen}
                       onMouseEnter={(e) => showTip(e, i18n.engine)}
                       onMouseLeave={hideTip}
-                      onClick={() => (aiMenuOpen ? closeAiMenu() : setAiMenuOpen(true))}
+                      onClick={() => {
+                        setMoreOpen(false);
+                        if (aiMenuOpen) closeAiMenu();
+                        else setAiMenuOpen(true);
+                      }}
                     >
                       <IconChevronDown />
                     </button>
@@ -655,6 +743,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         noiseValue={draftNoise ?? noiseLevel}
                         onSelectEngine={(id) => setDraftEngineId(id)}
                         onSelectNoise={(n) => setDraftNoise(n)}
+                        noiseSupported={noiseSupported}
                         engineSwitchHint={engineSwitchHint}
                         cacheStats={cacheStats}
                         cacheLine={cacheLine}
@@ -664,6 +753,37 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         handleClearClick={() => void p.handleClearClick()}
                         cacheSizeText={p.cacheSizeText}
                       />
+                      {aiDirty && (
+                        <div className="ai-section ai-apply-bar">
+                          <div className="min-w-0 flex-1">
+                            <p className="ai-apply-summary">
+                              {i18n.aiWillApply}
+                              {aiDirtySummary}
+                            </p>
+                            <p className="ai-apply-note">
+                              {cacheStats && cacheStats.bytes > 0
+                                ? `${i18n.aiCacheRegen}（${p.cacheSizeText(cacheStats)}）`
+                                : i18n.aiDirtyHint}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <button
+                              type="button"
+                              className="ai-btn-discard"
+                              onClick={discardDrafts}
+                            >
+                              {i18n.aiDiscard}
+                            </button>
+                            <button
+                              type="button"
+                              className="ai-btn-apply"
+                              onClick={applyDraftsAndClose}
+                            >
+                              {i18n.aiApply}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -703,6 +823,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                   aria-haspopup="menu"
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (aiMenuOpen) closeAiMenu();
                     setMoreOpen((v) => !v);
                   }}
                 >

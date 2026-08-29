@@ -213,7 +213,9 @@ export function useReaderEnhance(args: Args) {
               onError(errorMessage(e));
             }
           } finally {
-            setEnhanceBusy(false);
+            // 带代际守卫：翻页产生的旧任务 resolve 晚于新任务置 busy=true 时，
+            // 不能把新任务的"增强中"状态提前清零
+            if (epoch === enhanceEpochRef.current) setEnhanceBusy(false);
           }
         } else {
           setEnhanceBusy(false);
@@ -259,7 +261,8 @@ export function useReaderEnhance(args: Args) {
 
     return () => {
       cancelled = true;
-      setEnhanceBusy(false);
+      // cleanup 的清零同样带代际守卫：新 effect 已置 busy 时旧 cleanup 不动它
+      if (epoch === enhanceEpochRef.current) setEnhanceBusy(false);
     };
   }, [
     enhanceOn,
@@ -300,6 +303,13 @@ export function useReaderEnhance(args: Args) {
     if (!stats) return "—";
     const mb = stats.bytes / (1024 * 1024);
     return mb >= 10 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
+  };
+
+  /** 引擎副标签兜底：后端 detail 可能很长（如「就绪 · 目录批处理 · 线程 -j …」），只取第一段并限长 */
+  const compactDetail = (detail: string): string => {
+    const first = (detail ?? "").split("·")[0].trim();
+    if (!first) return "";
+    return first.length > 12 ? `${first.slice(0, 11)}…` : first;
   };
 
   const engineOptions = useMemo(() => {
@@ -345,41 +355,51 @@ export function useReaderEnhance(args: Args) {
       .map((e) => {
         const known =
           e.id === "realcugan-coreml"
-            ? { main: "Real-CUGAN", sub: "Core ML" }
+            ? { main: "Real-CUGAN", sub: "Core ML", noise: true }
             : e.id === "waifu2x-coreml"
-              ? { main: "Waifu2x", sub: "Core ML" }
+              ? { main: "Waifu2x", sub: "Core ML", noise: true }
               : e.id === "realesrgan-coreml"
-                ? { main: "Real-ESRGAN", sub: "4×" }
+                ? { main: "Real-ESRGAN", sub: "4×", noise: false }
                 : e.id === "animevideo-coreml"
-                  ? { main: "AnimeVideo v3", sub: "4× 极速" }
+                  ? { main: "AnimeVideo v3", sub: "4× 极速", noise: false }
                   : null;
         return {
           id: e.id,
           main: known?.main ?? e.label,
-          sub: known?.sub ?? e.detail ?? "",
+          sub: known?.sub ?? compactDetail(e.detail),
+          // ESRGAN/AnimeVideo 无降噪参数，设置面板据此显隐降噪区块
+          noise: known?.noise ?? true,
         };
       });
   }, [catalog]);
-  const engineIndex = Math.max(0, engineOptions.findIndex((o) => o.id === engineId));
 
-  const persistEngine = (id: string) => {
-    if (!isReaderEngine(id) || id === engineId) return;
-    enhanceEpochRef.current += 1;
-    void cancelReaderEnhance();
-    setEngineId(id);
-    saveReaderEngine(id);
-    setAiPages({});
-    if (cacheStats && cacheStats.bytes > 0) setEngineSwitchHint(true);
-  };
+  // useCallback：AI 弹层打开期间这些引用进入多个 effect 依赖链
+  // （提交回调、document 监听 effect），每次渲染换新引用会导致监听器
+  // 拆除重挂、漏事件
+  const persistEngine = useCallback(
+    (id: string) => {
+      if (!isReaderEngine(id) || id === engineId) return;
+      enhanceEpochRef.current += 1;
+      void cancelReaderEnhance();
+      setEngineId(id);
+      saveReaderEngine(id);
+      setAiPages({});
+      if (cacheStats && cacheStats.bytes > 0) setEngineSwitchHint(true);
+    },
+    [engineId, cacheStats],
+  );
 
-  const persistNoise = (n: 0 | 1 | 2 | 3) => {
-    if (n === noiseLevel) return;
-    enhanceEpochRef.current += 1;
-    void cancelReaderEnhance();
-    setNoiseLevel(n);
-    saveEnhanceNoise(n);
-    setAiPages({});
-  };
+  const persistNoise = useCallback(
+    (n: 0 | 1 | 2 | 3) => {
+      if (n === noiseLevel) return;
+      enhanceEpochRef.current += 1;
+      void cancelReaderEnhance();
+      setNoiseLevel(n);
+      saveEnhanceNoise(n);
+      setAiPages({});
+    },
+    [noiseLevel],
+  );
 
   const handleClearClick = async () => {
     if (clearingCache) return;
@@ -422,7 +442,6 @@ export function useReaderEnhance(args: Args) {
     clearToast,
     engineSwitchHint,
     engineOptions,
-    engineIndex,
     cacheSizeText,
     persistEngine,
     persistNoise,

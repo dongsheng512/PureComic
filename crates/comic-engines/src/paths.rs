@@ -3,6 +3,17 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// 打包版（.app/MSI）由宿主进程在 setup 时显式指认的资源根目录。
+/// 之所以不用环境变量传递：release 下环境可被启动环境注入，等价于允许
+/// 从任意目录加载未校验的引擎/模型；进程内 OnceLock 只能由本程序设置。
+static PACKAGED_THIRD_PARTY: OnceLock<PathBuf> = OnceLock::new();
+
+/// 宿主（桌面端）在 setup 阶段调用，优先级最高的 third_party 根目录。
+pub fn set_packaged_third_party(root: impl Into<PathBuf>) {
+    let _ = PACKAGED_THIRD_PARTY.set(root.into());
+}
 
 /// Host triple folder name used under `ncnn-vulkan/waifu2x-ncnn-vulkan/bin/<target>/`.
 pub fn host_target_triple() -> &'static str {
@@ -67,6 +78,12 @@ pub fn find_third_party_root(start: &Path) -> Option<PathBuf> {
 /// 启动时注入替换过的引擎二进制（配合 checksums 校验才是完整的防线）。
 pub fn third_party_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
+    if let Some(p) = PACKAGED_THIRD_PARTY.get() {
+        out.push(p.clone());
+    }
+    // 环境变量仅限 debug/test（对齐 config.rs 对 COMIC_WAIFU2X_BIN 的处理）：
+    // release 下启动环境可注入未校验的引擎与模型目录
+    #[cfg(any(debug_assertions, test))]
     if let Ok(p) = env::var("COMIC_THIRD_PARTY") {
         out.push(PathBuf::from(p));
     }
@@ -380,6 +397,7 @@ fn first_existing_dir(paths: &[PathBuf]) -> Option<PathBuf> {
 pub struct RealCuganPaths {
     pub binary: PathBuf,
     pub models_root: PathBuf,
+    pub third_party: PathBuf,
 }
 
 pub fn resolve_realcugan_paths() -> Option<RealCuganPaths> {
@@ -410,6 +428,7 @@ pub fn resolve_realcugan_paths() -> Option<RealCuganPaths> {
                 return Some(RealCuganPaths {
                     binary,
                     models_root,
+                    third_party: tp,
                 });
             }
         }
@@ -442,10 +461,9 @@ const EMBEDDED_CHECKSUMS: &str = include_str!(concat!(
     "/../../third_party/ncnn-vulkan/checksums.sha256"
 ));
 
-fn sha_for_host_binary(text: &str) -> Option<String> {
+fn sha_for_host_binary(text: &str, engine_dir: &str, bin_name: &str) -> Option<String> {
     let triple = host_target_triple();
-    let bin_name = binary_name();
-    let needle = format!("waifu2x-ncnn-vulkan/bin/{triple}/{bin_name}");
+    let needle = format!("{engine_dir}/bin/{triple}/{bin_name}");
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -464,8 +482,12 @@ fn sha_for_host_binary(text: &str) -> Option<String> {
 
 /// Expected sha256 for host binary：优先编译期嵌入的官方 pin，
 /// 其次 sidecar 目录里的 `checksums.sha256`（兼容本地 fetch 流程）。
-pub fn expected_binary_sha256(third_party: &Path) -> Option<String> {
-    if let Some(sum) = sha_for_host_binary(EMBEDDED_CHECKSUMS) {
+pub fn expected_binary_sha256(
+    third_party: &Path,
+    engine_dir: &str,
+    bin_name: &str,
+) -> Option<String> {
+    if let Some(sum) = sha_for_host_binary(EMBEDDED_CHECKSUMS, engine_dir, bin_name) {
         return Some(sum);
     }
     let file = [
@@ -475,7 +497,7 @@ pub fn expected_binary_sha256(third_party: &Path) -> Option<String> {
     .into_iter()
     .find(|p| p.is_file())?;
     let text = std::fs::read_to_string(file).ok()?;
-    sha_for_host_binary(&text)
+    sha_for_host_binary(&text, engine_dir, bin_name)
 }
 
 #[cfg(test)]
@@ -485,5 +507,22 @@ mod tests {
     #[test]
     fn triple_non_empty() {
         assert!(!host_target_triple().is_empty());
+    }
+
+    #[test]
+    fn sha_parser_matches_engine_specific_line() {
+        let t = host_target_triple();
+        let text = format!(
+            "aaaa  waifu2x-ncnn-vulkan/bin/{t}/waifu2x-ncnn-vulkan\n\
+             bbbb  realcugan-ncnn-vulkan/bin/{t}/realcugan-ncnn-vulkan\n"
+        );
+        assert_eq!(
+            sha_for_host_binary(&text, "waifu2x-ncnn-vulkan", binary_name()).as_deref(),
+            Some("aaaa")
+        );
+        assert_eq!(
+            sha_for_host_binary(&text, "realcugan-ncnn-vulkan", realcugan_binary_name()).as_deref(),
+            Some("bbbb")
+        );
     }
 }

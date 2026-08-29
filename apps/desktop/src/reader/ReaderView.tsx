@@ -97,6 +97,10 @@ export function ReaderView({
   const [pageEditing, setPageEditing] = useState(false);
   const [pageDraft, setPageDraft] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+  // AI 弹层的开关与"关闭即提交草稿"逻辑都在 Toolbar 内部(草稿状态在那里);
+  // 键盘导航(Esc 优先关弹层)与藏栏收起通过这两个 ref 请求 Toolbar 执行
+  const aiMenuOpenRef = useRef(false);
+  const aiMenuCloseRef = useRef<() => void>(() => {});
   const viewportRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -573,6 +577,8 @@ export function ReaderView({
     setPageEditing,
     moreOpen,
     setMoreOpen,
+    aiMenuOpen: aiMenuOpenRef.current,
+    closeAiMenu: () => aiMenuCloseRef.current(),
     toggleAi: enhance.toggleAi,
   });
 
@@ -845,6 +851,8 @@ export function ReaderView({
         barTiny={barTiny}
         moreOpen={moreOpen}
         setMoreOpen={setMoreOpen}
+        aiMenuOpenRef={aiMenuOpenRef}
+        aiMenuCloseRef={aiMenuCloseRef}
         fullscreen={fullscreen}
         temporary={temporary}
         displayTitle={displayTitle}

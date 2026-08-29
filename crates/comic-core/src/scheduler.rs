@@ -122,10 +122,16 @@ impl Scheduler {
     }
 
     pub async fn create_job(&self, req: CreateJobRequest) -> AppResult<CreateJobResult> {
+        // 显式点名（非 auto、非空串——空串会被 parse_engine_kind 映射为默认引擎）
+        // 的引擎缺失时不允许静默降级 mock
+        let explicit_engine = req
+            .engine
+            .as_deref()
+            .is_some_and(|e| !e.trim().is_empty() && !e.eq_ignore_ascii_case("auto"));
         let (source, mut options, output) = req.into_parts()?;
         // Real-CUGAN 参数归一化：实际生效值写进 manifest（引擎内部同规则仅兜底）
         let normalized = options.normalize_realcugan();
-        self.ensure_engine_ready(options.engine)?;
+        self.ensure_engine_ready(options.engine, explicit_engine)?;
         let engine = self.pick_engine(options.engine)?;
         crate::estimate::assert_disk_ok(&source, options.scale.as_u8(), &self.cfg)?;
         if !output.dir.exists() {
@@ -288,6 +294,7 @@ impl Scheduler {
     }
 
     pub async fn cancel_job(&self, job_id: &str) -> AppResult<()> {
+        validate_job_id(job_id)?;
         // 1) Live in-memory job: **cancel token FIRST** (never wait on write lock before this,
         //    or extract/enhance holding the lock will make cancel appear stuck).
         {
@@ -338,6 +345,7 @@ impl Scheduler {
     }
 
     pub async fn get_job(&self, job_id: &str) -> AppResult<JobStatus> {
+        validate_job_id(job_id)?;
         if let Some(live) = self.jobs.read().await.get(job_id) {
             let mut m = live.manifest.write().await;
             if crate::job::heal_if_output_ready(&mut m) {
@@ -387,6 +395,7 @@ impl Scheduler {
     /// removed — otherwise the worker's final manifest save recreates the folder
     /// and the job "resurrects" in list_jobs.
     pub async fn remove_job(&self, job_id: &str) -> AppResult<()> {
+        validate_job_id(job_id)?;
         let live = self.jobs.write().await.remove(job_id);
         if let Some(live) = live {
             live.cancel.cancel();
@@ -584,13 +593,10 @@ impl Scheduler {
         options: Option<crate::preview::EnhanceOptionsDto>,
     ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
         let src = self.resolve_reader_source(job_id, source).await?;
-        let kind = crate::job::parse_engine_kind(
-            options
-                .as_ref()
-                .and_then(|o| o.engine.as_deref())
-                .unwrap_or("realcugan-coreml"),
-        )?;
-        self.ensure_engine_ready(kind)?;
+        let requested_engine = options.as_ref().and_then(|o| o.engine.as_deref());
+        let kind = crate::job::parse_engine_kind(requested_engine.unwrap_or("realcugan-coreml"))?;
+        // 阅读器引擎来自用户持久化偏好，视为显式点名
+        self.ensure_engine_ready(kind, requested_engine.is_some())?;
         let engine = self.pick_engine(kind)?;
         let cancel = CancellationToken::new();
         {
@@ -729,6 +735,7 @@ impl Scheduler {
     }
 
     async fn load_manifest_clone(&self, job_id: &str) -> AppResult<JobManifest> {
+        validate_job_id(job_id)?;
         if let Some(live) = self.jobs.read().await.get(job_id) {
             return Ok(live.manifest.read().await.clone());
         }
@@ -822,15 +829,24 @@ impl Scheduler {
         self.gpu.clone()
     }
 
-    pub fn ensure_engine_ready(&self, kind: EngineKind) -> AppResult<()> {
+    pub fn ensure_engine_ready(&self, kind: EngineKind, explicit: bool) -> AppResult<()> {
         if self.cfg.use_mock_engine && self.override_engine.is_none() {
             return Ok(());
         }
         let e = self.pick_engine(kind)?;
-        // 静默回退到 mock（最近邻放大）会让用户拿到「假超分」；至少在日志与
-        // 任务消息里显式警告。desktop release 已关 allow_mock_fallback，主要
-        // 影响 CLI / 开发环境。
+        // 静默回退到 mock（最近邻放大）会让用户拿到「假超分」。显式点名的引擎
+        // 直接拒绝；仅 auto/未指定可在开发与 CLI 环境回退（desktop release 已
+        // 关 allow_mock_fallback）。
         if e.status().id == "mock" && !self.cfg.use_mock_engine {
+            if explicit {
+                return Err(AppError::new(
+                    crate::error::ErrorCode::BinaryIntegrity,
+                    format!(
+                        "请求的引擎不可用，已阻止降级为模拟引擎（最近邻放大）: {kind:?}。\
+                         请安装对应引擎后重试"
+                    ),
+                ));
+            }
             warn!("请求的引擎 {kind:?} 不可用，回退到模拟引擎（最近邻放大，非真实超分）");
         }
         match e.is_available() {
@@ -937,6 +953,18 @@ fn remap_done_from_disk(m: &mut JobManifest) {
     m.refresh_stats();
 }
 
+/// job_id 一律由 `Uuid::new_v4().to_string()` 生成；入口先校验格式，
+/// 拒绝 `../x`、绝对路径等会经 `jobs_dir().join()` 穿越到任意目录的输入。
+fn validate_job_id(job_id: &str) -> AppResult<()> {
+    if uuid::Uuid::parse_str(job_id).is_ok() {
+        Ok(())
+    } else {
+        Err(AppError::path_traversal(format!(
+            "非法任务 ID（应为 UUID）: {job_id}"
+        )))
+    }
+}
+
 async fn wait_for_worker_handle(
     live: &LiveJob,
     timeout: Duration,
@@ -998,6 +1026,35 @@ mod tests {
     use comic_engines::Waifu2xEngine;
     use image::{ImageBuffer, Rgb};
     use std::time::Duration;
+
+    #[test]
+    fn job_id_rejects_traversal_and_non_uuid() {
+        assert!(validate_job_id("0e0d1a97-6c3b-4f60-9f0e-2f15372f5aa1").is_ok());
+        for bad in ["../..", "/tmp/x", "a/b", "", "not-a-uuid", "..", "."] {
+            let err = validate_job_id(bad).unwrap_err();
+            assert_eq!(
+                err.code,
+                crate::error::ErrorCode::PathTraversal,
+                "case {bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_job_rejects_traversal_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let sched = Scheduler::new(cfg).unwrap();
+        let err = sched.cancel_job("../../../../Users").await.unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::PathTraversal);
+        // 穿越目标目录必须原样存在（未被触碰）
+        assert!(tmp.path().exists());
+    }
 
     #[tokio::test]
     async fn end_to_end_folder_mock() {

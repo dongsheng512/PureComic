@@ -35,4 +35,23 @@ describe("jobsEqual", () => {
   it("only etaSec changed is not equal", () => {
     expect(jobsEqual([job()], [job({ etaSec: 12 })])).toBe(false);
   });
+
+  it("error with identical content but new object reference is equal", () => {
+    // 每次 listJobs 返回全新反序列化对象，引用比较会使轮询去重永久失效
+    const a = [job({ error: { code: "PROCESS_FAIL", message: "引擎退出码 1" } })];
+    const b = [job({ error: { code: "PROCESS_FAIL", message: "引擎退出码 1" } })];
+    expect(a[0].error).not.toBe(b[0].error);
+    expect(jobsEqual(a, b)).toBe(true);
+  });
+
+  it("error content changed is not equal", () => {
+    const a = [job({ error: { code: "PROCESS_FAIL", message: "引擎退出码 1" } })];
+    const b = [job({ error: { code: "OOM", message: "显存不足" } })];
+    expect(jobsEqual(a, b)).toBe(false);
+  });
+
+  it("error set vs undefined is not equal", () => {
+    const a = [job({ error: { code: "OOM", message: "显存不足" } })];
+    expect(jobsEqual(a, [job()])).toBe(false);
+  });
 });

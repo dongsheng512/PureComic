@@ -478,7 +478,9 @@ async fn open_output_folder(state: State<'_, AppState>, job_id: String) -> Resul
 /// Point config at Core ML models inside the .app bundle (release) when present.
 fn apply_packaged_engine_paths(app: &AppHandle, cfg: &mut AppConfig) {
     if let Ok(res) = app.path().resource_dir() {
-        std::env::set_var("COMIC_THIRD_PARTY", &res);
+        // 进程内显式指认资源根：release 不再经 COMIC_THIRD_PARTY 环境变量
+        // 传递（环境可被启动环境注入未校验目录）
+        comic_engines::paths::set_packaged_third_party(&res);
         if cfg.models_dir.is_none() {
             cfg.models_dir = Some(res);
         }
