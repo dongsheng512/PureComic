@@ -46,7 +46,7 @@ jobs:
           RES=apps/desktop/src-tauri/resources
           mkdir -p "$BIN" \
             "$RES/models-cunet" "$RES/models-se" "$RES/models-pro" "$RES/models-nose" \
-            "$RES/waifu2x-coreml" "$RES/realesrgan-coreml"
+            "$RES/waifu2x-coreml" "$RES/realesrgan-coreml" "$RES/realcugan-coreml"
           for triple in aarch64-apple-darwin x86_64-apple-darwin; do
             : > "$BIN/waifu2x-ncnn-vulkan-$triple"
             : > "$BIN/realcugan-ncnn-vulkan-$triple"
