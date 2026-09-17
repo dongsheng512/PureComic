@@ -7,7 +7,7 @@
       document.documentElement.classList.remove("dark");
       document.documentElement.style.backgroundColor = "#FFFFFF";
     } else {
-      document.documentElement.style.backgroundColor = "#212121";
+      document.documentElement.style.backgroundColor = "#1c1c1e";
     }
   } catch (_) {}
 })();

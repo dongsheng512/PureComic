@@ -46,6 +46,8 @@ export type ReaderToolbarProps = {
   /** 弹层开关/关闭逻辑留在本组件（草稿状态在此），但键盘导航与藏栏需要访问 */
   aiMenuOpenRef: MutableRefObject<boolean>;
   aiMenuCloseRef: MutableRefObject<() => void>;
+  /** 丢弃草稿并关闭（换书场景：旧书参数不应提交并触发新书重优化） */
+  aiMenuDiscardRef: MutableRefObject<() => void>;
   fullscreen: boolean;
   temporary: boolean;
   displayTitle: string | null;
@@ -238,6 +240,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     setMoreOpen,
     aiMenuOpenRef,
     aiMenuCloseRef,
+    aiMenuDiscardRef,
     fullscreen,
     temporary,
     displayTitle,
@@ -345,10 +348,23 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     setDraftNoise(null);
   }, [draftEngineId, draftNoise, engineId, engineOptions, noiseLevel, persistEngine, persistNoise]);
 
+  const discardDrafts = useCallback(() => {
+    setDraftEngineId(null);
+    setDraftNoise(null);
+  }, []);
+
+  /**
+   * 关闭弹层 = **不应用**（等于放弃草稿）。
+   *
+   * 外部点击 / Esc / 藏栏 / 切"更多" 都走这里 —— 这几个手势在别处一律是"取消"，
+   * 所以关闭绝不能顺手提交。提交必须是显式动作，只有「应用」按钮走
+   * `applyDraftsAndClose`。旧实现是 `setAiMenuOpen(false) + commitDrafts()`：
+   * 用户改完引擎想反悔、顺手点面板外面，参数被静默应用并触发重跑缓存。
+   */
   const closeAiMenu = useCallback(() => {
     setAiMenuOpen(false);
-    commitDrafts();
-  }, [commitDrafts]);
+    discardDrafts();
+  }, [discardDrafts]);
 
   // 向宿主（ReaderView）暴露弹层开关状态与关闭动作：
   // 键盘导航的 Esc 优先关弹层、藏栏时收起弹层都依赖它
@@ -357,22 +373,23 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     aiMenuCloseRef.current = closeAiMenu;
   }, [aiMenuOpen, closeAiMenu, aiMenuOpenRef, aiMenuCloseRef]);
 
-  // 藏栏时收起弹层（提交草稿），避免"逻辑上仍开着"的监听器残留
+  // 换书等场景:收起弹层并丢弃草稿 —— 与"关闭=不应用"同一语义,直接复用
+  useEffect(() => {
+    aiMenuDiscardRef.current = closeAiMenu;
+  }, [closeAiMenu, aiMenuDiscardRef]);
+
+  // 藏栏会卸载顶栏,弹层随之消失;这里补一次收起,避免"逻辑上仍开着"的监听器残留（不提交）
   useEffect(() => {
     if (barHidden && aiMenuOpen) closeAiMenu();
   }, [barHidden, aiMenuOpen, closeAiMenu]);
-
-  const discardDrafts = useCallback(() => {
-    setDraftEngineId(null);
-    setDraftNoise(null);
-  }, []);
 
   const applyDraftsAndClose = useCallback(() => {
     setAiMenuOpen(false);
     commitDrafts();
   }, [commitDrafts]);
 
-  // 弹层打开期间挂外部点击/Esc 关闭;依赖 closeAiMenu 保证提交的是最新草稿
+  // 弹层打开期间挂外部点击/Esc 关闭。关闭=放弃（见 closeAiMenu），
+  // 所以这里不需要"捉"最新草稿——草稿只在点「应用」时才提交。
   useEffect(() => {
     if (!aiMenuOpen) return;
     const onDoc = (e: MouseEvent) => {
@@ -509,7 +526,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                 p.setPageEditing(false);
               }
             }}
-            className="reader-page-chip border-0 bg-white text-center outline-none ring-1 ring-ink-300 dark:bg-surface-raised dark:ring-white/15"
+            className={`reader-page-chip-edit ${barTiny ? "reader-page-chip-sm" : ""}`}
             inputMode="numeric"
             aria-label={i18n.readerJumpHint}
           />
@@ -549,7 +566,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
       </div>
       {total > 0 && !barTiny && (
         <div className="pointer-events-none absolute top-full z-20 pt-2 opacity-0 transition-opacity duration-150 group-hover/pager:pointer-events-auto group-hover/pager:opacity-100">
-          <div className="w-64 select-none rounded-xl border border-ink-200 bg-white px-3 py-2.5 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised">
+          <div className="w-64 select-none rounded-xl border border-ink-200 bg-white px-3 py-2.5 shadow-panel dark:border-white/10 dark:bg-surface-raised">
             <input
               type="range"
               min={1}
@@ -614,8 +631,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
       {!barHidden && (
         <div
           ref={p.barRef}
-          className={`reader-bar relative shrink-0 border-b border-ink-200/70 bg-ink-100 pr-2 dark:border-white/[0.08] dark:bg-surface ${
-            barTiny ? "pl-[72px]" : "pl-[88px]"
+          className={`reader-bar relative shrink-0 pr-2 ${
+            /* 左侧要避开系统红绿灯（12pt 灯、20pt 间距 → 灯组右缘约 66pt）。
+               窄窗给 78：返回键现在有可见的底，原来的 72 只剩 6pt 间隙，会贴到绿灯上；
+               常规给 88（离灯 22pt），与原生工具栏观感一致。 */
+            barTiny ? "pl-[78px]" : "pl-[88px]"
           } ${moreOpen ? "z-50" : "z-40"}`}
           onClick={(e) => e.stopPropagation()}
         >
@@ -625,15 +645,17 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             onMouseDown={startWindowDrag}
           />
           <div className="relative z-10 flex h-full items-center gap-2 pointer-events-none">
+            {/* gap-2(8pt) 而不是 gap-1(4pt)：返回键现在有可见的底，
+                4pt 会让它的右边框紧贴书名（书名的首个字形是 [ ，视觉上更挤） */}
             <div
-              className={`relative z-20 flex min-w-0 shrink-0 items-center gap-1 pointer-events-none ${
+              className={`relative z-20 flex min-w-0 shrink-0 items-center gap-2 pointer-events-none ${
                 barCompact ? "" : "max-w-[28%] sm:max-w-[32%]"
               }`}
             >
               {onClose && (
                 <button
                   type="button"
-                  className="reader-icon-btn pointer-events-auto"
+                  className="reader-back-btn pointer-events-auto"
                   aria-label={backLabel ?? i18n.readerBackLibrary}
                   onMouseEnter={(e) => showTip(e, backLabel ?? i18n.readerBackLibrary)}
                   onMouseLeave={hideTip}
@@ -646,7 +668,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                 (displayTitle ? (
                   <span
                     data-tauri-drag-region
-                    className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-900 dark:text-fg pointer-events-auto"
+                    className="reader-bar-title min-w-0 flex-1 truncate text-[13px] font-medium pointer-events-auto"
                     title={displayTitle}
                     onMouseDown={startWindowDrag}
                   >
@@ -655,14 +677,14 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                 ) : (
                   <span
                     data-tauri-drag-region
-                    className="truncate text-[12px] text-ink-500 dark:text-fg-muted pointer-events-auto"
+                    className="reader-bar-muted truncate text-[12px] pointer-events-auto"
                     onMouseDown={startWindowDrag}
                   >
                     {i18n.readerEmpty}
                   </span>
                 ))}
               {!barCompact && temporary && (
-                <span className="pointer-events-none shrink-0 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-100">
+                <span className="pointer-events-none shrink-0 rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-warning-soft dark:text-warning-fg">
                   {i18n.externalTempBadge}
                 </span>
               )}
@@ -770,7 +792,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                             <button
                               type="button"
                               className="ai-btn-discard"
-                              onClick={discardDrafts}
+                              onClick={closeAiMenu}
                             >
                               {i18n.aiDiscard}
                             </button>
@@ -832,7 +854,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                 {moreOpen && (
                   <div className="reader-menu reader-menu-wide" role="menu" onClick={(e) => e.stopPropagation()}>
                     {barCompact && (
-                      <div className="border-b border-ink-100 px-3 pb-2 pt-2 dark:border-white/[0.08]">
+                      <div className="border-b border-ink-100 px-3 pb-2 pt-2 dark:border-white/10">
                         <p className="text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                           {i18n.readerMode}
                         </p>
@@ -865,7 +887,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         )}
                       </div>
                     )}
-                    <div className="mt-3 border-t border-ink-100 px-3 pt-3 dark:border-white/[0.08]">
+                    <div className="mt-3 border-t border-ink-100 px-3 pt-3 dark:border-white/10">
                       <p className="px-0 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                         {i18n.readerBg}
                       </p>
@@ -920,7 +942,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                       </div>
                     </div>
 
-                    <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
+                    <div className="my-1 border-t border-ink-100 dark:border-white/10" />
                     <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                       {i18n.readerFitScreen}
                     </p>
@@ -992,7 +1014,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         {i18n.readerFitCurrentHint}
                       </span>
                     </button>
-                    <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
+                    <div className="my-1 border-t border-ink-100 dark:border-white/10" />
                     <button
                       type="button"
                       className="flex w-full px-3 py-2 text-left text-xs text-ink-800 hover:bg-ink-50 dark:text-fg dark:hover:bg-white/[0.06]"
@@ -1015,7 +1037,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                     </button>
                     {jobs.length > 0 && (
                       <>
-                        <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
+                        <div className="my-1 border-t border-ink-100 dark:border-white/10" />
                         <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-400 dark:text-fg-muted">
                           {i18n.readerPickJob}
                         </p>

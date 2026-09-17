@@ -27,8 +27,10 @@ pub use waifu2x_coreml::Waifu2xCoreMlEngine;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -240,13 +242,43 @@ pub trait UpscaleEngine: Send + Sync {
     ) -> Result<EnhanceBatchResult, EngineError>;
 }
 
-/// Verify file SHA-256 hex digest (lowercase).
-pub fn verify_sha256(path: &std::path::Path, expected_hex: &str) -> Result<(), EngineError> {
+struct ShaCacheHit {
+    mtime: SystemTime,
+    len: u64,
+    /// Lowercased expected digest this hit was computed against.
+    expected: String,
+}
+
+/// Successful SHA checks only. Failures are not cached so a replaced file
+/// (same path, later matching pin) is re-read instead of sticking on a miss.
+fn sha_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, ShaCacheHit>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, ShaCacheHit>>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+fn sha_compute_counts() -> std::sync::MutexGuard<'static, HashMap<PathBuf, u64>> {
+    static COUNTS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+    COUNTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn file_fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = path.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn hash_file_sha256(path: &Path) -> Result<String, EngineError> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
-    if !path.is_file() {
-        return Err(EngineError::BinaryIntegrity);
-    }
     let mut f = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
@@ -257,10 +289,119 @@ pub fn verify_sha256(path: &std::path::Path, expected_hex: &str) -> Result<(), E
         }
         hasher.update(&buf[..n]);
     }
-    let got = hex::encode(hasher.finalize());
-    if got.eq_ignore_ascii_case(expected_hex.trim()) {
-        Ok(())
-    } else {
-        Err(EngineError::BinaryIntegrity)
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+fn note_sha_compute(path: &Path) {
+    *sha_compute_counts().entry(path.to_path_buf()).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+pub fn sha256_compute_count(path: &Path) -> u64 {
+    sha_compute_counts().get(path).copied().unwrap_or(0)
+}
+
+/// Verify file SHA-256 hex digest (lowercase).
+///
+/// Process-level cache: if `mtime` + `len` are unchanged and the expected
+/// digest matches a previous **success**, skip re-hashing the whole binary.
+///
+/// # 威胁模型（别把这个缓存当成防篡改手段）
+///
+/// 缓存命中判据是 `mtime + len + expected` 三者相同 —— 这只是**省掉重复哈希**的
+/// 性能优化，**不是**完整性证明。攻击者只要做一个等长改写再用 `utimensat` 把 mtime
+/// 回写成原值，就能让命中继续成立，从而绕开一次校验。也就是说：
+///
+/// - 能防：传输/打包环节造成的截断、错版本、磁盘损坏（长度或 mtime 通常都会变）。
+/// - 不能防：**对本地文件有写权限的**攻击者精心构造的替换。
+///
+/// 如果将来要拿它挡本地篡改，必须换掉校验依据（例如每次启动都重新哈希、把摘要记在
+/// 只读位置，或用系统代码签名 / 文件权限做真正的锚）。
+/// 为避免这条弱化被误读，缓存只存成功项、失败一律不缓存，且 mtime 用纳秒精度。
+pub fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), EngineError> {
+    if !path.is_file() {
+        return Err(EngineError::BinaryIntegrity);
+    }
+    let expected = expected_hex.trim().to_ascii_lowercase();
+    let fp = file_fingerprint(path);
+    if let Some((mtime, len)) = fp {
+        let cache = sha_cache();
+        if let Some(hit) = cache.get(path) {
+            if hit.mtime == mtime && hit.len == len && hit.expected == expected {
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    note_sha_compute(path);
+
+    let got = hash_file_sha256(path)?;
+    if !got.eq_ignore_ascii_case(&expected) {
+        return Err(EngineError::BinaryIntegrity);
+    }
+    if let Some((mtime, len)) = fp.or_else(|| file_fingerprint(path)) {
+        sha_cache().insert(
+            path.to_path_buf(),
+            ShaCacheHit {
+                mtime,
+                len,
+                expected,
+            },
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod verify_sha256_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    fn sha_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn second_check_skips_rehash() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"purecomic-sha-cache").unwrap();
+        tmp.flush().unwrap();
+        let path = tmp.path().to_path_buf();
+        let sum = sha_hex(b"purecomic-sha-cache");
+        let before = sha256_compute_count(&path);
+        verify_sha256(&path, &sum).unwrap();
+        verify_sha256(&path, &sum).unwrap();
+        verify_sha256(&path, &sum.to_ascii_uppercase()).unwrap();
+        assert_eq!(sha256_compute_count(&path), before + 1);
+    }
+
+    #[test]
+    fn mismatch_is_not_cached() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"aaa").unwrap();
+        tmp.flush().unwrap();
+        let path = tmp.path().to_path_buf();
+        let before = sha256_compute_count(&path);
+        let wrong = sha_hex(b"bbb");
+        assert!(verify_sha256(&path, &wrong).is_err());
+        assert!(verify_sha256(&path, &wrong).is_err());
+        assert_eq!(sha256_compute_count(&path), before + 2);
+    }
+
+    #[test]
+    fn content_change_rehashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bin");
+        std::fs::write(&path, b"v1").unwrap();
+        let s1 = sha_hex(b"v1");
+        verify_sha256(&path, &s1).unwrap();
+        let after_first = sha256_compute_count(&path);
+        std::fs::write(&path, b"v2").unwrap();
+        assert!(verify_sha256(&path, &s1).is_err());
+        verify_sha256(&path, &sha_hex(b"v2")).unwrap();
+        assert!(sha256_compute_count(&path) >= after_first + 2);
     }
 }

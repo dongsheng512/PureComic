@@ -5,9 +5,9 @@ use crate::error::{AppError, AppResult};
 use crate::job::{CreateJobRequest, CreateJobResult, JobManifest, JobState, JobStatus, ResumeHint};
 use crate::pipeline::{self, new_gpu_lock, GpuLock, ProgressCallback};
 use comic_engines::{EngineHub, EngineInfo, EngineKind, MockEngine, UpscaleEngine};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -49,7 +49,30 @@ pub struct Scheduler {
     jobs: Arc<RwLock<HashMap<String, LiveJob>>>,
     on_progress: Arc<RwLock<Option<ProgressCallback>>>,
     library: StdMutex<crate::library::LibraryStore>,
-    reader_enhance_cancels: StdMutex<Vec<CancellationToken>>,
+    reader_enhance_cancels: Arc<StdMutex<Vec<(u64, CancellationToken)>>>,
+    reader_enhance_cancel_seq: AtomicU64,
+    /// Serializes resume discovery with finished-job GC so a resumed id is not deleted mid-insert.
+    gc: tokio::sync::Mutex<()>,
+    /// Terminal disk jobs: reuse JobStatus while manifest mtime/len are unchanged.
+    disk_status_cache: Arc<StdMutex<HashMap<String, CachedDiskStatus>>>,
+}
+
+struct CachedDiskStatus {
+    mtime_nanos: u128,
+    len: u64,
+    status: JobStatus,
+}
+
+struct UnregisterReaderCancel {
+    slots: Arc<StdMutex<Vec<(u64, CancellationToken)>>>,
+    id: u64,
+}
+
+impl Drop for UnregisterReaderCancel {
+    fn drop(&mut self) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.retain(|(slot_id, _)| *slot_id != self.id);
+    }
 }
 
 impl Scheduler {
@@ -70,7 +93,10 @@ impl Scheduler {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             on_progress: Arc::new(RwLock::new(None)),
             library,
-            reader_enhance_cancels: StdMutex::new(Vec::new()),
+            reader_enhance_cancels: Arc::new(StdMutex::new(Vec::new())),
+            reader_enhance_cancel_seq: AtomicU64::new(0),
+            gc: tokio::sync::Mutex::new(()),
+            disk_status_cache: Arc::new(StdMutex::new(HashMap::new())),
         })
     }
 
@@ -91,7 +117,10 @@ impl Scheduler {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             on_progress: Arc::new(RwLock::new(None)),
             library,
-            reader_enhance_cancels: StdMutex::new(Vec::new()),
+            reader_enhance_cancels: Arc::new(StdMutex::new(Vec::new())),
+            reader_enhance_cancel_seq: AtomicU64::new(0),
+            gc: tokio::sync::Mutex::new(()),
+            disk_status_cache: Arc::new(StdMutex::new(HashMap::new())),
         })
     }
 
@@ -145,8 +174,15 @@ impl Scheduler {
             )));
         }
 
-        // 磁盘 resume 放在写锁外，避免扫目录卡住 cancel/list。
-        let resume = self.find_resume_on_disk(&source);
+        // 与 clear_finished_jobs 互斥：避免 resume 扫到的目录在 insert 前被 GC 删掉。
+        let _gc = self.gc.lock().await;
+        // 磁盘 resume 放在 jobs 写锁外，扫目录进 blocking，避免卡住 cancel/list。
+        let jobs_dir = self.cfg.jobs_dir();
+        let source_for_resume = source.clone();
+        let resume =
+            tokio::task::spawn_blocking(move || find_resume_in_dir(&jobs_dir, &source_for_resume))
+                .await
+                .map_err(|e| AppError::internal(format!("resume join: {e}")))?;
         let (job_id, manifest, resumed, done, total, next) = if let Some(hint) = resume {
             let dir = self.cfg.jobs_dir().join(&hint.job_id);
             let mut m = JobManifest::load(&dir)?;
@@ -228,15 +264,38 @@ impl Scheduler {
             let manifest_run = manifest_arc.clone();
             let cancel_run = cancel.clone();
             let active_run = active.clone();
+            let active_identity = active.clone();
+            let jobs_map = self.jobs.clone();
             let handle = tokio::spawn(async move {
-                let _clear = ClearActive(active_run);
-                let res =
-                    pipeline::run_job(manifest_run, engine, cfg, gpu, cancel_run, on_progress)
-                        .await;
+                let res = {
+                    let _clear = ClearActive(active_run);
+                    pipeline::run_job(
+                        manifest_run.clone(),
+                        engine,
+                        cfg,
+                        gpu,
+                        cancel_run,
+                        on_progress,
+                    )
+                    .await
+                };
                 if let Err(e) = res {
                     warn!(job = %job_id_spawn, error = %e, "job ended with error");
                 } else {
                     info!(job = %job_id_spawn, "job finished ok");
+                }
+                let drop_from_map = {
+                    let m = manifest_run.read().await;
+                    !is_active_state(m.state) && m.save().is_ok()
+                };
+                if drop_from_map {
+                    let mut map = jobs_map.write().await;
+                    let same_slot = map
+                        .get(&job_id_spawn)
+                        .is_some_and(|live| Arc::ptr_eq(&live.active, &active_identity));
+                    if same_slot {
+                        map.remove(&job_id_spawn);
+                    }
                 }
             });
             *handle_slot.lock().unwrap_or_else(|e| e.into_inner()) = WorkerSlot::Running(handle);
@@ -290,7 +349,10 @@ impl Scheduler {
                 )));
             }
         }
-        Ok(self.find_resume_on_disk(&source))
+        let jobs_dir = self.cfg.jobs_dir();
+        tokio::task::spawn_blocking(move || find_resume_in_dir(&jobs_dir, &source))
+            .await
+            .map_err(|e| AppError::internal(format!("probe_resume join: {e}")))
     }
 
     pub async fn cancel_job(&self, job_id: &str) -> AppResult<()> {
@@ -346,46 +408,48 @@ impl Scheduler {
 
     pub async fn get_job(&self, job_id: &str) -> AppResult<JobStatus> {
         validate_job_id(job_id)?;
-        if let Some(live) = self.jobs.read().await.get(job_id) {
-            let mut m = live.manifest.write().await;
+        let live = {
+            let jobs = self.jobs.read().await;
+            jobs.get(job_id).map(|l| l.manifest.clone())
+        };
+        if let Some(manifest) = live {
+            let mut m = manifest.write().await;
             if crate::job::heal_if_output_ready(&mut m) {
                 let _ = m.save();
             }
             return Ok(m.to_status());
         }
         let dir = self.cfg.jobs_dir().join(job_id);
-        let mut m = JobManifest::load(&dir)?;
-        if crate::job::heal_if_output_ready(&mut m) || heal_orphan_active_job(&mut m) {
-            let _ = m.save();
-        }
-        Ok(m.to_status())
+        let cache = self.disk_status_cache.clone();
+        tokio::task::spawn_blocking(move || load_disk_job_status(&dir, &cache))
+            .await
+            .map_err(|e| AppError::internal(format!("get_job join: {e}")))?
     }
 
     pub async fn list_jobs(&self) -> AppResult<Vec<JobStatus>> {
+        let (lives, live_ids) = {
+            let map = self.jobs.read().await;
+            let lives: Vec<Arc<RwLock<JobManifest>>> =
+                map.values().map(|l| l.manifest.clone()).collect();
+            let ids: HashSet<String> = map.keys().cloned().collect();
+            (lives, ids)
+        };
         let mut out = Vec::new();
-        let map = self.jobs.read().await;
-        for live in map.values() {
-            // Heal live jobs stuck in 打包中/取消中 after output already written
-            let mut m = live.manifest.write().await;
+        for manifest in lives {
+            let mut m = manifest.write().await;
             if crate::job::heal_if_output_ready(&mut m) {
                 let _ = m.save();
             }
             out.push(m.to_status());
         }
-        if let Ok(rd) = std::fs::read_dir(self.cfg.jobs_dir()) {
-            for e in rd.flatten() {
-                let id = e.file_name().to_string_lossy().to_string();
-                if map.contains_key(&id) {
-                    continue;
-                }
-                if let Ok(mut m) = JobManifest::load(&e.path()) {
-                    if crate::job::heal_if_output_ready(&mut m) || heal_orphan_active_job(&mut m) {
-                        let _ = m.save();
-                    }
-                    out.push(m.to_status());
-                }
-            }
-        }
+        let jobs_dir = self.cfg.jobs_dir();
+        let cache = self.disk_status_cache.clone();
+        let disk = tokio::task::spawn_blocking(move || {
+            load_orphan_job_statuses(&jobs_dir, &live_ids, &cache)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("list_jobs join: {e}")))?;
+        out.extend(disk);
         out.sort_by(|a, b| b.job_id.cmp(&a.job_id));
         Ok(out)
     }
@@ -430,6 +494,9 @@ impl Scheduler {
                 })?;
             info!(job = %job_id, "job directory removed");
         }
+        if let Ok(mut cache) = self.disk_status_cache.lock() {
+            cache.remove(job_id);
+        }
         Ok(())
     }
 
@@ -437,12 +504,41 @@ impl Scheduler {
     /// Does **not** touch live active workers.
     /// Returns number of job folders removed.
     pub async fn clear_finished_jobs(&self) -> AppResult<u32> {
-        let live_ids: std::collections::HashSet<String> = {
-            let map = self.jobs.read().await;
-            let mut set = std::collections::HashSet::new();
+        let _gc = self.gc.lock().await;
+
+        {
+            let mut map = self.jobs.write().await;
+            let mut drop_ids = Vec::new();
             for (id, live) in map.iter() {
+                if live.active.load(Ordering::Acquire) {
+                    continue;
+                }
                 let state = live.manifest.read().await.state;
-                // keep active live jobs
+                if !is_active_state(state) {
+                    drop_ids.push(id.clone());
+                }
+            }
+            for id in drop_ids {
+                let still_live = match map.get(&id) {
+                    Some(live) if live.active.load(Ordering::Acquire) => true,
+                    Some(live) => is_active_state(live.manifest.read().await.state),
+                    None => false,
+                };
+                if !still_live {
+                    map.remove(&id);
+                }
+            }
+        }
+
+        let protect: HashSet<String> = {
+            let map = self.jobs.read().await;
+            let mut set = HashSet::new();
+            for (id, live) in map.iter() {
+                if live.active.load(Ordering::Acquire) {
+                    set.insert(id.clone());
+                    continue;
+                }
+                let state = live.manifest.read().await.state;
                 if is_active_state(state) {
                     set.insert(id.clone());
                 }
@@ -450,45 +546,28 @@ impl Scheduler {
             set
         };
 
-        // Drop terminal live entries from memory
-        {
-            let mut map = self.jobs.write().await;
-            let terminal: Vec<String> = {
-                let mut ids = Vec::new();
-                for (id, live) in map.iter() {
-                    let state = live.manifest.read().await.state;
-                    if !is_active_state(state) {
-                        ids.push(id.clone());
-                    }
-                }
-                ids
-            };
-            for id in terminal {
-                map.remove(&id);
-            }
-        }
-
-        // 删除/扫描目录放 blocking 线程，避免卡事件循环
         let jobs_dir = self.cfg.jobs_dir();
-        let live_ids2 = live_ids;
         let mut dirs: Vec<(String, PathBuf)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&jobs_dir) {
             for e in rd.flatten() {
                 let id = e.file_name().to_string_lossy().to_string();
                 let path = e.path();
-                if live_ids2.contains(&id) || !path.is_dir() {
+                if protect.contains(&id) || !path.is_dir() {
                     continue;
                 }
                 dirs.push((id, path));
             }
         }
-        let jobs_dir2 = jobs_dir.clone();
+        let cache = self.disk_status_cache.clone();
         let removed = tokio::task::spawn_blocking(move || {
             let mut n = 0u32;
             for (id, path) in dirs {
                 match std::fs::remove_dir_all(&path) {
                     Ok(()) => {
                         n += 1;
+                        if let Ok(mut c) = cache.lock() {
+                            c.remove(&id);
+                        }
                         info!(job = %id, "cleared finished/orphan job");
                     }
                     Err(err) => {
@@ -496,7 +575,6 @@ impl Scheduler {
                     }
                 }
             }
-            let _ = jobs_dir2;
             n
         })
         .await
@@ -599,14 +677,20 @@ impl Scheduler {
         self.ensure_engine_ready(kind, requested_engine.is_some())?;
         let engine = self.pick_engine(kind)?;
         let cancel = CancellationToken::new();
+        let id = self
+            .reader_enhance_cancel_seq
+            .fetch_add(1, Ordering::Relaxed);
         {
             let mut slots = self
                 .reader_enhance_cancels
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            slots.retain(|t| !t.is_cancelled());
-            slots.push(cancel.clone());
+            slots.push((id, cancel.clone()));
         }
+        let _unreg = UnregisterReaderCancel {
+            slots: self.reader_enhance_cancels.clone(),
+            id,
+        };
         crate::reader_enhance::enhance_pages(
             src.as_path(),
             page_indexes,
@@ -624,7 +708,7 @@ impl Scheduler {
             .reader_enhance_cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        for t in slots.drain(..) {
+        for (_, t) in slots.drain(..) {
             t.cancel();
         }
     }
@@ -895,43 +979,6 @@ impl Scheduler {
         }
         None
     }
-
-    fn find_resume_on_disk(&self, source: &std::path::Path) -> Option<ResumeHint> {
-        let want = source_key(source);
-        let mut best: Option<ResumeHint> = None;
-        let rd = std::fs::read_dir(self.cfg.jobs_dir()).ok()?;
-        for e in rd.flatten() {
-            let Ok(mut m) = JobManifest::load(&e.path()) else {
-                continue;
-            };
-            if source_key(&m.source.path) != want {
-                continue;
-            }
-            if matches!(m.state, JobState::Completed) {
-                continue;
-            }
-            remap_done_from_disk(&mut m);
-            let done = m.stats.pages_done;
-            let total = m.stats.pages_total.max(m.pages.len() as u32);
-            if total == 0 && done == 0 && m.pages.is_empty() {
-                // extracted nothing yet — still resumable if workdir exists
-                if !m.in_dir().is_dir() {
-                    continue;
-                }
-            }
-            if done >= total && total > 0 {
-                continue;
-            }
-            let hint = ResumeHint::from_counts(
-                m.job_id.clone(),
-                m.source.path.display().to_string(),
-                done,
-                total,
-            );
-            best = Some(hint);
-        }
-        best
-    }
 }
 
 fn source_key(p: &std::path::Path) -> String {
@@ -939,6 +986,134 @@ fn source_key(p: &std::path::Path) -> String {
         .unwrap_or_else(|_| p.to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+fn find_resume_in_dir(jobs_dir: &Path, source: &Path) -> Option<ResumeHint> {
+    let want = source_key(source);
+    let mut best: Option<ResumeHint> = None;
+    let rd = std::fs::read_dir(jobs_dir).ok()?;
+    for e in rd.flatten() {
+        let Ok(mut m) = JobManifest::load(&e.path()) else {
+            continue;
+        };
+        if source_key(&m.source.path) != want {
+            continue;
+        }
+        if matches!(m.state, JobState::Completed) {
+            continue;
+        }
+        remap_done_from_disk(&mut m);
+        let done = m.stats.pages_done;
+        let total = m.stats.pages_total.max(m.pages.len() as u32);
+        if total == 0 && done == 0 && m.pages.is_empty() && !m.in_dir().is_dir() {
+            continue;
+        }
+        if done >= total && total > 0 {
+            continue;
+        }
+        best = Some(ResumeHint::from_counts(
+            m.job_id.clone(),
+            m.source.path.display().to_string(),
+            done,
+            total,
+        ));
+    }
+    best
+}
+
+fn manifest_stat(dir: &Path) -> Option<(u128, u64)> {
+    let meta = JobManifest::manifest_path(dir).metadata().ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((mtime, meta.len()))
+}
+
+fn remember_disk_status(
+    cache: &StdMutex<HashMap<String, CachedDiskStatus>>,
+    id: &str,
+    mtime_nanos: u128,
+    len: u64,
+    status: &JobStatus,
+) {
+    if is_active_state(status.state) {
+        return;
+    }
+    if let Ok(mut g) = cache.lock() {
+        g.insert(
+            id.to_string(),
+            CachedDiskStatus {
+                mtime_nanos,
+                len,
+                status: status.clone(),
+            },
+        );
+    }
+}
+
+fn load_disk_job_status(
+    dir: &Path,
+    cache: &StdMutex<HashMap<String, CachedDiskStatus>>,
+) -> AppResult<JobStatus> {
+    // ⚠️ 缓存键必须与 `remember_disk_status` 的写入键**同一个**取值来源。
+    // 这里读的是目录名，写入侧原先用的是 manifest 里的 `status.job_id` ——
+    // 两者一旦不一致（目录被改名、manifest 由别处复制而来），缓存就永远不命中；
+    // 更糟的是两个目录若声明了同一个 job_id，第二个目录会读到第一个的状态。
+    let id = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if id.is_empty() {
+        // 拿不到稳定键就不走缓存，避免所有异常目录挤在同一个 "" 键上互相污染。
+        let mut m = JobManifest::load(dir)?;
+        if crate::job::heal_if_output_ready(&mut m) || heal_orphan_active_job(&mut m) {
+            let _ = m.save();
+        }
+        return Ok(m.to_status());
+    }
+    if let Some((mtime, len)) = manifest_stat(dir) {
+        if let Ok(g) = cache.lock() {
+            if let Some(hit) = g.get(&id) {
+                if hit.mtime_nanos == mtime && hit.len == len {
+                    return Ok(hit.status.clone());
+                }
+            }
+        }
+    }
+    let mut m = JobManifest::load(dir)?;
+    if crate::job::heal_if_output_ready(&mut m) || heal_orphan_active_job(&mut m) {
+        let _ = m.save();
+    }
+    let status = m.to_status();
+    if let Some((mtime, len)) = manifest_stat(dir) {
+        remember_disk_status(cache, &id, mtime, len, &status);
+    }
+    Ok(status)
+}
+
+fn load_orphan_job_statuses(
+    jobs_dir: &Path,
+    live_ids: &HashSet<String>,
+    cache: &StdMutex<HashMap<String, CachedDiskStatus>>,
+) -> Vec<JobStatus> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(jobs_dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let id = e.file_name().to_string_lossy().to_string();
+        let path = e.path();
+        if live_ids.contains(&id) || !path.is_dir() {
+            continue;
+        }
+        if let Ok(status) = load_disk_job_status(&path, cache) {
+            out.push(status);
+        }
+    }
+    out
 }
 
 fn remap_done_from_disk(m: &mut JobManifest) {
@@ -1361,5 +1536,138 @@ mod tests {
                 break;
             }
         }
+    }
+
+    async fn insert_live(
+        sched: &Scheduler,
+        job_id: String,
+        source: PathBuf,
+        manifest: JobManifest,
+        running: bool,
+    ) {
+        let mut map = sched.jobs.write().await;
+        map.insert(
+            job_id,
+            LiveJob {
+                manifest: Arc::new(RwLock::new(manifest)),
+                cancel: CancellationToken::new(),
+                source,
+                active: Arc::new(AtomicBool::new(running)),
+                abandoned: Arc::new(AtomicBool::new(false)),
+                handle: Arc::new(StdMutex::new(WorkerSlot::Pending)),
+                handle_ready: Arc::new(tokio::sync::Notify::new()),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_finished_jobs_keeps_running_live_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let job_id = "0e0d1a97-6c3b-4f60-9f0e-2f15372f5aa1".to_string();
+        let workdir = cfg.jobs_dir().join(&job_id);
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mut m = JobManifest::new(
+            tmp.path().join("book"),
+            crate::job::EnhanceOptions::default(),
+            crate::job::OutputOptions {
+                dir: tmp.path().join("out"),
+                ..Default::default()
+            },
+            workdir,
+        );
+        m.job_id = job_id.clone();
+        m.state = JobState::Running;
+        m.save().unwrap();
+        let sched = Scheduler::new(cfg).unwrap();
+        insert_live(&sched, job_id.clone(), tmp.path().join("book"), m, true).await;
+        let _ = sched.clear_finished_jobs().await.unwrap();
+        assert!(
+            sched.jobs.read().await.contains_key(&job_id),
+            "running live job must survive clear_finished_jobs"
+        );
+        assert!(sched.config().jobs_dir().join(&job_id).is_dir());
+    }
+
+    #[tokio::test]
+    async fn finished_job_dropped_from_memory_still_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("pages");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 0..2 {
+            tiny_png(&src, &format!("{i}.png"));
+        }
+        let out = tmp.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let sched = Scheduler::new(cfg).unwrap();
+        let created = sched.create_job(sample_req(&src, &out)).await.unwrap();
+        let id = created.job_id;
+        let mut done = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let s = sched.get_job(&id).await.unwrap();
+            if matches!(s.state, JobState::Completed | JobState::Failed) {
+                done = Some(s);
+                break;
+            }
+        }
+        let s = done.expect("job should finish");
+        assert_eq!(s.state, JobState::Completed);
+        for _ in 0..40 {
+            if !sched.jobs.read().await.contains_key(&id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !sched.jobs.read().await.contains_key(&id),
+            "terminal job should leave the in-memory map"
+        );
+        let listed = sched.list_jobs().await.unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|j| j.job_id == id && j.state == JobState::Completed),
+            "list_jobs should still load the finished job from disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_enhance_unregisters_cancel_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("book");
+        std::fs::create_dir_all(&src).unwrap();
+        tiny_png(&src, "0.png");
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let sched =
+            Scheduler::with_engine(cfg, Arc::new(comic_engines::MockEngine::default())).unwrap();
+        let path = src.display().to_string();
+        for _ in 0..8 {
+            let _ = sched
+                .enhance_reader_pages(Some(&path), None, &[0], None)
+                .await;
+        }
+        let n = sched
+            .reader_enhance_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(n, 0, "cancel slots must unregister after each batch");
     }
 }

@@ -170,35 +170,34 @@ pub async fn preview_page(
     let before_png = work.join("before.png");
     let after_png = work.join("after.png");
 
-    extract_page_to_png(source, page_index, &before_png, cfg)?;
-
-    enhance_single_file(
-        engine.clone(),
-        gpu,
-        before_png.clone(),
-        after_png.clone(),
-        opts.to_engine_params(),
-        CancellationToken::new(),
-    )
-    .await?;
-
-    let (before_data_url, width_before, height_before) = file_to_data_url_png(&before_png)?;
-    let (after_data_url, width_after, height_after) = file_to_data_url_png(&after_png)?;
-
-    // best-effort cleanup
+    let result = async {
+        extract_page_to_png(source, page_index, &before_png, cfg)?;
+        enhance_single_file(
+            engine.clone(),
+            gpu,
+            before_png.clone(),
+            after_png.clone(),
+            opts.to_engine_params(),
+            CancellationToken::new(),
+        )
+        .await?;
+        let (before_data_url, width_before, height_before) = file_to_data_url_png(&before_png)?;
+        let (after_data_url, width_after, height_after) = file_to_data_url_png(&after_png)?;
+        Ok(PreviewResult {
+            page_index,
+            page_name,
+            before_data_url,
+            after_data_url,
+            width_before,
+            height_before,
+            width_after,
+            height_after,
+            engine: engine.status().id,
+        })
+    }
+    .await;
     let _ = std::fs::remove_dir_all(&work);
-
-    Ok(PreviewResult {
-        page_index,
-        page_name,
-        before_data_url,
-        after_data_url,
-        width_before,
-        height_before,
-        width_after,
-        height_after,
-        engine: engine.status().id,
-    })
+    result
 }
 
 #[cfg(test)]

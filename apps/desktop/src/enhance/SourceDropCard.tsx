@@ -71,7 +71,7 @@ export function SourceDropCard({
       {!source ? (
         <div
           onClick={onPickFile}
-          className="w-full flex-1 min-h-[12rem] cursor-pointer rounded-xl border border-dashed border-ink-300 bg-ink-100 transition hover:border-ink-500 hover:bg-ink-200/50 dark:border-white/[0.08] dark:bg-surface-panel"
+          className="w-full flex-1 min-h-[12rem] cursor-pointer rounded-xl border border-dashed border-ink-300 bg-ink-100 transition hover:border-ink-500 hover:bg-ink-200/50 dark:border-white/10 dark:bg-surface-panel"
         >
           <div className="grid h-full place-items-center px-5 py-10 text-center">
             <div>
@@ -175,12 +175,12 @@ export function SourceDropCard({
               </p>
               <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
                 {validation && (
-                  <span className="rounded-lg bg-success/12 border border-success/30 px-2 py-0.5 text-success dark:text-emerald-100">
+                  <span className="rounded-lg bg-success/10 border border-success/30 px-2 py-0.5 text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg">
                     {i18n.validateOk}
                   </span>
                 )}
                 {validation?.hasComicInfo && (
-                  <span className="rounded-lg border border-ink-200 bg-ink-100 px-2 py-0.5 text-ink-600 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg-muted">
+                  <span className="rounded-lg border border-ink-200 bg-ink-100 px-2 py-0.5 text-ink-600 dark:border-white/10 dark:bg-surface-raised dark:text-fg-muted">
                     ComicInfo
                   </span>
                 )}
@@ -196,7 +196,7 @@ export function SourceDropCard({
             {i18n.openReaderBtn}
           </button>
           {resumeHint && (
-            <p className="mt-3 rounded-lg bg-amber-500/15 border border-amber-400/40 px-2.5 py-1.5 text-xs font-medium text-amber-900 dark:text-amber-50">
+            <p className="mt-3 rounded-lg bg-amber-500/15 border border-amber-400/40 px-2.5 py-1.5 text-xs font-medium text-amber-900 dark:border-warning-border dark:bg-warning-soft dark:text-warning-fg">
               {i18n.resumeTitle}：{resumeHint.message}
             </p>
           )}

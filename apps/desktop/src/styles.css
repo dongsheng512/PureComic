@@ -11,23 +11,74 @@
   --ink-muted: #6e6e6e;
   --hairline-light: rgba(0, 0, 0, 0.1);
   --cover-scrim-light: rgba(255, 255, 255, 0.82);
-  /* 原生 macOS 深色表面与系统蓝 */
-  --paper-deep: #212121;
-  --ink-soft: #ececec;
-  --fg-label: #c5c5c5;
-  --fg-muted: #9b9b9b;
-  --surface-panel: #171717;
-  --surface-raised: #2f2f2f;
-  --surface-high: #3a3a3a;
-  --hairline: rgba(255, 255, 255, 0.12);
-  --cover-scrim: rgba(23, 23, 23, 0.76);
-  /* 唯一主 CTA：系统蓝 */
-  --accent-cta: #007aff;
-  --accent-cta-hover: #0066d6;
-  --accent-cta-active: #0055b8;
+
+  /* 纸纹噪点。仅供阅读器画布内容用（[data-reader-fg="light"]::before，22% overlay）；
+     不要再叠到 #root 的画布底色上 —— 那会让 token 值 ≠ 屏幕颜色（实测抬 5 级），
+     所有按 token 算的对比度全部对不上。 */
+  --grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  /* ── 深色表面阶梯：Apple systemGray6→3 (dark)，四档同族（B+2 冷灰），
+        步长 1.22 / 1.23 / 1.24:1。别再混入中性灰（会串色相）。 ── */
+  --paper-deep: #1c1c1e; /* L0 画布 */
+  --surface-panel: #2c2c2e; /* L1 面板 / 下沉容器 */
+  --surface-raised: #3a3a3c; /* L2 卡片 / 菜单 / 输入框 / 控件底 */
+  --surface-high: #48484a; /* L3 hover / 按压 / 选中块 */
+
+  /* ── 叠加与描边：白色 alpha，四档收敛（原来散着十一种） ── */
+  --overlay-1: rgba(255, 255, 255, 0.06); /* 分段轨道 / hover 叠加 */
+  --hairline: rgba(255, 255, 255, 0.1); /* 结构分隔线（= macOS separatorColor） */
+  --border-control: rgba(255, 255, 255, 0.16); /* 输入框 / 次要按钮描边 */
+  --overlay-4: rgba(255, 255, 255, 0.24); /* 强调叠加 / 徽章底 */
+
+  /* ── 文字：绝对灰，不随底漂移。三档都已按 L0/L1/L2 各算一遍 ── */
+  --ink-soft: #ececec; /* 画布 14.40 / 面板 11.80 / 卡片 9.61 */
+  --fg-label: #c5c5c5; /* 9.86 / 8.07 / 6.58 */
+  --fg-muted: #a6a6a6; /* 6.99 / 5.73 / 4.66 —— 不是 9b9b9b：那个值落在 L2 上只有 4.08 */
+  --fg-disabled: #6b6b6e; /* 预留：现在禁用态一律用 opacity，还没人按色值用它 */
+
+  /* ── 主色：填充与前景必须分开 ── */
+  --accent-cta: #007aff; /* 填充（macOS controlAccentColor），白字 4.02:1 */
+  --accent-cta-hover: #0066d6; /* 5.42:1 */
+  --accent-cta-active: #0055b8; /* 7.02:1 */
   --accent-action: #007aff;
   --accent-action-hover: #0066d6;
   --accent-action-active: #0055b8;
+  --accent-fg: #0a84ff; /* 深底上的前景蓝（图标 / 链接 / 进度填充），画布 4.66:1 */
+  --accent-fg-strong: #7cc0ff; /* tint 底上的文字，画布 8.78:1 */
+  --accent-soft: rgba(10, 132, 255, 0.18);
+
+  /* ── 语义色：macOS 深色 system*Color 实测值 ──
+     每个语义色必须拆成两个角色，不能共用一个值：
+       --X      实心基色：点、图标、实心填充、描边基色（在画布上 4.3~8.4:1）
+       --X-fg   tint 底上的文字（提亮 80%）
+     为什么文字不能用基色：tint 底 = 基色本身 @0.18，背景亮度被基色自己抬起来，
+     文字与它的对比就被锁死了。实测（最坏面 L2 #3a3a3c）：danger 2.87:1 / info 2.94:1
+     —— 连 3:1 都不到，而且把 alpha 降到 0.08、把基色提亮 40% 都救不回来（最多 4.49）。
+     提亮 80% 之后四族在 L2/L1/L0 上分别是 5.76/6.92/8.54 起，全达标。 */
+  --danger: #ff4245;
+  --danger-soft: rgba(255, 66, 69, 0.18);
+  --danger-border: rgba(255, 66, 69, 0.42);
+  --danger-fg: #ffd9da; /* tint 上 5.76 / 6.92 / 8.54 */
+  --success: #30d158;
+  --success-soft: rgba(48, 209, 88, 0.18);
+  --success-border: rgba(48, 209, 88, 0.42);
+  --success-fg: #d6f6de; /* 6.24 / 7.50 / 9.26 */
+  --warning: #ff9230;
+  --warning-soft: rgba(255, 146, 48, 0.18);
+  --warning-border: rgba(255, 146, 48, 0.42);
+  --warning-fg: #ffe9d6; /* 6.18 / 7.44 / 9.18 */
+  --info: #0091ff;
+  --info-soft: rgba(0, 145, 255, 0.18);
+  --info-border: rgba(0, 145, 255, 0.42);
+  --info-fg: #cce9ff; /* 5.88 / 7.07 / 8.72 */
+
+  /* ── 遮罩 / 玻璃 / 浮层 ── */
+  --cover-scrim: rgba(28, 28, 30, 0.92); /* 0.76 → 0.92：摆动 2.23x → 1.28x */
+  --rail: rgba(0, 0, 0, 0.32); /* 进度条底槽：要"凹"不要"亮"，见 .lib-progress */
+  --glass-chrome: rgba(28, 28, 30, 0.88);
+  --overlay-tip: rgba(28, 28, 30, 0.94);
+  --glass-btn: rgba(58, 58, 60, 0.92);
+  --card-veil: linear-gradient(180deg, rgba(0, 0, 0, 0.28) 0%, transparent 100%);
 }
 
 html.dark {
@@ -64,26 +115,16 @@ html.dark #root {
   text-rendering: geometricPrecision;
 }
 
-/* 极轻噪点；几乎不可见，保持干净 */
-body::before {
-  content: "";
-  pointer-events: none;
-  position: fixed;
-  inset: 0;
-  opacity: 0.012;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  z-index: 0;
-}
-
-/* 深色噪点再压低，避免颗粒叠在字上显脏、显暖 */
-html.dark body::before {
-  opacity: 0.014;
-  mix-blend-mode: soft-light;
-}
-
 #root {
   position: relative;
   z-index: 1;
+}
+
+/* 画布就是纯粹的 --paper-deep，不再叠噪点。
+   以前这里挂了 background-image: var(--grain) + overlay，会把画布从 #1c1c1e 抬到 ≈#212124，
+   于是"面板比画布亮"的层级被反转（面板成了更暗的那个），且所有按 token 算的对比度都对不上。 */
+html.dark #root {
+  background-color: var(--paper-deep);
 }
 
 /* 仅作语义标记；真正拖窗用 startDragging，避免 -webkit-app-region 与 Tauri 冲突 */
@@ -93,19 +134,21 @@ html.dark body::before {
   user-select: none;
 }
 
-/* 整个应用顶部栏的磨砂层：不是只给中间 Tab 加背景 */
+/* 顶栏与书库同一张纸，不做独立磨砂条 */
 .app-topbar {
-  background-color: rgba(247, 247, 248, 0.78);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-  -webkit-backdrop-filter: blur(24px) saturate(1.35);
-  backdrop-filter: blur(24px) saturate(1.35);
-  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.04);
+  background-color: var(--paper);
 }
 
 html.dark .app-topbar {
-  background-color: rgba(23, 23, 23, 0.78);
+  background-color: transparent;
+}
+
+.app-page-toolbar {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+html.dark .app-page-toolbar {
   border-bottom-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 1px 10px rgba(0, 0, 0, 0.22);
 }
 
 @layer components {
@@ -288,7 +331,7 @@ html.dark .app-topbar {
   }
   .dark .lib-badge {
     background: rgba(255, 255, 255, 0.12);
-    color: #b9b9be;
+    color: var(--fg-muted);
   }
 
   /* 已增强徽章：信息行内着色小胶囊（左上角让给悬浮操作） */
@@ -298,8 +341,8 @@ html.dark .app-topbar {
   }
 
   html.dark .lib-badge-enhanced {
-    background: rgba(10, 132, 255, 0.24);
-    color: #7cc0ff;
+    background: var(--accent-soft);
+    color: var(--accent-fg-strong);
   }
 
   /* 阅读进度条 */
@@ -313,10 +356,20 @@ html.dark .app-topbar {
   .lib-progress-fill {
     height: 100%;
     border-radius: 9999px;
-    background: #0a84ff;
+    background: var(--accent-fg);
   }
+  /* 底槽要比遮罩更暗（凹槽），不能调亮：调亮会靠近蓝色的亮度，越亮越糊。
+     实测（最亮封面 → 最暗封面）：白 @0.18 = 1.38/2.88:1，白 @0.10 = 2.71/3.51:1，
+     黑 @0.32 = 4.51/5.13:1。 */
   .dark .lib-progress {
-    background: rgba(255, 255, 255, 0.18);
+    background: var(--rail);
+  }
+
+  /* 任务进度条底槽：和 .lib-progress 同一条规矩 —— 要"凹"不要"亮"。
+     原来用 dark:bg-surface-high(L3 #48484a)，填充分别只剩
+     accent 2.23:1 / success 3.39:1；换成凹槽后 accent 3.68 / ok 7.37 / rose-400 5.54。 */
+  html.dark .job-progress {
+    background: var(--rail);
   }
 
   .btn-card-remove svg {
@@ -409,7 +462,7 @@ html.dark .btn-add-books-caret[aria-expanded="true"] {
 }
 
 html.dark .surface-chrome {
-  background-color: rgb(23 23 23 / 0.9);
+  background-color: var(--glass-chrome);
 }
 
 html.dark .field {
@@ -428,64 +481,208 @@ html.dark .cover-frame::after {
 
 html.dark .cover-scrim {
   background-color: var(--cover-scrim);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
 }
 
 html.dark .card-action-scrim {
-  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.22) 0%, transparent 100%);
+  background: var(--card-veil);
 }
 
 html.dark .btn-card-enhance {
   color: var(--ink-soft);
-  background: rgba(47, 47, 47, 0.92);
-  border-color: rgba(255, 255, 255, 0.12);
+  background: var(--glass-btn);
+  border-color: var(--hairline);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
 }
 
 html.dark .btn-card-enhance:hover:not(:disabled),
 html.dark .btn-card-enhance:focus-visible:not(:disabled) {
-  color: #72b7ff;
-  background: rgba(0, 122, 255, 0.18);
-  border-color: rgba(114, 183, 255, 0.42);
+  color: var(--accent-fg-strong);
+  background: var(--accent-soft);
+  border-color: rgba(124, 192, 255, 0.42);
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.34);
 }
 
 html.dark .btn-card-remove {
-  color: #b0b0b5;
-  background: rgba(47, 47, 47, 0.92);
-  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--fg-muted);
+  background: var(--glass-btn);
+  border-color: var(--hairline);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
 }
 
 html.dark .btn-card-remove:hover:not(:disabled),
 html.dark .btn-card-remove:focus-visible:not(:disabled) {
-  background: rgba(255, 59, 48, 0.14);
-  border-color: rgba(255, 120, 113, 0.42);
-  color: #ff8179;
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  color: var(--danger-fg);
 }
 
-/* —— 阅读器顶栏：弱边框 ghost，选中高亮 —— */
+/* —— 阅读器顶栏：与画布同一底，不做独立灰条 —— */
 /* 高度单一来源：smartFit.ts 的 READER_BAR_H 在 ReaderView 挂载时注入本变量 */
+@layer base {
+  /* 顶栏 / 画布 / 覆盖层默认逐层压在画布的噪点 ::before 之上。
+     ⚠️ 必须留在 @layer base，不能裸写。裸规则（源码顺序排在 @tailwind utilities 之后、
+     权重相同）会盖掉同特异度的工具类 —— 实测被压错的有两处：
+       · ProgressHud 的 `absolute inset-x-0 bottom-0 z-20` → 变成流内的 relative，
+         底部进度条永久占掉一条布局高度，bottom/inset 全部失效；
+       · 藏栏时的拖窗条 `absolute inset-x-0 top-0 z-30 h-11` → 同样变成流内。
+     放进 base 层之后，工具类恢复优先，顶栏的 `z-40`/`z-50` 也自动生效（见下方 .reader-bar）。 */
+  .reader-root > * {
+    position: relative;
+    z-index: 1;
+  }
+}
+
+[data-reader-fg="light"].reader-root::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.22;
+  mix-blend-mode: overlay;
+  background-image: var(--grain);
+  background-size: 128px 128px;
+}
+
 .reader-bar {
   height: var(--reader-bar-h, 44px);
   overflow: visible;
+  background: transparent;
   /* 独立合成层：避免与画布逐帧重新做像素对齐，特定窗口高度下顶栏会抖 */
   transform: translateZ(0);
 }
 
+/* ⚠️ 顶栏的层级（`z-40`，moreOpen 时 `z-50`）来自 className 里的工具类，这里不再手写。
+   前提是上面 `.reader-root > *` 留在 @layer base 里 —— 它一旦被裸写回源码，
+   就会把这两个工具类压成 `z-index:1`，与 `.reader-viewport` 同级；画布在 DOM 里更靠后，
+   于是**顶栏溢出的下拉（更多 / AI 引擎）被页面图盖住**（菜单自己的 `z-index:80`
+   逃不出顶栏用 `transform` 造的层叠上下文，只能靠顶栏本身的层级压过画布）。 */
+
+/* ── 画布调色板 ────────────────────────────────────────────────
+   顶栏里的控件坐在**画布**上，配色只能认画布（`data-reader-fg`），不能认应用主题
+   （`html.dark`）。原因：阅读背景能独立于应用主题切到 white/sepia，
+   "深色应用主题 + 浅色画布"（更多 → 阅读背景选白/棕褐）这一组合下，
+   用 `dark:` 上色的控件会拿到浅色系色值却坐在浅色画布上 ——
+   实测（无头 Chrome + 构建产物）返回键 1.03:1、页码 1.18:1、翻页键 2.43:1，前两者等于看不见。
+   浅色画布 = 这里的默认值；深色画布 = 下面 [data-reader-fg="light"] 那一组。
+   菜单是自带底的应用主题面板，用 .reader-menu 把这组变量重置回去（见下）。 */
+.reader-root {
+  --rb-fg: #424242;                          /* 图标主色（= ink-700） */
+  --rb-fg-strong: #2f2f2f;                   /* hover / 选中态（= ink-900） */
+  --rb-fg-muted: #6e6e6e;                    /* 未选中分段 */
+  --rb-fg-faint: #6e6e6e;                    /* 占位文案 */
+  --rb-title: #2f2f2f;                       /* 书名 */
+  --rb-chip-fg: #2f2f2f;                     /* 页码 */
+  --rb-fill: rgba(0, 0, 0, 0.06);            /* 控件底：返回键 / AI 胶囊 */
+  --rb-fill-hover: rgba(0, 0, 0, 0.12);
+  --rb-track: rgba(229, 229, 229, 0.5);      /* 分段轨道（= ink-200/50） */
+  --rb-pill: #ffffff;                        /* 分段选中药丸 */
+  --rb-pill-fg: #2f2f2f;
+  --rb-pill-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --rb-active-bg: #2f2f2f;                   /* 图标按钮选中块 */
+  --rb-active-fg: #ffffff;
+  --rb-sep: rgba(217, 217, 224, 0.6);        /* 控件组分隔线（= ink-300/60） */
+  --rb-hover-soft: rgba(229, 229, 229, 0.8); /* chip / 分段 hover（= ink-200/80） */
+  --rb-ai-soft: rgba(69, 172, 134, 0.16);    /* AI 开启态：tint 底 */
+  --rb-ai-accent: #1f7d57;                   /* AI 开启态：图标 */
+  --rb-ai-ring: rgba(69, 172, 134, 0.35);
+}
+
+[data-reader-fg="light"].reader-root {
+  --rb-fg: rgba(255, 255, 255, 0.78);
+  --rb-fg-strong: #ffffff;
+  --rb-fg-muted: rgba(255, 255, 255, 0.72);
+  --rb-fg-faint: rgba(255, 255, 255, 0.48);
+  --rb-title: rgba(255, 255, 255, 0.9);
+  --rb-chip-fg: rgba(255, 255, 255, 0.88);
+  --rb-fill: rgba(255, 255, 255, 0.12);
+  --rb-fill-hover: rgba(255, 255, 255, 0.19);
+  --rb-track: rgba(255, 255, 255, 0.08);
+  --rb-pill: rgba(255, 255, 255, 0.16);
+  --rb-pill-fg: #ffffff;
+  --rb-pill-shadow: none;
+  --rb-active-bg: rgba(255, 255, 255, 0.16);
+  --rb-active-fg: #ffffff;
+  --rb-sep: rgba(255, 255, 255, 0.14);
+  --rb-hover-soft: rgba(255, 255, 255, 0.1);
+  --rb-ai-soft: rgba(122, 216, 172, 0.2);
+  --rb-ai-accent: #7ad8ac;
+  --rb-ai-ring: rgba(122, 216, 172, 0.4);
+}
+
+/* 菜单自带底（`bg-white` / `dark:bg-surface-raised`），本质是**应用主题**面板，
+   把画布调色板整组重置成应用主题的值 —— 否则顶栏的深色调会顺着继承渗进菜单。
+   必须整组重置：窄窗（barCompact）下「阅读模式」分段控件就在「更多」菜单里，
+   和顶栏用的是同一批类名（见 ReaderToolbar.tsx:861 的 readingModeSeg）。
+   ⚠️ 往菜单里搬任何 `.reader-*` 顶栏控件时，这里的变量要同步补齐。 */
+.reader-menu {
+  --rb-fg: #424242;
+  --rb-fg-strong: #2f2f2f;
+  --rb-fg-muted: #6e6e6e;
+  --rb-fg-faint: #6e6e6e;
+  --rb-title: #2f2f2f;
+  --rb-chip-fg: #2f2f2f;
+  --rb-fill: rgba(0, 0, 0, 0.06);
+  --rb-fill-hover: rgba(0, 0, 0, 0.12);
+  --rb-track: rgba(229, 229, 229, 0.5);
+  --rb-pill: #ffffff;
+  --rb-pill-fg: #2f2f2f;
+  --rb-pill-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --rb-active-bg: #2f2f2f;
+  --rb-active-fg: #ffffff;
+  --rb-sep: rgba(217, 217, 224, 0.6);
+  --rb-hover-soft: rgba(229, 229, 229, 0.8);
+  --rb-ai-soft: rgba(69, 172, 134, 0.16);
+  --rb-ai-accent: #1f7d57;
+  --rb-ai-ring: rgba(69, 172, 134, 0.35);
+}
+
+html.dark .reader-menu {
+  --rb-fg: #a6a6a6;
+  --rb-fg-strong: #ececec;
+  --rb-fg-muted: #a6a6a6;
+  --rb-fg-faint: #a6a6a6;
+  --rb-title: #ececec;
+  --rb-chip-fg: #ececec;
+  --rb-fill: rgba(255, 255, 255, 0.06);
+  --rb-fill-hover: rgba(255, 255, 255, 0.12);
+  --rb-track: rgba(255, 255, 255, 0.06);
+  --rb-pill: #48484a;
+  --rb-pill-fg: #ececec;
+  --rb-pill-shadow: none;
+  --rb-active-bg: rgba(255, 255, 255, 0.15);
+  --rb-active-fg: #ececec;
+  --rb-sep: rgba(255, 255, 255, 0.1);
+  --rb-hover-soft: rgba(255, 255, 255, 0.08);
+  --rb-ai-soft: rgba(122, 216, 172, 0.2);
+  --rb-ai-accent: #7ad8ac;
+  --rb-ai-ring: rgba(122, 216, 172, 0.4);
+}
+
+.reader-bar-title {
+  color: var(--rb-title);
+}
+
+.reader-bar-muted {
+  color: var(--rb-fg-faint);
+}
+
 /* 右侧控件组之间的细分隔线 */
 .reader-bar-sep {
-  @apply mx-0.5 h-4 w-px shrink-0 bg-ink-300/60 dark:bg-white/[0.12];
+  @apply mx-0.5 h-4 w-px shrink-0;
+  background: var(--rb-sep);
 }
 
 .reader-icon-btn {
-  @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent
-    text-ink-700 transition dark:text-fg-muted;
+  @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent transition;
+  color: var(--rb-fg);
 }
 
 .reader-icon-btn:hover:not(:disabled) {
-  @apply bg-ink-200/80 text-ink-900 dark:bg-white/[0.08] dark:text-fg;
+  background: var(--rb-hover-soft);
+  color: var(--rb-fg-strong);
 }
 
 .reader-icon-btn:disabled {
@@ -493,17 +690,52 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
 }
 
 .reader-icon-btn.is-active {
-  @apply bg-ink-900 text-white dark:bg-white/15 dark:text-fg;
+  background: var(--rb-active-bg);
+  color: var(--rb-active-fg);
+}
+
+/* —— 「返回书库」：28pt 实心方块（用户确认的样式）——
+   量用户给的参考图（76×68，按钮 56×56px）反推：
+     尺寸  56×56px @2x = **28×28pt**   ✅ 与顶栏其它控件齐平（.reader-icon-btn / .reader-seg 都是 h-7）
+     底色  纯平 **#F0F0F0**（240,240,240），**没有内层白药丸**、没有边框
+     字形  #2F2F2F，墨迹 11×20px = 5.5×10pt  ← 与 IconBack 在 16pt 下的 5.67×10.17pt 一致
+     阴影  下方约 6px 的柔影（≈ shadow-sm）
+   所以是把内层药丸去掉、改回**单一实心底**：视觉上更"实"，而不是之前那版"灰边+白面"的空心感。
+   ⚠️ 底色用**相对黑**而不是写死 #F0F0F0：阅读画布有 4 档，浅色的两档是
+     white #FFFFFF 和 sepia #F3E6C8。写死灰值在 sepia 上会塌到 1.09:1（底色消失）；
+     相对黑对任何浅底都给同一档：叠白底 → #F0F0F0（1.14:1），叠 sepia 也是 1.14:1。
+   ⚠️ 配色走上面的 --rb-* 画布调色板，**不要**再挂 `dark:`（那跟的是应用主题）——
+     见调色板注释里"深色应用主题 + 浅色画布"的实测数字。 */
+.reader-back-btn {
+  @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition
+    active:scale-[0.96] shadow-sm;
+  background: var(--rb-fill);
+  color: var(--rb-fg-strong);
+}
+
+/* hover 与顶栏其它控件同量级：底深一档（叠白底 #F0F0F0 → #E0E0E0，Δ 6.1%） */
+.reader-back-btn:hover:not(:disabled) {
+  background: var(--rb-fill-hover);
+}
+
+.reader-back-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.35);
+}
+
+/* 深色画布：白玻璃。阴影只在浅色画布上有意义（深底上看不见，还多一圈脏边） */
+[data-reader-fg="light"] .reader-back-btn {
+  box-shadow: none;
 }
 
 .reader-seg {
-  @apply inline-flex h-7 shrink-0 items-center rounded-lg p-0.5
-    bg-ink-200/50 dark:bg-white/[0.06];
+  @apply inline-flex h-7 shrink-0 items-center rounded-lg p-0.5;
+  background: var(--rb-track);
 }
 
 .reader-seg-item {
-  @apply inline-flex h-6 min-w-7 items-center justify-center rounded-md px-1.5
-    text-ink-600 transition dark:text-fg-muted;
+  @apply inline-flex h-6 min-w-7 items-center justify-center rounded-md px-1.5 transition;
+  color: var(--rb-fg-muted);
 }
 
 .reader-seg-item + .reader-seg-item {
@@ -511,19 +743,39 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
 }
 
 .reader-seg-item:hover:not(.is-active) {
-  @apply text-ink-900 dark:text-fg;
+  color: var(--rb-fg-strong);
 }
 
 .reader-seg-item.is-active {
-  @apply bg-white text-ink-900 shadow-sm dark:bg-surface-high dark:text-fg;
+  background: var(--rb-pill);
+  color: var(--rb-pill-fg);
+  box-shadow: var(--rb-pill-shadow);
 }
 
 /* 固定宽度（非 min-w）：页码位数变化时不改变居中翻页组宽度，避免按钮/悬停面板横移。
    whitespace-nowrap：大页数（如 1234 / 5678）不折行，保持单行；宽度容纳 4 位页码 */
 .reader-page-chip {
   @apply inline-flex h-7 w-[7rem] items-center justify-center whitespace-nowrap rounded-lg px-2
-    text-[12px] font-medium tabular-nums text-ink-800
-    hover:bg-ink-200/80 dark:text-fg dark:hover:bg-white/[0.08];
+    text-[12px] font-medium tabular-nums;
+  color: var(--rb-chip-fg);
+}
+
+.reader-page-chip:hover {
+  background: var(--rb-hover-soft);
+}
+
+/* 页码编辑输入框：**自带不透明底**，所以不能复用 .reader-page-chip ——
+   后者只定颜色不定底，输入框还要靠 className 里的 `bg-white` 撑底，
+   于是"浅色应用主题 + 深色画布"下底色是 #fff、文字却被画布调色板刷成
+   rgba(255,255,255,0.88) → 实测 1.00:1，输入的字完全看不见。
+   这里直接取"选中药丸"那一对（浅色画布 = 白底深字，深色画布 = 白玻璃 + 白字），
+   四种主题组合实测 9.61 / 9.61 / 13.39 / 11.36。 */
+.reader-page-chip-edit {
+  @apply inline-flex h-7 w-[7rem] items-center justify-center whitespace-nowrap rounded-lg border-0 px-2
+    text-center text-[12px] font-medium tabular-nums outline-none;
+  background: var(--rb-pill);
+  color: var(--rb-pill-fg);
+  box-shadow: 0 0 0 1px var(--rb-sep);
 }
 
 .reader-page-chip-sm {
@@ -533,7 +785,7 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
 .reader-menu {
   @apply absolute top-full right-0 z-[80] mt-1.5 min-w-[11rem] overflow-hidden rounded-xl
     border border-ink-200 bg-white py-1 shadow-panel
-    dark:border-white/[0.08] dark:bg-surface-raised;
+    dark:border-white/10 dark:bg-surface-raised;
 }
 
 /* 更多菜单加宽：容纳 AI 设置区块（引擎/去噪分段控件） */
@@ -585,43 +837,30 @@ html.dark {
 }
 
 html.dark .ai-section + .ai-section {
-  border-top-color: rgba(255, 255, 255, 0.07);
+  border-top-color: var(--hairline);
 }
 
+/* AI 胶囊同样坐在画布上：认 `--rb-*` 画布调色板，不认 html.dark。
+   （原先浅色画布下是 rgba(0,0,0,.06) + ink-muted，深色画布下是 overlay-1 + fg-muted，
+   两条线各自按"应用主题"分叉，dark-app + light-canvas 时图标只剩 2.43:1。） */
 .reader-ai-capsule {
   @apply relative inline-flex h-7 items-center rounded-full transition;
-  background: rgba(0, 0, 0, 0.06);
-}
-
-html.dark .reader-ai-capsule {
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--rb-fill);
 }
 
 .reader-ai-capsule.is-on {
-  background: var(--ai-accent-soft);
-  box-shadow: inset 0 0 0 1px rgba(69, 172, 134, 0.35);
-}
-
-html.dark .reader-ai-capsule.is-on {
-  box-shadow: inset 0 0 0 1px rgba(122, 216, 172, 0.4);
+  background: var(--rb-ai-soft);
+  box-shadow: inset 0 0 0 1px var(--rb-ai-ring);
 }
 
 .reader-ai-capsule > button {
   @apply relative z-10 inline-flex h-7 w-7 items-center justify-center transition;
-  color: var(--ink-muted);
+  color: var(--rb-fg-muted);
   cursor: pointer;
 }
 
-html.dark .reader-ai-capsule > button {
-  color: var(--fg-muted);
-}
-
 .reader-ai-capsule > button:hover:not(:disabled) {
-  color: var(--ink);
-}
-
-html.dark .reader-ai-capsule > button:hover:not(:disabled) {
-  color: var(--ink-soft);
+  color: var(--rb-fg-strong);
 }
 
 .reader-ai-capsule > button:active:not(:disabled) {
@@ -630,17 +869,13 @@ html.dark .reader-ai-capsule > button:hover:not(:disabled) {
 
 .reader-ai-capsule > button:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px rgba(43, 154, 110, 0.5);
+  box-shadow: inset 0 0 0 2px var(--rb-ai-ring);
   border-radius: 9999px;
-}
-
-html.dark .reader-ai-capsule > button:focus-visible {
-  box-shadow: inset 0 0 0 2px rgba(122, 216, 172, 0.55);
 }
 
 .reader-ai-capsule.is-on > button,
 .reader-ai-capsule.is-on > button:hover:not(:disabled) {
-  color: var(--ai-accent);
+  color: var(--rb-ai-accent);
 }
 
 .reader-ai-trigger svg {
@@ -667,15 +902,11 @@ html.dark .reader-ai-capsule > button:focus-visible {
 .reader-ai-capsule-sep {
   @apply relative z-10 h-3.5 shrink-0;
   width: 1px;
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--rb-sep);
 }
 
 .reader-ai-capsule.is-on .reader-ai-capsule-sep {
-  background: rgba(69, 172, 134, 0.35);
-}
-
-html.dark .reader-ai-capsule.is-on .reader-ai-capsule-sep {
-  background: rgba(122, 216, 172, 0.4);
+  background: var(--rb-ai-ring);
 }
 
 .reader-ai-more {
@@ -820,7 +1051,7 @@ html.dark .ai-engine-item.is-active {
 
 .ai-btn-discard {
   @apply inline-flex h-7 items-center rounded-full border border-ink-300 bg-white px-2.5 text-[11px] font-medium text-ink-700 transition hover:bg-ink-100
-    dark:border-white/[0.12] dark:bg-transparent dark:text-fg-muted dark:hover:bg-white/[0.08];
+    dark:border-white/[0.16] dark:bg-transparent dark:text-fg-muted dark:hover:bg-white/[0.08];
 }
 
 .ai-btn-apply {
@@ -925,12 +1156,12 @@ html.dark .ai-switch.is-on .ai-switch-knob {
   box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.35);
 }
 html.dark .reader-range {
-  --range-fill: #e8eaef; /* fg */
-  --range-track: rgba(255, 255, 255, 0.18);
+  --range-fill: var(--ink-soft);
+  --range-track: var(--hairline);
 }
 html.dark .reader-range::-webkit-slider-thumb {
-  background: #e8eaef;
-  border-color: rgba(255, 255, 255, 0.25);
+  background: var(--ink-soft);
+  border-color: var(--overlay-4);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
@@ -938,12 +1169,12 @@ html.dark .reader-range::-webkit-slider-thumb {
 .ai-clear-btn {
   @apply flex w-full items-center justify-center gap-1.5 rounded-lg border border-ink-200 py-1.5 text-[11px]
     text-ink-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600
-    dark:border-white/[0.08] dark:text-fg-muted dark:hover:border-red-500/30 dark:hover:bg-red-500/10
-    dark:hover:text-red-400;
+    dark:border-white/10 dark:text-fg-muted dark:hover:border-danger-border dark:hover:bg-danger-soft
+    dark:hover:text-danger-fg;
 }
 
 .ai-clear-btn.is-confirm {
-  @apply font-medium text-red-600 dark:text-red-400;
+  @apply font-medium text-red-600 dark:text-danger-fg;
 }
 
 /* 悬停说明：极简单例，120ms 延迟后出现于按钮下方居中 */
@@ -952,7 +1183,7 @@ html.dark .reader-range::-webkit-slider-thumb {
   transform: translate(-50%, 0);
   margin-top: 7px;
   color: #fff;
-  background: rgba(28, 29, 36, 0.92);
+  background: var(--overlay-tip);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
   animation: reader-tip-in 120ms ease-out;
 }
@@ -978,7 +1209,7 @@ html.dark .reader-range::-webkit-slider-thumb {
 /* 清除完成 toast */
 .reader-toast {
   @apply fixed left-1/2 top-16 z-[90] -translate-x-1/2 rounded-lg px-3 py-1.5 text-xs text-white;
-  background: rgba(28, 29, 36, 0.85);
+  background: var(--overlay-tip);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   animation: reader-toast-in 180ms ease-out;
@@ -1051,7 +1282,7 @@ html.dark .reader-range::-webkit-slider-thumb {
 .lib-toolbar-chip {
   @apply inline-flex h-9 shrink-0 items-center gap-1 rounded-full border border-ink-200
     bg-white px-3 text-xs font-medium text-ink-800 shadow-none transition
-    hover:bg-ink-50 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg
+    hover:bg-ink-50 dark:border-white/10 dark:bg-surface-raised dark:text-fg
     dark:hover:bg-white/[0.06];
 }
 
@@ -1061,7 +1292,7 @@ html.dark .reader-range::-webkit-slider-thumb {
 
 .lib-toolbar-seg {
   @apply inline-flex h-9 shrink-0 items-center gap-0.5 rounded-full border border-ink-200
-    bg-ink-100/80 p-0.5 dark:border-white/[0.08] dark:bg-white/[0.04];
+    bg-ink-100/80 p-0.5 dark:border-white/10 dark:bg-white/[0.04];
 }
 
 .lib-toolbar-seg-item {
@@ -1084,5 +1315,5 @@ html.dark .reader-range::-webkit-slider-thumb {
 .lib-sort-menu {
   @apply absolute right-0 z-40 mt-1.5 min-w-[9.5rem] overflow-hidden rounded-xl
     border border-ink-200 bg-white py-1 shadow-panel
-    dark:border-white/[0.08] dark:bg-surface-raised;
+    dark:border-white/10 dark:bg-surface-raised;
 }

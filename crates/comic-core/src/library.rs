@@ -30,6 +30,12 @@ pub struct LibraryEntry {
     pub page_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_path: Option<String>,
+    /// Cached cover file length; `refresh_covers` compares this instead of decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_len: Option<u64>,
+    /// Cached cover mtime (unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_mtime: Option<u64>,
     #[serde(default)]
     pub last_read_page: u32,
     pub added_at: DateTime<Utc>,
@@ -155,11 +161,19 @@ impl LibraryStore {
             // 已有能显示的封面就保留（含旧版 v3 路径）。
             // 否则每次改 COVER_CACHE_TAG，list_library 会同步重抽全书封面，
             // 前端一直拿不到列表，看起来像书库被清空。
-            if cover_file_ok(e.cover_path.as_deref()) {
+            if cover_is_current(e) {
                 continue;
             }
+            if let Some(p) = e.cover_path.clone() {
+                let path = Path::new(&p);
+                if cover_looks_real(path) {
+                    remember_cover_stat(e, path);
+                    dirty = true;
+                    continue;
+                }
+            }
             if let Ok(c) = ensure_cover(e, &self.cover_dir, cfg) {
-                e.cover_path = Some(c.display().to_string());
+                set_cover_path(e, c);
                 dirty = true;
             }
         }
@@ -190,6 +204,8 @@ impl LibraryStore {
                     if let Some(c) = existing.cover_path.take() {
                         let _ = std::fs::remove_file(&c);
                     }
+                    existing.cover_len = None;
+                    existing.cover_mtime = None;
                     let dest = cover_dest(&self.cover_dir, existing);
                     let _ = std::fs::remove_file(&dest);
                 } else {
@@ -197,9 +213,9 @@ impl LibraryStore {
                 }
                 existing.kind = kind_str(v.kind);
             }
-            if existing.page_count == 0 || !cover_file_ok(existing.cover_path.as_deref()) {
+            if existing.page_count == 0 || !cover_is_current(existing) {
                 if let Ok(cover) = ensure_cover(existing, &self.cover_dir, cfg) {
-                    existing.cover_path = Some(cover.display().to_string());
+                    set_cover_path(existing, cover);
                 }
             }
             let snap = existing.clone();
@@ -228,6 +244,8 @@ impl LibraryStore {
             title: title_from_source(&path),
             page_count,
             cover_path: None,
+            cover_len: None,
+            cover_mtime: None,
             last_read_page: 0,
             added_at: Utc::now(),
             last_opened_at: Some(Utc::now()),
@@ -237,7 +255,7 @@ impl LibraryStore {
             missing: !path.exists(),
         };
         match ensure_cover(&entry, &self.cover_dir, cfg) {
-            Ok(cover) => entry.cover_path = Some(cover.display().to_string()),
+            Ok(cover) => set_cover_path(&mut entry, cover),
             Err(e) => {
                 tracing::warn!(
                     error = %e.message,
@@ -567,9 +585,45 @@ fn cover_dest(cover_dir: &Path, entry: &LibraryEntry) -> PathBuf {
     cover_dir.join(format!("{}.{}.jpg", entry.id, COVER_CACHE_TAG))
 }
 
-fn cover_file_ok(path: Option<&str>) -> bool {
-    path.map(|p| cover_looks_real(Path::new(p)))
-        .unwrap_or(false)
+fn cover_file_stat(path: &Path) -> Option<(u64, u64)> {
+    let meta = path.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let len = meta.len();
+    if len <= 32 {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((len, mtime))
+}
+
+fn remember_cover_stat(entry: &mut LibraryEntry, path: &Path) {
+    if let Some((len, mtime)) = cover_file_stat(path) {
+        entry.cover_len = Some(len);
+        entry.cover_mtime = Some(mtime);
+    }
+}
+
+fn set_cover_path(entry: &mut LibraryEntry, path: PathBuf) {
+    remember_cover_stat(entry, &path);
+    entry.cover_path = Some(path.display().to_string());
+}
+
+/// True when the cover file is present and its size/mtime match the last write.
+fn cover_is_current(entry: &LibraryEntry) -> bool {
+    let Some(p) = entry.cover_path.as_deref() else {
+        return false;
+    };
+    let Some((len, mtime)) = cover_file_stat(Path::new(p)) else {
+        return false;
+    };
+    entry.cover_len == Some(len) && entry.cover_mtime == Some(mtime)
 }
 
 fn cover_looks_real(path: &Path) -> bool {
@@ -783,6 +837,24 @@ mod tests {
         store.entries[0].cover_path = Some(old.clone());
         store.refresh_covers(&cfg);
         assert_eq!(store.list()[0].cover_path.as_deref(), Some(old.as_str()));
+    }
+
+    #[test]
+    fn refresh_covers_uses_stat_without_rewriting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let folder = tmp.path().join("book");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_tiny_png(&folder.join("001.png"));
+        let mut store = LibraryStore::open(&cfg).unwrap();
+        let e = store.upsert_path(&folder, &cfg).unwrap();
+        assert!(e.cover_len.is_some() && e.cover_mtime.is_some());
+        let dest = PathBuf::from(e.cover_path.as_ref().unwrap());
+        let meta = dest.metadata().unwrap();
+        store.refresh_covers(&cfg);
+        let after = &store.list()[0];
+        assert_eq!(after.cover_path.as_deref(), e.cover_path.as_deref());
+        assert_eq!(after.cover_len, Some(meta.len()));
     }
 
     #[test]

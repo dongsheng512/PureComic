@@ -379,6 +379,61 @@ fn link_or_copy(src: &Path, dest: &Path) -> AppResult<()> {
     Ok(())
 }
 
+type StagedGroups = std::collections::BTreeMap<u8, Vec<(u32, String, PathBuf)>>;
+
+fn stage_reader_batch(
+    missing: Vec<(u32, String, PathBuf, PathBuf)>,
+    batch_root: PathBuf,
+    engine: comic_engines::EngineKind,
+    requested: comic_engines::ScaleFactor,
+) -> AppResult<StagedGroups> {
+    let cap = if engine == comic_engines::EngineKind::RealEsrganCoreMl
+        || engine == comic_engines::EngineKind::AnimeVideoCoreMl
+    {
+        ESRGAN_INPUT_SIDE
+    } else {
+        MAX_INPUT_SIDE
+    };
+    let mut groups = StagedGroups::new();
+    for (i, name, original, dest) in missing {
+        let stem = format!("{i:04}");
+        match prepare_reader_input(&original, &batch_root.join("prep"), &stem, requested, cap) {
+            Ok((prepared, owned, scale)) => {
+                let batch_in = batch_root.join(format!("in-s{}", scale.as_u8()));
+                let ext = passthrough_ext(&prepared).unwrap_or("jpg");
+                let staged = batch_in.join(format!("{stem}.{ext}"));
+                let staged_ok = if owned {
+                    if let Some(parent) = staged.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::rename(&prepared, &staged)
+                        .or_else(|_| {
+                            std::fs::copy(&prepared, &staged).map(|_| {
+                                let _ = std::fs::remove_file(&prepared);
+                            })
+                        })
+                        .map_err(AppError::from)
+                } else {
+                    link_or_copy(&prepared, &staged)
+                };
+                if let Err(e) = staged_ok {
+                    let _ = std::fs::remove_dir_all(&batch_root);
+                    return Err(e);
+                }
+                groups
+                    .entry(scale.as_u8())
+                    .or_default()
+                    .push((i, name, dest));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&batch_root);
+                return Err(e);
+            }
+        }
+    }
+    Ok(groups)
+}
+
 /// Prefer the original file when it is already small enough; otherwise write a resized JPEG.
 fn prepare_reader_input(
     original: &Path,
@@ -452,8 +507,15 @@ async fn enhance_one_page(
     } else {
         MAX_INPUT_SIDE
     };
-    let (prepared, owned_in, scale) =
-        prepare_reader_input(original, &scratch, &id_s, params.scale, cap)?;
+    let original_buf = original.to_path_buf();
+    let scratch_buf = scratch.clone();
+    let stem = id_s.clone();
+    let req_scale = params.scale;
+    let (prepared, owned_in, scale) = tokio::task::spawn_blocking(move || {
+        prepare_reader_input(&original_buf, &scratch_buf, &stem, req_scale, cap)
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("prepare join: {e}")))??;
     let mut params = params;
     params.scale = scale;
     let tmp = scratch.join(format!("{id}-out.jpg"));
@@ -525,7 +587,10 @@ async fn enhance_one_page(
         let _ = std::fs::remove_file(dest);
         return Err(AppError::internal("增强结果无效"));
     }
-    evict_cache(cfg, MAX_CACHE_BYTES, MAX_CACHE_FILES)?;
+    let cfg_evict = cfg.clone();
+    tokio::task::spawn_blocking(move || evict_cache(&cfg_evict, MAX_CACHE_BYTES, MAX_CACHE_FILES))
+        .await
+        .map_err(|e| AppError::internal(format!("evict join: {e}")))??;
     Ok(())
 }
 
@@ -556,31 +621,39 @@ pub async fn enhance_pages(
     .unwrap_or(comic_engines::EngineKind::RealCuganCoreMl);
     let params = reader_engine_params(&opts);
     let sig = cache_signature(options.as_ref())?;
-    let names = crate::reader::listed_pages(source, cfg)
-        .map(|(_, n)| n)
-        .unwrap_or_default();
-    let mut out = Vec::with_capacity(page_indexes.len());
-    let mut missing: Vec<(u32, String, PathBuf, PathBuf)> = Vec::new();
-
-    for &i in page_indexes {
-        let dest = cache_file(cfg, source, i, &sig);
-        let name = names
-            .get(i as usize)
-            .cloned()
-            .unwrap_or_else(|| format!("page-{i}"));
-        if cache_ready(&dest) {
-            touch_mtime(&dest);
-            out.push(ReaderPageFile {
-                index: i,
-                name,
-                kind: "enhanced".into(),
-                path: dest.display().to_string(),
-            });
-            continue;
+    let source_buf = source.to_path_buf();
+    let cfg_lookup = cfg.clone();
+    let indexes = page_indexes.to_vec();
+    let sig_lookup = sig.clone();
+    let (mut out, mut missing) = tokio::task::spawn_blocking(move || -> AppResult<_> {
+        let names = crate::reader::listed_pages(&source_buf, &cfg_lookup)
+            .map(|(_, n)| n)
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(indexes.len());
+        let mut missing: Vec<(u32, String, PathBuf, PathBuf)> = Vec::new();
+        for i in indexes {
+            let dest = cache_file(&cfg_lookup, &source_buf, i, &sig_lookup);
+            let name = names
+                .get(i as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("page-{i}"));
+            if cache_ready(&dest) {
+                touch_mtime(&dest);
+                out.push(ReaderPageFile {
+                    index: i,
+                    name,
+                    kind: "enhanced".into(),
+                    path: dest.display().to_string(),
+                });
+                continue;
+            }
+            let (extracted_name, original) = extract_original(&source_buf, i, &cfg_lookup)?;
+            missing.push((i, extracted_name, original, dest));
         }
-        let (extracted_name, original) = extract_original(source, i, cfg)?;
-        missing.push((i, extracted_name, original, dest));
-    }
+        Ok((out, missing))
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("reader lookup join: {e}")))??;
 
     if missing.is_empty() {
         return Ok(out);
@@ -610,56 +683,14 @@ pub async fn enhance_pages(
         .reader_enhance_dir()
         .join(".batch")
         .join(Uuid::new_v4().to_string());
-    let mut groups: std::collections::BTreeMap<u8, Vec<(u32, String, PathBuf)>> =
-        std::collections::BTreeMap::new();
-    for (i, name, original, dest) in missing {
-        let stem = format!("{i:04}");
-        let cap = if params.engine == comic_engines::EngineKind::RealEsrganCoreMl
-            || params.engine == comic_engines::EngineKind::AnimeVideoCoreMl
-        {
-            ESRGAN_INPUT_SIDE
-        } else {
-            MAX_INPUT_SIDE
-        };
-        match prepare_reader_input(
-            &original,
-            &batch_root.join("prep"),
-            &stem,
-            params.scale,
-            cap,
-        ) {
-            Ok((prepared, owned, scale)) => {
-                let batch_in = batch_root.join(format!("in-s{}", scale.as_u8()));
-                let ext = passthrough_ext(&prepared).unwrap_or("jpg");
-                let staged = batch_in.join(format!("{stem}.{ext}"));
-                if let Err(e) = if owned {
-                    if let Some(parent) = staged.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    std::fs::rename(&prepared, &staged)
-                        .or_else(|_| {
-                            std::fs::copy(&prepared, &staged).map(|_| {
-                                let _ = std::fs::remove_file(&prepared);
-                            })
-                        })
-                        .map_err(AppError::from)
-                } else {
-                    link_or_copy(&prepared, &staged)
-                } {
-                    let _ = std::fs::remove_dir_all(&batch_root);
-                    return Err(e);
-                }
-                groups
-                    .entry(scale.as_u8())
-                    .or_default()
-                    .push((i, name, dest));
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&batch_root);
-                return Err(e);
-            }
-        }
-    }
+    let batch_root_stage = batch_root.clone();
+    let engine_kind = params.engine;
+    let req_scale = params.scale;
+    let groups = tokio::task::spawn_blocking(move || {
+        stage_reader_batch(missing, batch_root_stage, engine_kind, req_scale)
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("stage join: {e}")))??;
 
     if cancel.is_cancelled() {
         let _ = std::fs::remove_dir_all(&batch_root);
@@ -729,7 +760,10 @@ pub async fn enhance_pages(
         }
     }
     let _ = std::fs::remove_dir_all(&batch_root);
-    evict_cache(cfg, MAX_CACHE_BYTES, MAX_CACHE_FILES)?;
+    let cfg_evict = cfg.clone();
+    tokio::task::spawn_blocking(move || evict_cache(&cfg_evict, MAX_CACHE_BYTES, MAX_CACHE_FILES))
+        .await
+        .map_err(|e| AppError::internal(format!("evict join: {e}")))??;
 
     if out.is_empty() {
         return Err(last_err.unwrap_or_else(|| AppError::internal("增强输出未生成")));

@@ -53,7 +53,7 @@ export function EnhancePresetCards({ i18n, value, onChange }: Props) {
             className={`relative rounded-xl border p-3 text-left transition ${
               active
                 ? "border-accent bg-accent/10 dark:bg-accent/15"
-                : "border-ink-200 bg-ink-50 hover:border-ink-300 hover:bg-ink-100 dark:border-white/[0.08] dark:bg-surface-raised dark:hover:bg-surface-high"
+                : "border-ink-200 bg-ink-50 hover:border-ink-300 hover:bg-ink-100 dark:border-white/10 dark:bg-surface-raised dark:hover:bg-surface-high"
             }`}
           >
             {p.recommended && (

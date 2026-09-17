@@ -254,9 +254,9 @@ function LibraryView({
   const emptyFiltered = processed.length === 0;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col gap-3">
-      {/* 工具栏：左添加 · 中搜索 · 右排序/过滤/视图 */}
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="relative flex h-full min-h-0 flex-col">
+      {/* 与顶栏同一页眉：左添加 · 中搜索 · 右排序/过滤/视图 */}
+      <div className="app-page-toolbar flex flex-wrap items-center gap-2 pb-3 pt-2">
         <div className="relative shrink-0" ref={addRef}>
           <div className="btn-add-books-group">
             <button
@@ -292,7 +292,7 @@ function LibraryView({
             </button>
           </div>
           {addOpen && (
-            <div className="absolute left-0 z-40 mt-1.5 min-w-[15rem] overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised" role="menu">
+            <div className="absolute left-0 z-40 mt-1.5 min-w-[15rem] overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/10 dark:bg-surface-raised" role="menu">
               <MenuItem
                 icon="📄"
                 label={i18n.libraryAddFile}
@@ -327,14 +327,14 @@ function LibraryView({
                   onScan({ addToWatch: true });
                 }}
               />
-              <div className="my-1 border-t border-ink-100 dark:border-white/[0.08]" />
+              <div className="my-1 border-t border-ink-100 dark:border-white/10" />
               <MenuItem
                 icon="⚙️"
                 label={i18n.libraryImportSettings}
                 onClick={() => setSettingsOpen((v) => !v)}
               />
               {settingsOpen && (
-                <div className="border-t border-ink-100 px-3 py-2 dark:border-white/[0.08]">
+                <div className="border-t border-ink-100 px-3 py-2 dark:border-white/10">
                   <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-700 dark:text-fg">
                     <input
                       type="checkbox"
@@ -533,10 +533,10 @@ function LibraryView({
         <button
           type="button"
           onClick={onAddFile}
-          className={`flex min-h-[18rem] flex-1 flex-col items-center justify-center rounded-2xl border border-dashed px-6 text-center transition ${
+          className={`mt-3 flex min-h-[18rem] flex-1 flex-col items-center justify-center rounded-2xl border border-dashed px-6 text-center transition ${
             dragOver
               ? "border-accent bg-accent/5"
-              : "border-ink-300 bg-white shadow-panel hover:border-ink-500 dark:border-white/[0.08] dark:bg-surface-panel dark:shadow-none"
+              : "border-ink-300 bg-white shadow-panel hover:border-ink-500 dark:border-white/10 dark:bg-surface-panel dark:shadow-none"
           }`}
         >
           <p className="text-sm font-medium text-ink-900 dark:text-fg">
@@ -545,7 +545,7 @@ function LibraryView({
           <p className="mt-2 max-w-md text-xs text-ink-500 dark:text-fg-muted">{i18n.libraryHint}</p>
         </button>
       ) : view === "list" ? (
-        <ul className="lib-scroll min-h-0 flex-1 space-y-1 pb-4">
+        <ul className="lib-scroll mt-3 min-h-0 flex-1 space-y-1 pb-4">
           {processed.map((e) => {
             const cover = coverUrl(e.coverPath, `${e.id}:${e.pageCount}:${e.coverPath ?? ""}`);
             const page = progressOf(e);
@@ -608,7 +608,7 @@ function LibraryView({
           })}
         </ul>
       ) : (
-        <ul className="lib-scroll grid min-h-0 flex-1 grid-cols-3 gap-3 pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
+        <ul className="lib-scroll mt-3 grid min-h-0 flex-1 grid-cols-3 gap-3 pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
           {processed.map((e) => {
             const cover = coverUrl(e.coverPath, `${e.id}:${e.pageCount}:${e.coverPath ?? ""}`);
             const page = progressOf(e);
@@ -673,7 +673,6 @@ function LibraryView({
                       className="btn-card-remove"
                       title={i18n.libraryRemoveHint}
                       aria-label={i18n.libraryRemove}
-                      disabled={e.missing}
                       onClick={(ev) => {
                         ev.stopPropagation();
                         onRemove(e);
@@ -823,8 +822,8 @@ function ScanPicker({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button type="button" className="absolute inset-0 bg-black/50" aria-label={i18n.libraryScanCancel} onClick={onCancel} />
-      <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-ink-200 bg-white shadow-panel dark:border-white/[0.08] dark:bg-surface-raised">
-        <div className="border-b border-ink-100 px-4 py-3 dark:border-white/[0.08]">
+      <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-ink-200 bg-white shadow-panel dark:border-white/10 dark:bg-surface-raised">
+        <div className="border-b border-ink-100 px-4 py-3 dark:border-white/10">
           <p className="text-sm font-medium text-ink-900 dark:text-fg">{i18n.libraryScanTitle}</p>
           <p className="mt-0.5 truncate text-[11px] text-ink-500" title={preview.root}>
             {preview.root}
@@ -862,7 +861,7 @@ function ScanPicker({
             </label>
           ))}
         </div>
-        <div className="flex flex-wrap items-center gap-2 border-t border-ink-100 px-4 py-3 dark:border-white/[0.08]">
+        <div className="flex flex-wrap items-center gap-2 border-t border-ink-100 px-4 py-3 dark:border-white/10">
           <button
             type="button"
             className="btn-ghost !h-8 !px-2.5 text-xs"

@@ -7,8 +7,13 @@ use crate::job::{JobManifest, PageRecord, PageStatus, SourceKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
+
+/// Whole-book directories under `work_root/reader/{key}/`.
+pub const MAX_READER_CACHE_BOOKS: usize = 10;
+pub const MAX_READER_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -325,8 +330,116 @@ pub(crate) fn extract_original(
             let _ = std::fs::remove_file(&dest);
             return Err(AppError::internal("抽取结果不是可显示的图片"));
         }
+        schedule_reader_cache_evict(cfg);
+    } else if let Some(parent) = dest.parent() {
+        touch_path(parent);
     }
     Ok((name, dest))
+}
+
+fn reader_cache_root(cfg: &AppConfig) -> PathBuf {
+    cfg.work_root.join("reader")
+}
+
+fn touch_path(path: &Path) {
+    let now = SystemTime::now();
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.set_modified(now);
+    }
+}
+
+fn book_dir_weight(dir: &Path) -> (SystemTime, u64) {
+    let mut newest = SystemTime::UNIX_EPOCH;
+    let mut bytes = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&p) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if let Ok(meta) = path.metadata() {
+                bytes = bytes.saturating_add(meta.len());
+                if let Ok(t) = meta.modified() {
+                    if t > newest {
+                        newest = t;
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(meta) = dir.metadata() {
+        if let Ok(t) = meta.modified() {
+            if t > newest {
+                newest = t;
+            }
+        }
+    }
+    (newest, bytes)
+}
+
+/// Evict oldest whole-book extract dirs until under caps. `keep` is never deleted.
+pub(crate) fn evict_reader_original_cache(cfg: &AppConfig, keep: Option<&Path>) -> AppResult<()> {
+    let root = reader_cache_root(cfg);
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let mut books: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if keep.is_some_and(|k| k == p.as_path()) {
+                continue;
+            }
+            let (mtime, bytes) = book_dir_weight(&p);
+            books.push((p, mtime, bytes));
+        }
+    }
+    books.sort_by_key(|b| b.1);
+    let keep_bytes: u64 = keep.map(|k| book_dir_weight(k).1).unwrap_or(0);
+    let mut total: u64 = books
+        .iter()
+        .map(|b| b.2)
+        .sum::<u64>()
+        .saturating_add(keep_bytes);
+    let mut count = books.len() + usize::from(keep.is_some());
+    for (path, _, len) in books {
+        if count <= MAX_READER_CACHE_BOOKS && total <= MAX_READER_CACHE_BYTES {
+            break;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            total = total.saturating_sub(len);
+            count = count.saturating_sub(1);
+        }
+    }
+    Ok(())
+}
+
+fn schedule_reader_cache_evict(cfg: &AppConfig) {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let cfg = cfg.clone();
+    let spawn = std::thread::Builder::new()
+        .name("reader-cache-evict".into())
+        .spawn(move || {
+            let _ = evict_reader_original_cache(&cfg, None);
+            BUSY.store(false, Ordering::SeqCst);
+        });
+    if spawn.is_err() {
+        BUSY.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Ensure a displayable file exists: enhanced output, extracted original, or on-demand extract.
@@ -575,5 +688,39 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn original_cache_evicts_oldest_books() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            ..Default::default()
+        };
+        let root = cfg.work_root.join("reader");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut dirs = Vec::new();
+        for i in 0..12u64 {
+            let d = root.join(format!("book{i:02}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("0000.aaaa.jpg"), b"\xFF\xD8\xFF").unwrap();
+            let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + i);
+            if let Ok(f) = std::fs::File::open(&d) {
+                let _ = f.set_modified(t);
+            }
+            if let Ok(f) = std::fs::File::open(d.join("0000.aaaa.jpg")) {
+                let _ = f.set_modified(t);
+            }
+            dirs.push(d);
+        }
+        evict_reader_original_cache(&cfg, None).unwrap();
+        let left = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .count();
+        assert_eq!(left, MAX_READER_CACHE_BOOKS);
+        assert!(!dirs[0].exists(), "oldest book dir should be evicted");
+        assert!(dirs[11].exists(), "newest book dir should remain");
     }
 }

@@ -59,7 +59,7 @@ export function ProgressHud({
         >
           <span
             className={`flex h-1.5 items-center rounded-full ${
-              onDark ? "bg-white/12" : "bg-black/8"
+              onDark ? "bg-white/10" : "bg-black/10"
             }`}
           >
             <span

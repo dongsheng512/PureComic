@@ -83,7 +83,7 @@ export function EnhanceSummaryBar({
   const pct = pagesTotal > 0 ? Math.round((pagesDone / pagesTotal) * 100) : 0;
 
   const taskCreatedChip = taskCreated ? (
-    <span className="rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success dark:text-emerald-100">
+    <span className="rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg">
       {i18n.taskCreated}
     </span>
   ) : null;
@@ -119,7 +119,7 @@ export function EnhanceSummaryBar({
           {job.jobId && (
             <button
               type="button"
-              className="btn !py-2 border border-rose-400/40 bg-rose-500/10 text-rose-700 hover:bg-rose-500/20 dark:text-rose-200"
+              className="btn !py-2 border border-rose-400/40 bg-rose-500/10 text-rose-700 hover:bg-rose-500/20 dark:border-danger-border dark:bg-danger-soft dark:text-danger-fg"
               onClick={() => job.jobId && onCancelJob(job.jobId)}
             >
               {i18n.cancel}
@@ -134,7 +134,7 @@ export function EnhanceSummaryBar({
               <b
                 className={`font-semibold tabular-nums ${
                   estimate && !estimate.ok
-                    ? "text-rose-700 dark:text-rose-300"
+                    ? "text-rose-700 dark:text-danger-fg"
                     : "text-ink-800 dark:text-fg"
                 }`}
               >
@@ -157,7 +157,7 @@ export function EnhanceSummaryBar({
             )}
           </div>
           {blockReason && (
-            <p className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+            <p className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-warning-fg">
               <svg
                 viewBox="0 0 20 20"
                 className="h-3.5 w-3.5 shrink-0"

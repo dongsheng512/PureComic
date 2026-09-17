@@ -89,14 +89,14 @@ export function EngineSelector({
                 active
                   ? "border-accent bg-accent/10 dark:bg-accent/15"
                   : c.available
-                    ? "border-ink-200 bg-ink-50 hover:border-ink-300 hover:bg-ink-100 dark:border-white/[0.08] dark:bg-surface-raised dark:hover:bg-surface-high"
-                    : "cursor-not-allowed border-ink-200 bg-ink-50 opacity-55 dark:border-white/[0.08] dark:bg-surface-raised"
+                    ? "border-ink-200 bg-ink-50 hover:border-ink-300 hover:bg-ink-100 dark:border-white/10 dark:bg-surface-raised dark:hover:bg-surface-high"
+                    : "cursor-not-allowed border-ink-200 bg-ink-50 opacity-55 dark:border-white/10 dark:bg-surface-raised"
               }`}
             >
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm font-semibold text-ink-900 dark:text-fg">{c.name}</p>
                 {!c.available && (
-                  <span className="rounded-md bg-rose-500/10 border border-rose-400/30 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-200">
+                  <span className="rounded-md bg-rose-500/10 border border-rose-400/30 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-danger-soft dark:border-danger-border dark:text-danger-fg">
                     {i18n.engineNotInstalled}
                   </span>
                 )}
@@ -118,8 +118,8 @@ export function EngineSelector({
         <span
           className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 ${
             accel.ready
-              ? "border-success/30 bg-success/10 text-success dark:text-emerald-100"
-              : "border-rose-400/40 bg-rose-500/10 text-rose-700 dark:text-rose-200"
+              ? "border-success/30 bg-success/10 text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg"
+              : "border-rose-400/40 bg-rose-500/10 text-rose-700 dark:bg-danger-soft dark:border-danger-border dark:text-danger-fg"
           }`}
         >
           <span className={`h-1.5 w-1.5 rounded-full ${accel.ready ? "bg-success" : "bg-rose-500"}`} />
@@ -132,7 +132,7 @@ export function EngineSelector({
           </span>
         )}
         {accel.mode && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-ink-200 bg-ink-100 px-2 py-0.5 text-ink-600 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg-muted">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-ink-200 bg-ink-100 px-2 py-0.5 text-ink-600 dark:border-white/10 dark:bg-surface-raised dark:text-fg-muted">
             <span className="h-1.5 w-1.5 rounded-full bg-ink-400 dark:bg-fg-muted" />
             {accel.mode}
           </span>
@@ -148,7 +148,7 @@ export function EngineSelector({
       </div>
 
       {detailOpen && (
-        <dl className="mt-2 space-y-1 rounded-xl border border-ink-200 bg-ink-50 p-3 font-mono text-[11px] dark:border-white/[0.08] dark:bg-surface-raised">
+        <dl className="mt-2 space-y-1 rounded-xl border border-ink-200 bg-ink-50 p-3 font-mono text-[11px] dark:border-white/10 dark:bg-surface-raised">
           <div className="flex gap-2">
             <dt className="w-16 shrink-0 text-ink-500 dark:text-fg-muted">{i18n.detailEngine}</dt>
             <dd className="min-w-0 break-all text-ink-800 dark:text-fg">
@@ -218,7 +218,7 @@ export function ScaleSelector({
             className={`flex w-[5.5rem] flex-col items-center rounded-xl border px-2 py-2 transition ${
               active
                 ? "border-accent bg-accent/10 dark:bg-accent/15"
-                : "border-ink-200 bg-ink-50 hover:border-ink-300 hover:bg-ink-100 dark:border-white/[0.08] dark:bg-surface-raised dark:hover:bg-surface-high"
+                : "border-ink-200 bg-ink-50 hover:border-ink-300 hover:bg-ink-100 dark:border-white/10 dark:bg-surface-raised dark:hover:bg-surface-high"
             }`}
           >
             <span

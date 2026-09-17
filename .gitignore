@@ -94,7 +94,10 @@ pic/
 
 # UI tooling artifacts
 .mimosa/
+.workbuddy/
 
 # Python
 __pycache__/
 third_party/realcugan-coreml/.cache-zip/
+ROADMAP.md
+/icon-preview/

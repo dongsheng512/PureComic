@@ -39,7 +39,7 @@ export function OutputSettings({
       <p className="label mb-3">{i18n.enhanceOutputSection}</p>
       <div className="flex gap-2">
         <div
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-ink-200 bg-ink-100 px-3 py-2 text-sm dark:border-white/[0.08] dark:bg-surface-raised"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-ink-200 bg-ink-100 px-3 py-2 text-sm dark:border-white/10 dark:bg-surface-raised"
           title={outputDir ?? undefined}
         >
           <svg viewBox="0 0 20 20" className="h-4 w-4 shrink-0 text-ink-400" aria-hidden="true">

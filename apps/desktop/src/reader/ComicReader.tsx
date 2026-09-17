@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { Messages } from "../i18n";
 import type { JobStatus, LibraryEntry } from "../types";
 import { ReaderView } from "./ReaderView";
@@ -35,7 +36,7 @@ type Props = {
  * 独立全屏阅读器：从 Tab 抽离，由书库卡片下钻或其它入口打开。
  * 提供返回书库与 Esc 退出（由内部 ReaderView 在非全屏/非藏栏时触发 onClose）。
  */
-export function ComicReader({
+export const ComicReader = memo(function ComicReader({
   session,
   jobs,
   i18n,
@@ -73,4 +74,4 @@ export function ComicReader({
       />
     </div>
   );
-}
+});

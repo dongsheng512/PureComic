@@ -68,6 +68,9 @@ export function useReaderEnhance(args: Args) {
   const clearRevertTimer = useRef<number | null>(null);
   const clearToastTimer = useRef<number | null>(null);
   const enhanceEpochRef = useRef(0);
+  const prevEnhanceOnRef = useRef(false);
+  /** 每次 effect 运行的代际:busy 状态归属哪个 effect 实例(翻页不 bump epoch,但会换 effect) */
+  const runGenRef = useRef(0);
   const aiPagesRef = useRef(aiPages);
   aiPagesRef.current = aiPages;
 
@@ -142,9 +145,13 @@ export function useReaderEnhance(args: Args) {
   useEffect(() => {
     if (!enhanceOn) {
       setEnhanceBusy(false);
-      void cancelReaderEnhance();
+      // 仅在 true→false 的切换沿取消在途批次;AI 关闭状态下翻页会反复
+      // 重跑本 effect,每次都发取消 IPC 是无谓开销
+      if (prevEnhanceOnRef.current) void cancelReaderEnhance();
+      prevEnhanceOnRef.current = false;
       return;
     }
+    prevEnhanceOnRef.current = true;
     const src = stateSource ?? source;
     const total = statePageCount ?? 0;
     if (!src || visibleIndexes.length === 0 || total <= 0) return;
@@ -181,6 +188,10 @@ export function useReaderEnhance(args: Args) {
     if (visCached) setEnhanceBusy(false);
 
     const epoch = enhanceEpochRef.current;
+    // busy 归属用运行代际而非 epoch:翻页会换 effect 实例但 epoch 不变,
+    // 旧任务的 finally/cleanup 不得清掉新任务刚置位的"增强中"
+    const gen = ++runGenRef.current;
+    const isCurrentGen = () => gen === runGenRef.current;
     let cancelled = false;
     const stillThis = () => !cancelled && epoch === enhanceEpochRef.current;
 
@@ -213,11 +224,10 @@ export function useReaderEnhance(args: Args) {
               onError(errorMessage(e));
             }
           } finally {
-            // 带代际守卫：翻页产生的旧任务 resolve 晚于新任务置 busy=true 时，
-            // 不能把新任务的"增强中"状态提前清零
-            if (epoch === enhanceEpochRef.current) setEnhanceBusy(false);
+            // 运行代际守卫:翻页后旧任务 resolve 晚于新任务置 busy 时不清零
+            if (isCurrentGen()) setEnhanceBusy(false);
           }
-        } else {
+        } else if (isCurrentGen()) {
           setEnhanceBusy(false);
         }
         if (!stillThis()) return;
@@ -255,14 +265,15 @@ export function useReaderEnhance(args: Args) {
         if (stillThis() && !isCancelledError(e)) {
           onError(errorMessage(e));
         }
-        setEnhanceBusy(false);
+        if (isCurrentGen()) setEnhanceBusy(false);
       }
     })();
 
     return () => {
       cancelled = true;
-      // cleanup 的清零同样带代际守卫：新 effect 已置 busy 时旧 cleanup 不动它
-      if (epoch === enhanceEpochRef.current) setEnhanceBusy(false);
+      // 恒为当前代(React 保证 cleanup 先于下一个 setup),直接清零:
+      // 翻页场景由新 setup 的 visCached 分支或新任务置位接管 busy
+      if (isCurrentGen()) setEnhanceBusy(false);
     };
   }, [
     enhanceOn,

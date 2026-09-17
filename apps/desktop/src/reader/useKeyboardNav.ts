@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type SetStateAction } from "react";
+import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { ReadDirection, SpreadMode } from "./prefs";
 import type { ReaderState } from "../types";
 import { alignIndex } from "./readerNav";
@@ -21,9 +21,13 @@ type Args = {
   setPageEditing: Dispatch<SetStateAction<boolean>>;
   moreOpen: boolean;
   setMoreOpen: Dispatch<SetStateAction<boolean>>;
-  /** AI 设置弹层开着：Esc 只关弹层，不落到关阅读器/退全屏等链路 */
-  aiMenuOpen: boolean;
-  closeAiMenu: () => void;
+  /**
+   * AI 弹层状态与关闭动作,以 ref 传入:事件时刻读 .current 取实时值。
+   * 若传快照值,ref 变化不触发宿主重渲染,Esc 会读到陈旧状态
+   * (菜单已关仍吞 Esc,或菜单开着被穿透到关阅读器)。
+   */
+  aiMenuOpenRef: MutableRefObject<boolean>;
+  aiMenuCloseRef: MutableRefObject<() => void>;
   toggleAi: () => void;
 };
 
@@ -46,8 +50,8 @@ export function useKeyboardNav(args: Args) {
     setPageEditing,
     moreOpen,
     setMoreOpen,
-    aiMenuOpen,
-    closeAiMenu,
+    aiMenuOpenRef,
+    aiMenuCloseRef,
     toggleAi,
   } = args;
 
@@ -55,6 +59,8 @@ export function useKeyboardNav(args: Args) {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      // 事件时刻读实时值(见 Args 注释)
+      const aiMenuOpen = aiMenuOpenRef.current;
       if (webtoon && (e.key === "ArrowDown" || e.key === " " || e.key === "PageDown" || e.key === "ArrowRight")) {
         e.preventDefault();
         scrollOrTurn(1);
@@ -89,6 +95,9 @@ export function useKeyboardNav(args: Args) {
         void toggleFullscreen();
       } else if (e.key === "h" || e.key === "H") {
         e.preventDefault();
+        // 藏栏会卸载顶栏:更多菜单随之消失,但 state 残留会导致重显栏时菜单
+        // 凭空复现且外部点击监听失效,与藏栏按钮的行为对齐
+        setMoreOpen(false);
         setBar(!barHidden);
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
@@ -99,7 +108,7 @@ export function useKeyboardNav(args: Args) {
           setPageEditing(false);
         } else if (aiMenuOpen) {
           e.preventDefault();
-          closeAiMenu();
+          aiMenuCloseRef.current();
         } else if (moreOpen) {
           e.preventDefault();
           setMoreOpen(false);
@@ -135,8 +144,8 @@ export function useKeyboardNav(args: Args) {
     setPageEditing,
     moreOpen,
     setMoreOpen,
-    aiMenuOpen,
-    closeAiMenu,
+    aiMenuOpenRef,
+    aiMenuCloseRef,
     toggleAi,
   ]);
 }

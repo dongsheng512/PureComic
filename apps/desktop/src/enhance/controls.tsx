@@ -43,7 +43,7 @@ export function Segmented<T extends string>({
           className={`rounded-full px-3 py-2 text-sm border transition ${
             value === opt.id
               ? "border-ink-400 bg-ink-300 text-ink-800 dark:border-white/20 dark:bg-surface-high dark:text-fg"
-              : "border-ink-300 bg-ink-200/80 text-ink-700 hover:bg-ink-300 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg dark:hover:bg-surface-high"
+              : "border-ink-300 bg-ink-200/80 text-ink-700 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-raised dark:text-fg dark:hover:bg-surface-high"
           }`}
         >
           {opt.label}
@@ -96,7 +96,7 @@ export function SelectBox<T extends string>({
         className={`w-full h-10 flex items-center justify-between gap-2 rounded-full border px-3 text-sm text-left transition ${
           open
             ? "border-ink-950 bg-white text-ink-950 dark:border-fg dark:bg-surface-raised dark:text-fg"
-            : "border-ink-300 bg-white text-ink-800 hover:border-ink-500 dark:border-white/[0.08] dark:bg-surface-raised dark:text-fg dark:hover:border-white/20"
+            : "border-ink-300 bg-white text-ink-800 hover:border-ink-500 dark:border-white/10 dark:bg-surface-raised dark:text-fg dark:hover:border-white/20"
         } disabled:opacity-80 disabled:cursor-default`}
       >
         <span className="truncate">{selected?.label ?? "—"}</span>
@@ -114,7 +114,7 @@ export function SelectBox<T extends string>({
       {open && !single && (
         <ul
           role="listbox"
-          className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised/95 dark:backdrop-blur-md"
+          className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/10 dark:bg-surface-raised/95 dark:backdrop-blur-md"
         >
           {options.map((opt) => {
             const active = opt.id === value;

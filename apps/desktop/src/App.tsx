@@ -19,6 +19,7 @@ import {
   removeJob,
   validateSource,
   takePendingOpenPaths,
+  touchLibrary,
   validateExternalOpenPath,
 } from "./api";
 import {
@@ -38,7 +39,7 @@ import {
 } from "./enhance/enhanceViewModel";
 import { LibraryView } from "./library/LibraryView";
 import { ComicReader, type ReaderSession } from "./reader/ComicReader";
-import { ACTIVE_JOB_STATES, useJobs } from "./useJobs";
+import { ACTIVE_JOB_STATES, jobsEqual, useJobs } from "./useJobs";
 import { useLibrary } from "./useLibrary";
 import { rememberMainWindowGeometry, restoreMainWindowGeometry } from "./reader/smartFit";
 import { setNativeWindowBg, startWindowDrag } from "./windowDrag";
@@ -66,7 +67,7 @@ function readTheme(): Theme {
   }
 }
 
-const THEME_BG = { light: "#FFFFFF", dark: "#212121" } as const;
+const THEME_BG = { light: "#FFFFFF", dark: "#1c1c1e" } as const;
 
 function applyTheme(theme: Theme) {
   const bg = THEME_BG[theme];
@@ -402,7 +403,7 @@ export default function App() {
     (async () => {
       try {
         const webview = getCurrentWebview();
-        unlisten = await webview.onDragDropEvent((event) => {
+        const fn = await webview.onDragDropEvent((event) => {
           if (cancelled) return;
           const payload = event.payload;
           if (payload.type === "enter" || payload.type === "over") {
@@ -438,6 +439,11 @@ export default function App() {
             }
           }
         });
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
       } catch {
         // Browser-only / vite without tauri: ignore
       }
@@ -496,6 +502,19 @@ export default function App() {
         : null,
     [jobs, source],
   );
+
+  const readerSource = readerSession
+    ? (readerSession.entry?.path ?? readerSession.source)
+    : null;
+  const readerJobsFiltered = useMemo(
+    () => (readerSource ? jobs.filter((j) => j.source === readerSource) : []),
+    [jobs, readerSource],
+  );
+  const readerJobsStable = useRef<JobStatus[]>([]);
+  if (!jobsEqual(readerJobsStable.current, readerJobsFiltered)) {
+    readerJobsStable.current = readerJobsFiltered;
+  }
+  const readerJobs = readerJobsStable.current;
 
   const engineReady = catalog.length
     ? (catalog.find((e) => e.id === engineId)?.available ?? false)
@@ -629,6 +648,9 @@ export default function App() {
     (e: LibraryEntry) => {
       if (e.missing) return;
       setSource(e.path);
+      void touchLibrary(e.path)
+        .then(() => refreshLibrary())
+        .catch(() => undefined);
       openReader({
         source: e.path,
         jobId: e.jobId ?? null,
@@ -637,7 +659,7 @@ export default function App() {
         from: "library",
       });
     },
-    [openReader],
+    [openReader, refreshLibrary],
   );
 
   const onLibEnhance = useCallback(
@@ -683,18 +705,10 @@ export default function App() {
         <div className="relative flex h-[52px] items-center">
           <div
             data-tauri-drag-region
-            className="h-full w-[84px] shrink-0"
+            className="h-full w-[78px] shrink-0"
             onMouseDown={startWindowDrag}
+            aria-hidden="true"
           />
-          <div
-            data-tauri-drag-region
-            className="flex min-w-0 items-center gap-2.5 pr-3"
-            onMouseDown={startWindowDrag}
-          >
-            <h1 className="pointer-events-none shrink-0 text-[15px] font-semibold tracking-tight text-ink-900 dark:text-fg">
-              {i18n.appName}
-            </h1>
-          </div>
 
           <nav
             aria-label="Primary"
@@ -722,7 +736,7 @@ export default function App() {
             })}
           </nav>
 
-          <div className="ml-auto flex shrink-0 items-center gap-1.5 pr-3">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 pr-6">
             <button
               type="button"
               onClick={() => setTab("doctor")}
@@ -769,7 +783,7 @@ export default function App() {
               aria-label={i18n.showQueue}
               className={`btn-soft relative !h-[34px] !w-[34px] !p-0 ${
                 runningJobCount > 0
-                  ? "!border-amber-400/70 !bg-amber-50 !text-amber-700 dark:!border-amber-400/40 dark:!bg-amber-400/15 dark:!text-amber-200"
+                  ? "!border-amber-400/70 !bg-amber-50 !text-amber-700 dark:!border-warning-border dark:!bg-warning-soft dark:!text-warning-fg"
                   : queueOpen
                     ? "!bg-ink-200 !text-ink-800 dark:!bg-surface-high dark:!text-fg"
                     : ""
@@ -799,23 +813,39 @@ export default function App() {
 
       {(engine?.id === "mock" || engine?.detail?.includes("mock") || doctorReport?.useMockEngine) &&
         !hideAppChrome && (
-        <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-900 dark:text-amber-100 text-sm px-6 py-2 text-center">
+        <div className="bg-amber-500/10 border-b border-amber-500/20 text-amber-900 text-sm px-6 py-2 text-center dark:bg-warning-soft dark:border-warning-border dark:text-warning-fg">
           {i18n.mockBanner}
         </div>
       )}
 
       {error && !hideAppChrome && (
         <div className="mx-auto max-w-6xl w-full px-6 pt-4">
-          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-4 py-3 text-sm text-rose-800 dark:text-rose-100">
-            {error}
+          <div className="flex items-start gap-2 rounded-xl bg-rose-500/10 border border-rose-500/30 px-4 py-3 text-sm text-rose-800 dark:bg-danger-soft dark:border-danger-border dark:text-danger-fg">
+            <p className="min-w-0 flex-1">{error}</p>
+            <button
+              type="button"
+              className="shrink-0 rounded-md px-1.5 text-base leading-none text-rose-700/80 hover:bg-rose-500/15 hover:text-rose-800 dark:text-danger-fg dark:hover:text-white"
+              aria-label={i18n.dismiss}
+              onClick={() => setError(null)}
+            >
+              ×
+            </button>
           </div>
         </div>
       )}
 
       {error && hideAppChrome && (
         <div className="pointer-events-none absolute inset-x-0 bottom-4 z-40 flex justify-center px-4">
-          <div className="pointer-events-auto max-w-xl rounded-xl bg-rose-500/90 px-4 py-2 text-sm text-white shadow-lg">
-            {error}
+          <div className="pointer-events-auto flex max-w-xl items-start gap-2 rounded-xl bg-rose-500/90 px-4 py-2 text-sm text-white shadow-lg">
+            <p className="min-w-0 flex-1">{error}</p>
+            <button
+              type="button"
+              className="pointer-events-auto shrink-0 rounded-md px-1.5 text-base leading-none text-white/80 hover:bg-white/15 hover:text-white"
+              aria-label={i18n.dismiss}
+              onClick={() => setError(null)}
+            >
+              ×
+            </button>
           </div>
         </div>
       )}
@@ -824,15 +854,17 @@ export default function App() {
         className={
           reading
             ? "flex min-h-0 w-full flex-1 flex-col"
-            : tab === "library" || tab === "enhance"
-              ? "mx-auto flex w-full max-w-6xl min-h-0 flex-1 flex-col px-6 py-4"
-              : "mx-auto w-full max-w-6xl flex-1 px-6 py-4"
+            : tab === "library"
+              ? "flex w-full min-h-0 flex-1 flex-col px-6 pb-4 pt-0"
+              : tab === "enhance"
+                ? "mx-auto flex w-full max-w-6xl min-h-0 flex-1 flex-col px-6 pb-4 pt-2"
+                : "mx-auto w-full max-w-6xl flex-1 px-6 py-4"
         }
       >
         {reading && readerSession && (
           <ComicReader
             session={readerSession}
-            jobs={jobs}
+            jobs={readerJobs}
             i18n={i18n}
             onClose={closeReader}
             onError={setError}
@@ -869,7 +901,7 @@ export default function App() {
         {!reading && tab === "library" && (
           <div className="flex min-h-0 flex-1 flex-col">
             {libraryNotice && (
-              <div className="mb-3 flex items-start gap-2 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:text-emerald-100">
+              <div className="mb-3 flex items-start gap-2 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg">
                 <p className="min-w-0 flex-1">{libraryNotice}</p>
                 <button
                   type="button"
@@ -962,7 +994,7 @@ export default function App() {
               </div>
             </div>
             {diagPath && (
-              <div className="rounded-xl border border-success/25 bg-success/10 px-4 py-3 font-mono text-sm text-success dark:text-emerald-100">
+              <div className="rounded-xl border border-success/25 bg-success/10 px-4 py-3 font-mono text-sm text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg">
                 {diagPath}
               </div>
             )}
@@ -979,8 +1011,8 @@ export default function App() {
                     <span
                       className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
                         doctorReport.engine.available
-                          ? "border-success/30 bg-success/10 text-success dark:text-emerald-100"
-                          : "border-amber-400/40 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                          ? "border-success/30 bg-success/10 text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg"
+                          : "border-amber-400/40 bg-amber-500/10 text-amber-800 dark:border-warning-border dark:bg-warning-soft dark:text-warning-fg"
                       }`}
                     >
                       {doctorReport.engine.available ? i18n.statusReady : i18n.statusUnavailable}
@@ -1011,7 +1043,7 @@ export default function App() {
                     <span>{i18n.statusAdvanced}</span>
                     <span className="text-ink-400 transition-transform group-open:rotate-180 dark:text-fg-muted">⌄</span>
                   </summary>
-                  <div className="space-y-4 border-t border-ink-200 px-5 py-5 text-sm dark:border-white/[0.08]">
+                  <div className="space-y-4 border-t border-ink-200 px-5 py-5 text-sm dark:border-white/10">
                     <div className="grid gap-3 sm:grid-cols-2">
                       <Info label="Version" value={doctorReport.appVersion} />
                       <Info label="OS" value={`${doctorReport.os}/${doctorReport.arch}`} />
@@ -1032,7 +1064,7 @@ export default function App() {
                         {doctorReport.gpus.map((g) => (
                           <li
                             key={`${g.id}-${g.name}`}
-                            className="rounded-lg border border-ink-200 bg-ink-100 px-3 py-2 font-mono text-xs dark:border-white/[0.08] dark:bg-surface-raised"
+                            className="rounded-lg border border-ink-200 bg-ink-100 px-3 py-2 font-mono text-xs dark:border-white/10 dark:bg-surface-raised"
                           >
                             [{g.id}] {g.name}{g.is_cpu ? " (CPU)" : ""}
                           </li>
@@ -1055,7 +1087,7 @@ export default function App() {
             aria-label={i18n.hideQueue}
             onClick={() => setQueueOpen(false)}
           />
-          <aside className="relative h-full w-full max-w-md border-l border-ink-200 bg-white shadow-panel flex flex-col dark:border-white/[0.08] dark:bg-surface">
+          <aside className="relative h-full w-full max-w-md border-l border-ink-200 bg-white shadow-panel flex flex-col dark:border-white/10 dark:bg-surface">
             <JobQueue
               jobs={jobs}
               i18n={i18n}
@@ -1131,7 +1163,7 @@ function ExternalImportModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="external-import-title"
-        className="relative w-full max-w-md rounded-2xl border border-ink-200 bg-white p-5 shadow-panel dark:border-white/[0.08] dark:bg-surface-raised"
+        className="relative w-full max-w-md rounded-2xl border border-ink-200 bg-white p-5 shadow-panel dark:border-white/10 dark:bg-surface-raised"
       >
         <p id="external-import-title" className="text-base font-semibold text-ink-900 dark:text-fg">
           {i18n.externalImportTitle}
@@ -1169,20 +1201,20 @@ function ExternalImportModal({
 function stateBadgeClass(state: string): string {
   const s = normalizeJobState(state);
   if (s === "completed")
-    return "bg-success/15 border-success/35 text-success dark:text-emerald-100";
-  if (s === "failed") return "bg-rose-500/20 border-rose-400/40 text-rose-800 dark:text-rose-100";
+    return "bg-success/15 border-success/35 text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg";
+  if (s === "failed") return "bg-rose-500/20 border-rose-400/40 text-rose-800 dark:bg-danger-soft dark:border-danger-border dark:text-danger-fg";
   if (s === "cancelled" || s === "cancelling")
-    return "bg-ink-200 border-ink-300 text-ink-700 dark:bg-surface-raised dark:border-white/[0.08] dark:text-fg";
+    return "bg-ink-200 border-ink-300 text-ink-700 dark:bg-surface-raised dark:border-white/10 dark:text-fg";
   if (s === "running") return "bg-accent/15 border-accent/40 text-accent dark:text-fg";
-  if (s === "extracting") return "bg-sky-500/20 border-sky-400/40 text-sky-800 dark:text-sky-100";
+  if (s === "extracting") return "bg-sky-500/20 border-sky-400/40 text-sky-800 dark:bg-info-soft dark:border-info-border dark:text-info-fg";
   if (s === "finalizing")
-    return "bg-amber-500/20 border-amber-400/40 text-amber-900 dark:text-amber-100";
-  return "bg-ink-100 border-ink-200 text-ink-700 dark:bg-surface-high dark:border-white/[0.08] dark:text-fg";
+    return "bg-amber-500/20 border-amber-400/40 text-amber-900 dark:bg-warning-soft dark:border-warning-border dark:text-warning-fg";
+  return "bg-ink-100 border-ink-200 text-ink-700 dark:bg-surface-high dark:border-white/10 dark:text-fg";
 }
 
 function Info({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-ink-200 bg-ink-50 px-3 py-2 dark:bg-surface-raised dark:border-white/[0.08]">
+    <div className="rounded-xl border border-ink-200 bg-ink-50 px-3 py-2 dark:bg-surface-raised dark:border-white/10">
       <p className="text-[10px] uppercase tracking-wider text-ink-500">{label}</p>
       <p className="mt-0.5 text-ink-800 break-all dark:text-fg">{value}</p>
     </div>
@@ -1241,7 +1273,7 @@ function JobQueue({
           {finishedCount > 0 && (
             <button
               type="button"
-              className="text-xs text-amber-200/90 hover:text-amber-100 border border-amber-400/30 rounded-lg px-2 py-1"
+              className="text-xs text-amber-800 hover:text-amber-950 border border-amber-500/40 rounded-lg px-2 py-1 transition dark:border-warning-border dark:text-warning-fg dark:hover:bg-warning-soft"
               onClick={onClearFinished}
               title={`清理 ${finishedCount} 个已结束任务`}
             >
@@ -1276,7 +1308,7 @@ function JobQueue({
             const showCancel = canShowCancel(j.state);
             const cancelling = isCancellingState(j.state);
             return (
-              <li key={id || j.source} className="rounded-xl border border-ink-200 bg-ink-50 p-3.5 dark:border-white/[0.08] dark:bg-surface-panel">
+              <li key={id || j.source} className="rounded-xl border border-ink-200 bg-ink-50 p-3.5 dark:border-white/10 dark:bg-surface-panel">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-ink-900 truncate dark:text-fg">
@@ -1297,7 +1329,7 @@ function JobQueue({
                     {id && (
                       <button
                         type="button"
-                        className="rounded-full border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/[0.08] dark:bg-surface-high dark:text-fg"
+                        className="rounded-full border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-high dark:text-fg"
                         onClick={() => onRead(id)}
                       >
                         {i18n.readerRead}
@@ -1307,7 +1339,7 @@ function JobQueue({
                       <button
                         type="button"
                         disabled={cancelling || !id}
-                        className="rounded-lg border border-rose-400/40 bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-500/25 disabled:opacity-40 disabled:pointer-events-none dark:text-rose-200"
+                        className="rounded-lg border border-rose-400/40 bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-500/25 disabled:opacity-40 disabled:pointer-events-none dark:border-danger-border dark:bg-danger-soft dark:text-danger-fg"
                         onClick={() => id && onCancel(id)}
                       >
                         {cancelling ? "取消中…" : i18n.cancel}
@@ -1333,14 +1365,14 @@ function JobQueue({
                     )}
                   </div>
                 </div>
-                <div className="mt-3 h-2.5 rounded-full bg-ink-200 overflow-hidden dark:bg-surface-high">
+                <div className="job-progress mt-3 h-2.5 rounded-full bg-ink-200 overflow-hidden">
                   <div
                     className={`h-full transition-all ${
                       normalizeJobState(j.state) === "failed"
                         ? "bg-rose-400"
                         : normalizeJobState(j.state) === "completed"
-                          ? "bg-success"
-                          : "bg-accent"
+                          ? "bg-success dark:bg-ok"
+                          : "bg-accent dark:bg-accent-fg"
                     }`}
                     style={{ width: `${pct}%` }}
                   />
@@ -1350,11 +1382,11 @@ function JobQueue({
                   {j.stage ? ` · ${j.stage}` : ""}
                 </p>
                 {j.message && (
-                  <p className="mt-0.5 text-xs text-success dark:text-emerald-200/90">{j.message}</p>
+                  <p className="mt-0.5 text-xs text-success dark:text-ok-fg">{j.message}</p>
                 )}
                 {j.error && <p className="mt-1 text-xs text-rose-300">{j.error.message}</p>}
                 {j.outputPath && (
-                  <p className="mt-1 text-[11px] text-success/90 dark:text-emerald-300/90 font-mono truncate">
+                  <p className="mt-1 text-[11px] text-success/90 dark:text-ok-fg font-mono truncate">
                     {j.outputPath}
                   </p>
                 )}

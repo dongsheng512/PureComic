@@ -159,30 +159,57 @@ export type ReaderBgPreset = {
 };
 
 export const READER_BG_PRESETS: readonly ReaderBgPreset[] = [
-  { id: "black", hex: "#000000", onDark: true },
-  { id: "dark", hex: "#212121", onDark: true },
+  { id: "black", hex: "#0C0C0E", onDark: true },
+  { id: "dark", hex: "#1C1C1E", onDark: true },
   { id: "white", hex: "#FFFFFF", onDark: false },
   { id: "sepia", hex: "#F3E6C8", onDark: false },
 ] as const;
 
-export const DEFAULT_READER_BG: ReaderBgId = "black";
+export const DEFAULT_READER_BG: ReaderBgId = "dark";
 const READER_BG_KEY = "comic.reader.bg";
+
+function appTheme(): "light" | "dark" {
+  try {
+    if (document.documentElement.classList.contains("dark")) return "dark";
+    return localStorage.getItem("comic.theme") === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+function themeBgKey(theme: "light" | "dark"): string {
+  return `${READER_BG_KEY}.${theme}`;
+}
 
 export function isReaderBgId(value: string): value is ReaderBgId {
   return READER_BG_PRESETS.some((preset) => preset.id === value);
 }
 
+function defaultBgForTheme(theme: "light" | "dark"): ReaderBgId {
+  return theme === "light" ? "white" : "dark";
+}
+
 export function loadReaderBg(): ReaderBgId {
+  const theme = appTheme();
+  const fallback = defaultBgForTheme(theme);
   try {
-    const saved = localStorage.getItem(READER_BG_KEY);
-    return saved && isReaderBgId(saved) ? saved : DEFAULT_READER_BG;
+    const keyed = localStorage.getItem(themeBgKey(theme));
+    if (keyed && isReaderBgId(keyed)) return keyed;
+    const legacy = localStorage.getItem(READER_BG_KEY);
+    if (legacy && isReaderBgId(legacy)) {
+      const onDark = READER_BG_PRESETS.find((p) => p.id === legacy)?.onDark ?? false;
+      if (onDark === (theme === "dark")) return legacy;
+    }
   } catch {
-    return DEFAULT_READER_BG;
+    /* ignore */
   }
+  return fallback;
 }
 
 export function saveReaderBg(id: ReaderBgId): void {
   try {
+    const theme = appTheme();
+    localStorage.setItem(themeBgKey(theme), id);
     localStorage.setItem(READER_BG_KEY, id);
   } catch {
     /* ignore storage quota / privacy errors */

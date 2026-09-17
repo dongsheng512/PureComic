@@ -9,8 +9,10 @@ use crate::estimate::assert_disk_ok;
 use crate::job::{JobManifest, JobState, PageRecord, PageStatus, ProgressEvent};
 use chrono::Utc;
 use comic_engines::{EnhanceBatchRequest, UpscaleEngine};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -22,6 +24,48 @@ pub type GpuLock = Arc<Mutex<()>>;
 
 pub fn new_gpu_lock() -> GpuLock {
     Arc::new(Mutex::new(()))
+}
+
+const MANIFEST_SAVE_MIN: Duration = Duration::from_millis(500);
+
+/// 进度落盘的节流闸门：至少间隔 `MANIFEST_SAVE_MIN` 才写一次。
+///
+/// ⚠️ 只把窗口用在**成功**的写入上：失败时不推进 `last_save`，否则一次瞬时失败
+/// 会被压住 500ms 才重试。错误必须往外传 —— 早先这里是 `let _ = m.save()`，
+/// 把磁盘故障连错误一起节流吞掉，用户会看到进度永远停在某一页而毫无提示。
+fn save_throttled(m: &JobManifest, last_save: &mut Instant) -> AppResult<()> {
+    if last_save.elapsed() >= MANIFEST_SAVE_MIN {
+        m.save()?;
+        *last_save = Instant::now();
+    }
+    Ok(())
+}
+
+/// 事件节流闸门：**首个事件立即放行**，其后按 `window` 限流。
+///
+/// 别用 `Instant::now() - window` 去伪造"上次触发发生在窗口之前"：`Instant` 的
+/// `Sub` 在越界时会 panic，机器刚开机就跑进这段代码（monotonic 时钟还没走够
+/// 一个窗口）理论上可以命中。这里把"首帧放行"写成显式状态，顺带去掉了魔法回溯时刻。
+struct Throttle {
+    window: Duration,
+    last: Option<Instant>,
+}
+
+impl Throttle {
+    fn new(window: Duration) -> Self {
+        Self { window, last: None }
+    }
+
+    /// 到点则放行并推进窗口；首帧恒为 true。
+    fn allow(&mut self) -> bool {
+        match self.last {
+            Some(t) if t.elapsed() < self.window => false,
+            _ => {
+                self.last = Some(Instant::now());
+                true
+            }
+        }
+    }
 }
 
 /// Extract progress tick (stats only — cheap to send often).
@@ -158,11 +202,14 @@ pub async fn run_job(
             Ok::<_, AppError>(working)
         });
 
-        // 进度 tick 只更新内存 stats；落盘节流到 500ms，避免每页全量序列化数 MB JSON
-        let mut last_save = std::time::Instant::now();
+        // 进度 tick 只更新内存 stats；落盘节流到 500ms，避免每页全量序列化数 MB JSON。
+        // 这两处落盘都是"尽力而为"的：drain 循环里不能因为写失败就 `return Err`
+        // （会跳过下面的 `extract_handle.await`，把 blocking 解压任务甩在后台继续往
+        // 可能已被删掉的工作目录写盘）。真正的权威落盘是 join 之后那次 `m.save()?`。
+        let mut last_save = Instant::now();
         // 事件同样节流到 200ms：每页一 tick 会造成前端 listJobs 洪峰；
         // 完成路径在 extract join 后另有最终 emit，不会丢尾帧
-        let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(200);
+        let mut emit_gate = Throttle::new(Duration::from_millis(200));
         while let Some(tick) = rx.recv().await {
             if cancel.is_cancelled() {
                 break;
@@ -170,12 +217,13 @@ pub async fn run_job(
             let mut m = manifest.write().await;
             m.stats.pages_done = tick.pages_done;
             m.stats.pages_total = tick.pages_total;
-            if last_save.elapsed() >= std::time::Duration::from_millis(500) {
-                let _ = m.save();
-                last_save = std::time::Instant::now();
+            if last_save.elapsed() >= MANIFEST_SAVE_MIN {
+                match m.save() {
+                    Ok(()) => last_save = Instant::now(),
+                    Err(e) => warn!(job = %m.job_id, error = %e, "解压进度落盘失败，稍后重试"),
+                }
             }
-            if last_emit.elapsed() >= std::time::Duration::from_millis(200) {
-                last_emit = std::time::Instant::now();
+            if emit_gate.allow() {
                 emit(&m, "extract", tick.current);
             }
         }
@@ -386,6 +434,11 @@ pub async fn run_job(
         )
     });
 
+    // 同上：drain 循环里的落盘是最尽力而为的，写失败只告警不 `return Err` ——
+    // 这里提前返回会跳过下面的 `export_result.await`，把打包任务甩在后台继续写文件。
+    // 收尾时那次 `m.save()?` 才是权威的：磁盘真坏了会在那里硬失败。
+    let mut last_save = Instant::now();
+    let mut emit_gate = Throttle::new(Duration::from_millis(200));
     while let Some(tick) = rx.recv().await {
         let mut m = manifest.write().await;
         m.stats.pages_done = tick.pages_done;
@@ -396,8 +449,12 @@ pub async fn run_job(
             "打包{label} {}/{}",
             tick.pages_done, tick.pages_total
         ));
-        let _ = m.save();
-        emit(&m, "repack", tick.current);
+        if let Err(e) = save_throttled(&m, &mut last_save) {
+            warn!(job = %m.job_id, error = %e, "打包进度落盘失败，稍后重试");
+        }
+        if emit_gate.allow() {
+            emit(&m, "repack", tick.current);
+        }
     }
 
     let export_result = export_result.await;
@@ -490,24 +547,54 @@ async fn enhance_directory_batch(
     let poll_manifest = manifest.clone();
     let poll_emit = on_progress.clone();
     let poller = tokio::spawn(async move {
+        let mut last_save = Instant::now();
+        let mut dirty = false;
         loop {
             tokio::select! {
-                _ = poll_cancel.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(350)) => {
+                _ = poll_cancel.cancelled() => {
+                    if dirty {
+                        let m = poll_manifest.write().await;
+                        let _ = m.save();
+                    }
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(350)) => {
+                    let out_dir = {
+                        let m = poll_manifest.read().await;
+                        m.out_dir()
+                    };
+                    let index = tokio::task::spawn_blocking(move || index_output_dir(&out_dir))
+                        .await
+                        .ok()
+                        .flatten();
+                    let Some(index) = index else {
+                        continue;
+                    };
                     let mut m = poll_manifest.write().await;
                     let mut changed = false;
                     for page in &mut m.pages {
                         if page.status == PageStatus::Done {
                             continue;
                         }
-                        if page_output_ready(page) {
+                        if let Some(p) = page_output_from_index(page, &index) {
+                            page.out_path = Some(p);
+                            page.status = PageStatus::Done;
+                            changed = true;
+                        } else if page_output_ready(page) {
+                            remap_out_path(page);
                             page.status = PageStatus::Done;
                             changed = true;
                         }
                     }
                     if changed {
                         m.refresh_stats();
-                        let _ = m.save();
+                        if last_save.elapsed() >= MANIFEST_SAVE_MIN {
+                            let _ = m.save();
+                            last_save = Instant::now();
+                            dirty = false;
+                        } else {
+                            dirty = true;
+                        }
                         if let Some(cb) = &poll_emit {
                             cb(ProgressEvent::from_manifest(&m, "enhance", None));
                         }
@@ -678,6 +765,7 @@ async fn enhance_parallel_pages(
     };
     // 引擎输出扩展名：output_format 显式指定时遵从，否则默认 png
     let out_ext = params.output_format.as_deref().unwrap_or("png");
+    let mut last_save = Instant::now();
     for idx in 0..page_count {
         if cancel.is_cancelled() {
             return Err(AppError::cancelled());
@@ -696,7 +784,7 @@ async fn enhance_parallel_pages(
             m.pages[idx].out_path = Some(output);
             m.pages[idx].status = PageStatus::Done;
             m.refresh_stats();
-            m.save()?;
+            save_throttled(&m, &mut last_save)?;
             if let Some(cb) = &on_progress {
                 cb(ProgressEvent::from_manifest(&m, "enhance", Some(name)));
             }
@@ -756,7 +844,7 @@ async fn enhance_parallel_pages(
                     m.pages[idx].status = PageStatus::Failed;
                 }
                 m.refresh_stats();
-                m.save()?;
+                save_throttled(&m, &mut last_save)?;
                 if let Some(cb) = &on_progress {
                     cb(ProgressEvent::from_manifest(&m, "enhance", Some(name)));
                 }
@@ -771,11 +859,15 @@ async fn enhance_parallel_pages(
                 m.pages[idx].status = PageStatus::Failed;
                 m.pages[idx].error = Some(app_err.message);
                 m.refresh_stats();
-                m.save()?;
+                save_throttled(&m, &mut last_save)?;
             }
         }
         drop(guard);
         tokio::task::yield_now().await;
+    }
+    {
+        let m = manifest.write().await;
+        m.save()?;
     }
     Ok(())
 }
@@ -837,6 +929,62 @@ pub(crate) fn recover_pages_from_indir(m: &mut JobManifest) {
     info!(recovered = pages.len(), "recovered pages from in/");
     m.pages = pages;
     m.refresh_stats();
+}
+
+fn ext_rank(path: &Path) -> u8 {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg") => 0,
+        Some("jpeg") => 1,
+        Some("png") => 2,
+        Some("webp") => 3,
+        _ => 9,
+    }
+}
+
+fn index_output_dir(out_dir: &Path) -> Option<HashMap<String, PathBuf>> {
+    if !out_dir.is_dir() {
+        return None;
+    }
+    let mut map = HashMap::new();
+    let Ok(rd) = std::fs::read_dir(out_dir) else {
+        return Some(map);
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        match map.get(&stem) {
+            Some(old) if ext_rank(old) <= ext_rank(&p) => {}
+            _ => {
+                map.insert(stem, p);
+            }
+        }
+    }
+    Some(map)
+}
+
+fn page_output_from_index(page: &PageRecord, index: &HashMap<String, PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = page.out_path.as_ref() {
+        if let Some(stem) = p.file_stem() {
+            if let Some(found) = index.get(stem.to_string_lossy().as_ref()) {
+                return Some(found.clone());
+            }
+        }
+    }
+    let stem = page
+        .in_path
+        .as_ref()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))?;
+    index.get(&stem).cloned()
 }
 
 fn page_output_ready(page: &PageRecord) -> bool {
@@ -901,4 +1049,112 @@ async fn mark_cancelled(manifest: &Arc<RwLock<JobManifest>>) -> AppResult<()> {
     m.save()?;
     warn!(job = %m.job_id, "job cancelled");
     Err(AppError::cancelled())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::error::ErrorCode;
+    use crate::job::{EnhanceOptions, ImageFormat, OutputContainer, OutputOptions};
+    use comic_engines::MockEngine;
+    use image::{ImageBuffer, Rgb};
+
+    fn tiny_png(dir: &Path, name: &str) {
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(8, 8, Rgb([9, 8, 7]));
+        image::DynamicImage::ImageRgb8(img)
+            .save(dir.join(name))
+            .unwrap();
+    }
+
+    fn test_manifest(tmp: &Path, src: PathBuf, cfg: &AppConfig) -> Arc<RwLock<JobManifest>> {
+        let out = tmp.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let job_id = Uuid::new_v4().to_string();
+        let workdir = cfg.jobs_dir().join(&job_id);
+        let mut m = JobManifest::new(
+            src,
+            EnhanceOptions::default(),
+            OutputOptions {
+                dir: out,
+                container: OutputContainer::Folder,
+                image_format: ImageFormat::Png,
+                ..Default::default()
+            },
+            workdir,
+        );
+        m.job_id = job_id;
+        m.save().unwrap();
+        Arc::new(RwLock::new(m))
+    }
+
+    #[tokio::test]
+    async fn run_job_mock_completes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("book");
+        std::fs::create_dir_all(&src).unwrap();
+        tiny_png(&src, "0.png");
+        tiny_png(&src, "1.png");
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let manifest = test_manifest(tmp.path(), src, &cfg);
+        run_job(
+            manifest.clone(),
+            Arc::new(MockEngine { delay_ms: 0 }),
+            cfg,
+            new_gpu_lock(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let m = manifest.read().await;
+        assert_eq!(m.state, JobState::Completed);
+        assert_eq!(m.stats.pages_done, 2);
+    }
+
+    #[tokio::test]
+    async fn run_job_pre_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("book");
+        std::fs::create_dir_all(&src).unwrap();
+        tiny_png(&src, "0.png");
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let manifest = test_manifest(tmp.path(), src, &cfg);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = run_job(
+            manifest.clone(),
+            Arc::new(MockEngine { delay_ms: 0 }),
+            cfg,
+            new_gpu_lock(),
+            cancel,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Cancelled);
+        let m = manifest.read().await;
+        assert_eq!(m.state, JobState::Cancelled);
+    }
+
+    #[test]
+    fn output_dir_index_prefers_jpg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("0001.png"), b"png").unwrap();
+        std::fs::write(dir.join("0001.jpg"), b"jpg").unwrap();
+        let index = index_output_dir(dir).expect("dir exists");
+        assert_eq!(index.get("0001").unwrap().extension().unwrap(), "jpg");
+        assert!(index_output_dir(&dir.join("missing")).is_none());
+    }
 }

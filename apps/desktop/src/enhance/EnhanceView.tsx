@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { Messages } from "../i18n";
 import type {
   DiskEstimate,
@@ -66,7 +67,7 @@ export type EnhanceViewProps = {
  * 三段式增强工作台：
  * 左 = 源文件 + 输出；右 = 核心增强方案（高级参数默认折叠）；底部 = 资源预估与提交。
  */
-export function EnhanceView(props: EnhanceViewProps) {
+export const EnhanceView = memo(function EnhanceView(props: EnhanceViewProps) {
   const { i18n } = props;
   const scales =
     props.catalog.find((e) => e.id === props.engineId)?.scales ?? [2];
@@ -156,4 +157,4 @@ export function EnhanceView(props: EnhanceViewProps) {
       />
     </div>
   );
-}
+});

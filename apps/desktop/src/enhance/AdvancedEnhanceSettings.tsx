@@ -36,7 +36,7 @@ export function AdvancedEnhanceSettings({
   if (noiseLabel) summaryParts.push(`${i18n.noise} ${noiseLabel}`);
 
   return (
-    <div className="rounded-xl border border-ink-200 dark:border-white/[0.08]">
+    <div className="rounded-xl border border-ink-200 dark:border-white/10">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -61,7 +61,7 @@ export function AdvancedEnhanceSettings({
         </svg>
       </button>
       {open && (
-        <div className="space-y-4 border-t border-ink-200 px-3.5 py-4 dark:border-white/[0.08]">
+        <div className="space-y-4 border-t border-ink-200 px-3.5 py-4 dark:border-white/10">
           <Field
             label={i18n.noise}
             hint={isCugan ? i18n.noiseHintCugan : i18n.noiseHint}

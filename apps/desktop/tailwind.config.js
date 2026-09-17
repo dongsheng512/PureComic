@@ -19,28 +19,62 @@ export default {
           900: "#2f2f2f",
           950: "#2f2f2f",
         },
-        // Dark surfaces: main content #212121, sidebar/header #171717
+        // 深色表面阶梯：Apple systemGray6→3 (dark)，四档同族（B+2 冷灰），步长 1.22/1.23/1.24:1
+        // ⚠️ 这四个值和 styles.css 的 --paper-deep/--surface-* 是同一套色，改一处必须改两处。
+        //    这里不能写成 var(...)，因为 dark:bg-surface-raised/95 这类透明度修饰符
+        //    需要能解析的颜色值（controls.tsx 用到了）。
         surface: {
-          DEFAULT: "#212121",
-          panel: "#171717",
-          raised: "#2f2f2f",
-          high: "#3a3a3a",
+          DEFAULT: "#1c1c1e",
+          panel: "#2c2c2e",
+          raised: "#3a3a3c",
+          high: "#48484a",
         },
         fg: {
           DEFAULT: "#ececec",
           label: "#c5c5c5",
-          muted: "#9b9b9b",
+          muted: "#a6a6a6",
         },
         // 唯一主色：系统蓝
         accent: {
           DEFAULT: "#007aff",
           dim: "#0066d6",
           soft: "#eaf3ff",
+          // 深底上的前景蓝（= styles.css 的 --accent-fg）。只在 dark: 变体里用。
+          fg: "var(--accent-fg)",
         },
-        // 语义成功色：提高文字可读性，视觉仍保持原生绿
+        // 语义成功色（浅色）：提高文字可读性，视觉仍保持原生绿
         success: {
           DEFAULT: "#248a3d",
           soft: "#effaf1",
+        },
+        // ⚠️ 下面四组是「深色专用」语义色，值直连 styles.css 的 token，
+        //    所以只能配 `dark:` 变体用（如 dark:text-danger-fg）。浅色模式没有对应值，别裸用。
+        //    fg = tint 底上的文字（提亮 80%，系统基色在 tint 上只有 2.9:1，不能当文字用）；
+        //    DEFAULT = 实心基色（点 / 图标 / 填充）。
+        danger: {
+          DEFAULT: "var(--danger)",
+          soft: "var(--danger-soft)",
+          border: "var(--danger-border)",
+          fg: "var(--danger-fg)",
+        },
+        warning: {
+          DEFAULT: "var(--warning)",
+          soft: "var(--warning-soft)",
+          border: "var(--warning-border)",
+          fg: "var(--warning-fg)",
+        },
+        info: {
+          DEFAULT: "var(--info)",
+          soft: "var(--info-soft)",
+          border: "var(--info-border)",
+          fg: "var(--info-fg)",
+        },
+        // success 在浅色已有自己的值（上面），深色另立一个名字，避免动到浅色。
+        ok: {
+          DEFAULT: "var(--success)",
+          soft: "var(--success-soft)",
+          border: "var(--success-border)",
+          fg: "var(--success-fg)",
         },
       },
       fontFamily: {

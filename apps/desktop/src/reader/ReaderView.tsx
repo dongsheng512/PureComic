@@ -38,6 +38,7 @@ import { ProgressHud } from "./ProgressHud";
 import { ReaderToolbar } from "./ReaderToolbar";
 import { alignIndex, stepIndex, type LoadedPage } from "./readerNav";
 import { useKeyboardNav } from "./useKeyboardNav";
+import { useSwipePageTurn } from "./useSwipePageTurn";
 import { usePagePreload } from "./usePagePreload";
 import { useReaderEnhance } from "./useReaderEnhance";
 
@@ -97,10 +98,14 @@ export function ReaderView({
   const [pageEditing, setPageEditing] = useState(false);
   const [pageDraft, setPageDraft] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
-  // AI 弹层的开关与"关闭即提交草稿"逻辑都在 Toolbar 内部(草稿状态在那里);
+  // AI 弹层的开关与"关闭即放弃草稿"逻辑都在 Toolbar 内部(草稿状态在那里);
   // 键盘导航(Esc 优先关弹层)与藏栏收起通过这两个 ref 请求 Toolbar 执行
   const aiMenuOpenRef = useRef(false);
   const aiMenuCloseRef = useRef<() => void>(() => {});
+  const aiMenuDiscardRef = useRef<() => void>(() => {});
+  // 全屏进出时顶栏的联动（见下方 fullscreen effect）：记进全屏之前的 barHidden，退出时还原
+  const barBeforeFullscreenRef = useRef<boolean | null>(null);
+  const prevFullscreenRef = useRef(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -268,7 +273,7 @@ export function ReaderView({
     document.documentElement.setAttribute("data-reader-open", "");
     return () => {
       document.documentElement.removeAttribute("data-reader-open");
-      const appBg = localStorage.getItem("comic.theme") === "light" ? "#FFFFFF" : "#212121";
+      const appBg = localStorage.getItem("comic.theme") === "light" ? "#FFFFFF" : "#1c1c1e";
       setNativeWindowBg(appBg);
     };
   }, []);
@@ -302,6 +307,32 @@ export function ReaderView({
     };
   }, []);
 
+  /**
+   * 全屏进出的顶栏联动：进全屏顺手藏栏，退出时**还原成进全屏之前的状态**。
+   *
+   * 为什么放在 effect 而不是 toggleFullscreen 里：用 macOS 绿钮 / ⌘⌃F 退出全屏
+   * 走的是上面 onResized 那条路，不走我们的 toggle。
+   * 不还原的后果：`immersive = barHidden || fullscreen` 会一直是 true，
+   * 退出全屏后顶栏仍藏着，看起来像"退出全屏没生效"，得再按一次 H。
+   *
+   * 故意只依赖 fullscreen：barHidden 变化不该触发这段（否则进全屏时会把刚藏好的
+   * true 记成"进入前的值"，退出后就还原成隐藏）。
+   */
+  useEffect(() => {
+    const prev = prevFullscreenRef.current;
+    prevFullscreenRef.current = fullscreen;
+    if (fullscreen === prev) return;
+    if (fullscreen) {
+      barBeforeFullscreenRef.current = barHidden;
+      setBarHidden(true);
+    } else {
+      const restore = barBeforeFullscreenRef.current;
+      barBeforeFullscreenRef.current = null;
+      setBarHidden(restore ?? false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullscreen]);
+
   const setBar = useCallback((hidden: boolean) => {
     setBarHidden(hidden);
   }, []);
@@ -312,7 +343,8 @@ export function ReaderView({
       const next = !(await win.isFullscreen());
       await win.setFullscreen(next);
       setFullscreen(next);
-      if (next) setBarHidden(true);
+      // 藏栏不在这里做 —— 交给下面的 fullscreen effect，
+      // 那里能同时覆盖"绿钮/⌘⌃F 退出全屏"这条不经过本函数的路径
     } catch {
       setFullscreen((v) => !v);
     }
@@ -391,6 +423,10 @@ export function ReaderView({
       setJumpRequest(null);
       decodedUrlsRef.current.clear();
       jumpSeqRef.current = 0;
+      // 换书(含阅读中拖放)不重挂组件:丢弃草稿并收起弹层,
+      // 避免旧书参数被提交后对新书触发重优化
+      setMoreOpen(false);
+      aiMenuDiscardRef.current();
       enhance.resetForNewBook();
     }
     if (state.pageCount <= 0) return;
@@ -438,15 +474,38 @@ export function ReaderView({
 
   useEffect(() => {
     if (!state?.jobId) return;
-    const active = ["running", "extracting", "finalizing", "validating", "pending", "cancelling"].includes(
-      state.jobState ?? "",
-    );
-    if (!active && state.pages.every((p) => p.kind !== "missing")) return;
+    const activeStates = [
+      "running",
+      "extracting",
+      "finalizing",
+      "validating",
+      "pending",
+      "cancelling",
+    ];
+    const active = activeStates.includes(state.jobState ?? "");
+    const hasMissing = state.pages.some((p) => p.kind === "missing");
+    if (!active && !hasMissing) return;
+
+    let stale = 0;
+    let lastSig = state.pages.map((p) => `${p.index}:${p.kind}`).join(",");
+    const jid = state.jobId;
     const t = window.setInterval(() => {
-      void refreshState(state.jobId ?? null, null);
+      void refreshState(jid, null).then((next) => {
+        if (!next) return;
+        const sig = next.pages.map((p) => `${p.index}:${p.kind}`).join(",");
+        if (sig === lastSig) stale += 1;
+        else {
+          stale = 0;
+          lastSig = sig;
+        }
+        const stillActive = activeStates.includes(next.jobState ?? "");
+        if (!stillActive && stale >= 3) window.clearInterval(t);
+      });
     }, 900);
     return () => window.clearInterval(t);
-  }, [state?.jobId, state?.jobState, state?.pages, refreshState]);
+    // pages 用内容签名在 interval 内比较，不放进依赖，避免每轮 setState 重置计数
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.jobId, state?.jobState, refreshState]);
 
   const flashProgress = useCallback(() => {
     setProgressHud(true);
@@ -475,6 +534,13 @@ export function ReaderView({
     },
     [state, effectiveSpread],
   );
+
+  useSwipePageTurn({
+    enabled: Boolean(state) && !webtoon && !pageEditing,
+    direction,
+    go,
+    viewportRef,
+  });
 
   const persistAspects = useCallback(() => {
     const src = sourceRef.current;
@@ -577,8 +643,8 @@ export function ReaderView({
     setPageEditing,
     moreOpen,
     setMoreOpen,
-    aiMenuOpen: aiMenuOpenRef.current,
-    closeAiMenu: () => aiMenuCloseRef.current(),
+    aiMenuOpenRef,
+    aiMenuCloseRef,
     toggleAi: enhance.toggleAi,
   });
 
@@ -827,7 +893,7 @@ export function ReaderView({
   return (
     <div
       ref={rootRef}
-      className="relative flex h-full min-h-0 flex-col"
+      className="reader-root relative flex h-full min-h-0 flex-col"
       data-reader-open=""
       data-reader-fg={canvasPreset.onDark ? "light" : "dark"}
       style={{
@@ -853,6 +919,7 @@ export function ReaderView({
         setMoreOpen={setMoreOpen}
         aiMenuOpenRef={aiMenuOpenRef}
         aiMenuCloseRef={aiMenuCloseRef}
+        aiMenuDiscardRef={aiMenuDiscardRef}
         fullscreen={fullscreen}
         temporary={temporary}
         displayTitle={displayTitle}
