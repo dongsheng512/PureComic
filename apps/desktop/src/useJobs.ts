@@ -88,9 +88,13 @@ export function useJobs() {
     let unlisten: (() => void) | undefined;
     onJobProgress(() => {
       scheduleRefresh();
-    }).then((u) => {
-      unlisten = u;
-    });
+    })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch((err) => {
+        console.warn("onJobProgress", err);
+      });
     return () => {
       clearInterval(timer);
       if (tailTimerRef.current != null) window.clearTimeout(tailTimerRef.current);

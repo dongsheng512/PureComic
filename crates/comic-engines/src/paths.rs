@@ -370,6 +370,50 @@ fn animevideo_coreml_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// If `{model}.sha256` exists, every listed file must match.
+/// Missing pin keeps the old existence-only check.
+pub fn verify_optional_model_pin(model: &Path) -> Result<(), String> {
+    let mut name = model.as_os_str().to_os_string();
+    name.push(".sha256");
+    let pin = PathBuf::from(name);
+    if !pin.is_file() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&pin).map_err(|e| format!("读取模型清单失败: {e}"))?;
+    let base = if model.is_dir() {
+        model.to_path_buf()
+    } else {
+        model
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    let mut any = false;
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        any = true;
+        let mut parts = line.split_whitespace();
+        let hex = parts
+            .next()
+            .ok_or_else(|| format!("模型清单第 {} 行缺少摘要", n + 1))?;
+        let rel = parts
+            .next()
+            .ok_or_else(|| format!("模型清单第 {} 行缺少路径", n + 1))?;
+        if parts.next().is_some() || rel.split(['/', '\\']).any(|p| p == "..") {
+            return Err(format!("模型清单第 {} 行路径无效", n + 1));
+        }
+        let file = base.join(rel);
+        crate::verify_sha256(&file, hex).map_err(|_| format!("模型校验失败: {rel}"))?;
+    }
+    if !any {
+        return Err("模型校验清单为空".into());
+    }
+    Ok(())
+}
+
 /// realesr-animevideov3 4×（fp16 mlprogram）。编译缓存目录名带 .i532 后缀，
 /// 一并接受以便转换后未清理时仍可解析。
 pub fn resolve_animevideo_coreml_model() -> Option<PathBuf> {
@@ -503,6 +547,30 @@ pub fn expected_binary_sha256(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_pin_rejects_changed_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("weights.bin");
+        std::fs::write(&model, b"hello").unwrap();
+        let pin = dir.path().join("weights.bin.sha256");
+        std::fs::write(
+            &pin,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  weights.bin\n",
+        )
+        .unwrap();
+        assert!(verify_optional_model_pin(&model).is_ok());
+        std::fs::write(&model, b"hellp").unwrap();
+        assert!(verify_optional_model_pin(&model).is_err());
+    }
+
+    #[test]
+    fn model_without_pin_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("weights.bin");
+        std::fs::write(&model, b"hello").unwrap();
+        assert!(verify_optional_model_pin(&model).is_ok());
+    }
 
     #[test]
     fn triple_non_empty() {

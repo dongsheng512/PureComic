@@ -203,6 +203,9 @@ impl EngineHub {
                 available: false,
                 detail: s,
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
         }
     }

@@ -953,6 +953,22 @@ html.dark .ai-seg-thumb {
   border-radius: 7px;
 }
 
+/* 缓存面板的轴切换（按漫画 / 按存储类型）。
+   焦点沿用 .ai-seg-item 的**内嵌描边**：分段控件外面只剩 2px 轨道内边距，
+   外描边或 ring-offset 会溢到相邻分段上去。
+   蓝色按主题给：系统蓝 #007aff 对着深色药丸 #48484a 只有 2.27:1，够不着 1.4.11 的
+   3:1，所以深色换成提亮过的 #3f9cff（对药丸 3.22:1、对轨道 4.92:1）。
+   浅色 #007aff 对药丸白 4.02:1、对轨道 3.19:1，两边都够。 */
+.cache-seg-item:focus-visible {
+  outline: 2px solid #007aff;
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+html.dark .cache-seg-item:focus-visible {
+  outline-color: #3f9cff;
+}
+
 /* 引擎切换：竖排列表（引擎名长短不一，横排分段宽度不足，改为上下排列） */
 .ai-engine-list {
   @apply mt-1.5 flex flex-col gap-[2px] rounded-[9px] p-[2px];
@@ -1316,4 +1332,127 @@ html.dark .reader-range::-webkit-slider-thumb {
   @apply absolute right-0 z-40 mt-1.5 min-w-[9.5rem] overflow-hidden rounded-xl
     border border-ink-200 bg-white py-1 shadow-panel
     dark:border-white/10 dark:bg-surface-raised;
+}
+
+/* ── 侧边抽屉（缓存管理 / 任务队列）────────────────────────────
+   两个面板共用同一条进出场：遮罩淡、面板从右侧滑入滑出。
+
+   只动 `transform` / `opacity`：位移和透明度走合成，不触发布局。
+   （用 `width` / `left` / `right` 做这条动画会每帧重排整页。）
+
+   曲线**没有**沿用本仓库 `reader-ai-pop` 那根带过冲的弹簧
+   `cubic-bezier(0.34, 1.56, 0.64, 1)`：那根曲线是为"小图标点亮"设计的，
+   过冲到 1.14 会让整条面板先越过停靠位、把右边缝露出来再弹回去，观感是"晃"。
+   整屏高度的面板要用单调减速。
+
+   ⚠️ 曲线取 **`easeOutQuad`**，不是更"snappy"的 `(0.32, 0.72, 0, 1)`
+   （Vaul / Radix 那根）。原因不是口味，是量出来的两个硬指标：
+
+   1. **死尾巴。** `(0.32,0.72,0,1)` 在 **57% 的时长**就走完了 97% 的位移 ——
+      280ms 里有 **121ms（43%）几乎不动**。观感就是"先窜到位、再慢慢蹭"。
+      `easeOutQuad` 97% 落在 85% 处，死尾巴只剩 15%。
+   2. **和遮罩脱节。** 遮罩原来是 180ms 的 `ease-out`，跟面板两条曲线两个时长，
+      实测**最大差 21.1 个百分点**（t=60ms：面板已 69.9%，遮罩才 48.8% 黑）
+      —— 看起来是"面板先到、房间后暗"，两个动作而不是一个手势。
+      现在遮罩和面板**共用同一条曲线、同一个时长**（都读 `--drawer-enter/exit`），
+      脱节结构性归零（逐点差 0.0pt）。
+
+   时长由 components/Drawer.tsx 通过内联变量下发（JS 还要靠它决定何时卸载），
+   这里一律带兜底值，别把时长写死在这个文件里。 */
+/* ⚠️ 这里用 @keyframes，**不要改回 transition** —— 这是踩过的坑。
+
+   transition 需要"从 A 到 B"两次样式计算：元素先以 closed 态进一次样式计算，
+   再切到 open 态，浏览器才知道该补什么间。但抽屉这棵子树是 React 按需挂载的，
+   挂载那一次提交里 `.drawer` 已经是 `data-state="open"` —— 面板**诞生的瞬间就是终态**，
+   浏览器压根没见过它的 closed 样子，过渡不会发生，表现就是"啪"地出现、没有滑动。
+
+   想用 transition 救的话，只能用 rAF 包一层、先读一次 offsetHeight 强制回流把
+   closed 态刷进样式计算，再翻状态。但那次 rAF 和 React 提交挂载的调度顺序
+   不受我们控制（谁先谁后随帧波动），于是退化成"有时候有动画、有时候直接跳出来"。
+
+   keyframes 没有这个前提：动画在**元素匹配到规则的那一刻**就开始播，
+   不需要任何先前状态，也就不需要 JS 去卡时序。开合态直接跟着 `open` 走即可。 */
+/* 开合曲线的**唯一定义**。面板和遮罩都读它 —— 上一版就是各写各的，才脱节 21pt。
+   想换手感只改这一行。 */
+.drawer {
+  --drawer-ease: cubic-bezier(0.25, 0.46, 0.45, 0.94); /* easeOutQuad */
+}
+
+/* ⚠️ 这里**不写 `will-change`**：动画本身就是 transform，浏览器会按时提升图层；
+   再常驻一条 `will-change` 等于永久占着一层（MDN 明确不建议），
+   而且会让抽屉里的正文一直用灰阶抗锯齿渲染 —— 收场之后文字也回不到次像素渲染。 */
+.drawer[data-state="open"] .drawer-panel {
+  animation: drawer-panel-in var(--drawer-enter, 240ms) var(--drawer-ease) both;
+}
+
+.drawer[data-state="closed"] .drawer-panel {
+  animation: drawer-panel-out var(--drawer-exit, 200ms) var(--drawer-ease) both;
+}
+
+.drawer[data-state="open"] .drawer-scrim {
+  animation: drawer-scrim-in var(--drawer-enter, 240ms) var(--drawer-ease) both;
+}
+
+.drawer[data-state="closed"] .drawer-scrim {
+  animation: drawer-scrim-out var(--drawer-exit, 200ms) var(--drawer-ease) both;
+}
+
+@keyframes drawer-panel-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-panel-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes drawer-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drawer-scrim-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 系统开了「减少动态效果」就彻底不动 —— 组件侧也会同步跳过等动画的定时器。
+   `animation: none` 之后动画的终态也跟着没了，所以 closed 那一帧要自己声明，
+   否则面板会闪在"已经打开"的位置上（关闭时组件还会渲染一帧 closed 才摘掉）。
+   ⚠️ 圆角/阴影这类"静态外观"不受影响，只是不给动画。
+
+   ⚠️ 选择器**必须带 `[data-state]`**：上面那几条是
+   `.drawer[data-state=open] .drawer-panel`（0,3,0），而裸的 `.drawer-panel` 只有
+   （0,1,0）—— 光靠写在后面是赢不了的，这条 `animation: none` 会被静默吃掉，
+   减动效就等于没做。带上属性凑成同级（0,3,0），再靠源码顺序压过去。 */
+@media (prefers-reduced-motion: reduce) {
+  .drawer[data-state] .drawer-scrim,
+  .drawer[data-state] .drawer-panel {
+    animation: none;
+  }
+
+  .drawer[data-state="closed"] .drawer-panel {
+    transform: translateX(100%);
+  }
+
+  .drawer[data-state="closed"] .drawer-scrim {
+    opacity: 0;
+  }
 }

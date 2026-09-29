@@ -323,7 +323,7 @@ fn cancel_reader_enhance(state: State<'_, AppState>) {
 #[tauri::command]
 async fn list_library(
     state: State<'_, AppState>,
-) -> Result<Vec<comic_core::library::LibraryEntry>, AppError> {
+) -> Result<comic_core::library::LibraryIndex, AppError> {
     let sched = state.scheduler.clone();
     tokio::task::spawn_blocking(move || sched.list_library())
         .await
@@ -417,6 +417,78 @@ async fn touch_library(
 }
 
 #[tauri::command]
+async fn create_library_collection(
+    state: State<'_, AppState>,
+    title: String,
+    entry_ids: Vec<String>,
+) -> Result<comic_core::library::LibraryCollection, AppError> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.create_library_collection(&title, &entry_ids))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+async fn add_library_collection_entries(
+    state: State<'_, AppState>,
+    id: String,
+    entry_ids: Vec<String>,
+) -> Result<(), AppError> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.add_library_collection_entries(&id, &entry_ids))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+async fn remove_library_collection_entry(
+    state: State<'_, AppState>,
+    id: String,
+    entry_id: String,
+) -> Result<(), AppError> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.remove_library_collection_entry(&id, &entry_id))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+async fn move_library_collection_entry(
+    state: State<'_, AppState>,
+    id: String,
+    entry_id: String,
+    delta: i32,
+) -> Result<(), AppError> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.move_library_collection_entry(&id, &entry_id, delta))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+async fn rename_library_collection(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<(), AppError> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.rename_library_collection(&id, &title))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
+async fn dissolve_library_collection(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let sched = state.scheduler.clone();
+    tokio::task::spawn_blocking(move || sched.dissolve_library_collection(&id))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+}
+
+#[tauri::command]
 async fn preview_page(
     state: State<'_, AppState>,
     source: String,
@@ -451,6 +523,63 @@ async fn export_diagnostics(
 async fn clear_finished_jobs(state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
     let n = state.scheduler.clear_finished_jobs().await?;
     Ok(serde_json::json!({ "removed": n }))
+}
+
+/// 缓存总览：全树遍历 → 后端已放 blocking 线程。
+#[tauri::command]
+async fn cache_overview(
+    state: State<'_, AppState>,
+) -> Result<comic_core::cache::CacheOverview, AppError> {
+    state.scheduler.cache_overview().await
+}
+
+/// 清理一个缓存组。`id` 为 `jobs` 时后端内部转发到 `clear_finished_jobs`。
+#[tauri::command]
+async fn clear_cache_group(
+    state: State<'_, AppState>,
+    id: comic_core::cache::CacheGroupId,
+) -> Result<comic_core::cache::CacheClearResult, AppError> {
+    state.scheduler.clear_cache_group(id).await
+}
+
+/// 按漫画列出一个分组的占用明细（界面上"展开一本书"的那一层）。
+#[tauri::command]
+async fn cache_group_entries(
+    state: State<'_, AppState>,
+    id: comic_core::cache::CacheGroupId,
+) -> Result<Vec<comic_core::cache::CacheEntry>, AppError> {
+    state.scheduler.cache_group_entries(id).await
+}
+
+/// 清掉单本缓存。`key` 是明细行上的 `key`（目录名 / 书 id / 任务 id）。
+#[tauri::command]
+async fn clear_cache_entry(
+    state: State<'_, AppState>,
+    id: comic_core::cache::CacheGroupId,
+    key: String,
+) -> Result<comic_core::cache::CacheClearResult, AppError> {
+    state.scheduler.clear_cache_entry(id, key).await
+}
+
+/// 缓存页主视图：一行 = 一本漫画占用的全部缓存（跨 5 类）。
+#[tauri::command]
+async fn cache_book_entries(
+    state: State<'_, AppState>,
+) -> Result<Vec<comic_core::cache::BookCacheEntry>, AppError> {
+    state.scheduler.cache_book_entries().await
+}
+
+/// 清掉一本漫画的**全部类型**缓存。
+///
+/// 收的是「要清的项」清单而不是书 id：**未归属的行没有书 id**，
+/// 按书 id 反查会漏掉它们，而"藏起来清不掉"正是这个模块要避免的事。
+/// 清单由前端从 `BookCacheEntry.parts` 原样回传，服务端逐项校验。
+#[tauri::command]
+async fn clear_book_cache(
+    state: State<'_, AppState>,
+    parts: Vec<comic_core::cache::CachePartRef>,
+) -> Result<comic_core::cache::CacheClearResult, AppError> {
+    state.scheduler.clear_book_cache(parts).await
 }
 
 #[tauri::command]
@@ -522,6 +651,8 @@ pub fn run() {
             cfg.ensure_dirs().ok();
 
             let scheduler = Arc::new(Scheduler::new(cfg).expect("scheduler"));
+            // 启动后台把历史上长出去的缓存夹回上限（mobi-cache 曾经完全没有上限）
+            scheduler.spawn_cache_maintenance();
             let handle: AppHandle = app.handle().clone();
             let sched_cb = scheduler.clone();
             tauri::async_runtime::block_on(async move {
@@ -576,6 +707,12 @@ pub fn run() {
             clear_reader_enhance_cache,
             cancel_reader_enhance,
             list_library,
+            create_library_collection,
+            add_library_collection_entries,
+            remove_library_collection_entry,
+            move_library_collection_entry,
+            rename_library_collection,
+            dissolve_library_collection,
             add_library_path,
             remove_library_entry,
             preview_library_scan,
@@ -585,6 +722,12 @@ pub fn run() {
             export_diagnostics,
             open_output_folder,
             clear_finished_jobs,
+            cache_overview,
+            clear_cache_group,
+            cache_group_entries,
+            clear_cache_entry,
+            cache_book_entries,
+            clear_book_cache,
             remove_job,
             take_pending_open_paths,
             validate_external_open_path,

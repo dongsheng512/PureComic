@@ -92,6 +92,9 @@ export default {
       boxShadow: {
         // 白卡片浮于浅灰底
         panel: "0 8px 24px rgba(35, 35, 45, 0.07)",
+        // 右侧抽屉：整条面板浮在正文之上，必须往**左**投（负 x），
+        // 且比卡片重得多 —— 卡片那点 8px/7% 摊在整屏高度上等于没有，边缝会糊掉。
+        drawer: "-16px 0 40px rgba(20, 20, 28, 0.16)",
         cover: "inset 0 0 0 1px rgba(0, 0, 0, 0.08)",
       },
       borderRadius: {

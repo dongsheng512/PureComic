@@ -5,6 +5,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { comicFileFilter, isComicPath } from "./formats";
 import {
   cancelJob,
+  cacheOverview,
+  cacheGroupEntries,
+  cacheBookEntries,
+  clearCacheEntry,
+  clearBookCache,
+  clearCacheGroup,
   clearFinishedJobs,
   createJob,
   doctor as fetchDoctor,
@@ -38,12 +44,18 @@ import {
   type Preset,
 } from "./enhance/enhanceViewModel";
 import { LibraryView } from "./library/LibraryView";
+import { CachePanel, type CacheView } from "./components/CachePanel";
+import { Drawer, PanelCloseButton } from "./components/Drawer";
 import { ComicReader, type ReaderSession } from "./reader/ComicReader";
 import { ACTIVE_JOB_STATES, jobsEqual, useJobs } from "./useJobs";
 import { useLibrary } from "./useLibrary";
 import { rememberMainWindowGeometry, restoreMainWindowGeometry } from "./reader/smartFit";
 import { setNativeWindowBg, startWindowDrag } from "./windowDrag";
 import type {
+  BookCacheEntry,
+  CacheGroupId,
+  CacheOverview,
+  CacheEntry,
   DiskEstimate,
   DoctorReport,
   EngineInfo,
@@ -126,6 +138,24 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
+  const [cacheOpen, setCacheOpen] = useState(false);
+  const [cacheOverviewData, setCacheOverviewData] = useState<CacheOverview | null>(null);
+  const [cacheScanning, setCacheScanning] = useState(false);
+  const [cacheBusyId, setCacheBusyId] = useState<CacheGroupId | "all" | null>(null);
+  const [cacheLastFreed, setCacheLastFreed] = useState<number | null>(null);
+  /** 主视图：一行 = 一本漫画占用的全部缓存。null = 还没加载出来 */
+  const [cacheBooks, setCacheBooks] = useState<BookCacheEntry[] | null>(null);
+  /** 正在整本清理的那一行（行标识）；null = 没有 */
+  const [cacheBusyBookKey, setCacheBusyBookKey] = useState<string | null>(null);
+  /** 主视图里展开的那本漫画；侧边栏很窄，同时只展开一行 */
+  const [cacheExpandedBook, setCacheExpandedBook] = useState<string | null>(null);
+  /** 列表区看的是哪个轴：按漫画 / 按存储类型。默认按漫画 —— 打开面板第一眼该看到漫画 */
+  const [cacheView, setCacheView] = useState<CacheView>("book");
+  /** 按存储类型视图里当前展开的分组；同时只展开一个 */
+  const [cacheExpanded, setCacheExpanded] = useState<CacheGroupId | null>(null);
+  const [cacheEntries, setCacheEntries] = useState<CacheEntry[] | null>(null);
+  const [cacheEntriesLoading, setCacheEntriesLoading] = useState(false);
+  const [cacheBusyEntryKey, setCacheBusyEntryKey] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(readTheme);
   /** 独立阅读器会话；非 null 时全屏展示 ComicReader，隐藏主导航 */
   const [readerSession, setReaderSession] = useState<ReaderSession | null>(null);
@@ -165,6 +195,13 @@ export default function App() {
   const [diagPath, setDiagPath] = useState<string | null>(null);
   const {
     library,
+    collections,
+    onCreateCollection,
+    onAddToCollection,
+    onRemoveFromCollection,
+    onMoveInCollection,
+    onRenameCollection,
+    onDissolveCollection,
     libraryRef,
     libraryScan,
     libraryImporting,
@@ -230,6 +267,171 @@ export default function App() {
     } catch (e) {
       setError(errMsg(e));
     }
+  }, []);
+
+  /**
+   * 缓存总览 + 按漫画列表。两者都是全树遍历，比 listJobs 慢得多，所以只在需要时主动调。
+   *
+   * 一次刷新必须把**两个视图**一起拿回来：它们回答的是同一份磁盘事实。
+   * 分开刷会出现"按漫画已经少了一本、合计还没变"这种自相矛盾的瞬间。
+   * 两条命令各自在 blocking 线程里跑，并发发出。
+   */
+  const refreshCache = useCallback(async () => {
+    setCacheScanning(true);
+    try {
+      const [overviewData, books] = await Promise.all([
+        cacheOverview(),
+        cacheBookEntries(),
+      ]);
+      setCacheOverviewData(overviewData);
+      setCacheBooks(books);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setCacheScanning(false);
+    }
+  }, []);
+
+  /** 重拉当前展开分组的明细。
+   *
+   * 存在的理由：总览一刷新，明细就可能过期 —— 比如刚清完一整组，
+   * 展开着的那一层还挂着已经不存在的书，用户点清理会报"找不到"。
+   */
+  const reloadExpandedEntries = useCallback(async () => {
+    if (!cacheExpanded) return;
+    try {
+      setCacheEntries(await cacheGroupEntries(cacheExpanded));
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }, [cacheExpanded]);
+
+  const runClearCache = useCallback(
+    async (id: CacheGroupId | "all") => {
+      setCacheBusyId(id);
+      setCacheLastFreed(null);
+      try {
+        // 「全部清理」是逐组调用，**不含 jobs** —— 任务目录是"半数据"，
+        // 删掉会让阅读器里那本书的增强结果退回原图，所以不能混进一键清理，
+        // 只能由用户在那一行单独点。顺序上先清体量大的，等待期间就能看到空间回来。
+        const order: CacheGroupId[] = ["mobi", "reader", "readerEnhance", "covers"];
+        let freed = 0;
+        if (id === "all") {
+          for (const g of order) {
+            freed += (await clearCacheGroup(g)).bytesFreed;
+          }
+        } else {
+          // jobs 组由后端转发到 clear_finished_jobs（含活跃保护 + 防目录复活）
+          freed = (await clearCacheGroup(id)).bytesFreed;
+          if (id === "jobs") await refreshJobs();
+        }
+        setCacheLastFreed(freed);
+        await refreshCache();
+        // 清掉的那一组若正展开着，明细必须跟着更新，否则还挂着已消失的书
+        await reloadExpandedEntries();
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setCacheBusyId(null);
+      }
+    },
+    [refreshCache, refreshJobs, reloadExpandedEntries],
+  );
+
+  /** 展开/收起主视图里那一本漫画的**按类型拆分**。
+   *
+   * 这里不读磁盘：每个部分的明细已经随 `cacheBookEntries()` 一起回来了
+   * （属于同一本书的几个部分不多），展开是纯本地的，不需要再走一次 IPC 和全树遍历。
+   */
+  const toggleCacheBook = useCallback((key: string) => {
+    setCacheLastFreed(null);
+    setCacheExpandedBook((cur) => (cur === key ? null : key));
+  }, []);
+
+  /** 清掉**一本漫画的全部类型缓存**。
+   *
+   * 清单直接用它自己的 `parts` 原样回传 —— 未归属的行没有书 id，
+   * 按书 id 反查会让它们清不掉，而"藏起来清不掉"正是这个页面要避免的事。
+   */
+  const runClearCacheBook = useCallback(
+    async (row: BookCacheEntry) => {
+      setCacheBusyBookKey(row.key);
+      setCacheLastFreed(null);
+      try {
+        const r = await clearBookCache(
+          row.parts.map((p) => ({ group: p.group, key: p.key })),
+        );
+        setCacheLastFreed(r.bytesFreed);
+        // 顺序重要：先刷新总览与按漫画列表、再重拉展开的分组明细。
+        // 反过来的话明细会先拿到新数字、总览还是旧的，用户会看到"清完了但体积没变"。
+        await refreshCache();
+        await reloadExpandedEntries();
+        if (row.parts.some((p) => p.group === "jobs")) await refreshJobs();
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setCacheBusyBookKey(null);
+      }
+    },
+    [refreshCache, refreshJobs, reloadExpandedEntries],
+  );
+
+  /** 展开/收起「按存储类型」这一层里的某个分组。展开时才去读磁盘。 */
+  const toggleCacheGroup = useCallback(
+    async (id: CacheGroupId) => {
+      setCacheLastFreed(null);
+      if (cacheExpanded === id) {
+        setCacheExpanded(null);
+        setCacheEntries(null);
+        return;
+      }
+      setCacheExpanded(id);
+      setCacheEntries(null);
+      setCacheEntriesLoading(true);
+      try {
+        setCacheEntries(await cacheGroupEntries(id));
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setCacheEntriesLoading(false);
+      }
+    },
+    [cacheExpanded],
+  );
+
+  /** 清掉单本。`key` 是明细行上的标识（目录名 / 书 id / 任务 id）。 */
+  const runClearCacheEntry = useCallback(
+    async (id: CacheGroupId, key: string) => {
+      setCacheBusyEntryKey(key);
+      setCacheLastFreed(null);
+      try {
+        const r = await clearCacheEntry(id, key);
+        setCacheLastFreed(r.bytesFreed);
+        // 顺序重要：先刷新总览、再重拉明细。
+        // 反过来的话明细会先拿到新数字、总览还是旧的，用户会看到"清完了但体积没变"。
+        await refreshCache();
+        setCacheEntries(await cacheGroupEntries(id));
+        if (id === "jobs") await refreshJobs();
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setCacheBusyEntryKey(null);
+      }
+    },
+    [refreshCache, refreshJobs],
+  );
+
+  /** 关闭缓存面板。
+   *
+   * Escape 和 × 必须走同一条路 —— 否则"关闭"这个动作会因为触发方式不同而留下
+   * 不同的残留状态（一个收起明细、一个把过期明细留着）。
+   */
+  const closeCachePanel = useCallback(() => {
+    setCacheOpen(false);
+    setCacheExpanded(null);
+    setCacheEntries(null);
+    setCacheExpandedBook(null);
+    setCacheView("book");
   }, []);
 
   const openExternalPath = useCallback(
@@ -330,6 +532,16 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [queueOpen]);
+
+  useEffect(() => {
+    if (!cacheOpen) return;
+    void refreshCache();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeCachePanel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [cacheOpen, refreshCache, closeCachePanel]);
 
   const applySource = useCallback(async (path: string) => {
     const requestId = ++sourceRequestRef.current;
@@ -455,31 +667,43 @@ export default function App() {
   }, [applySource, ingestPath, tab, reading]);
 
   const pickSource = async () => {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        comicFileFilter("Comic / Ebook"),
-        { name: "All", extensions: ["*"] },
-      ],
-    });
-    if (typeof selected === "string") await applySource(selected);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          comicFileFilter("Comic / Ebook"),
+          { name: "All", extensions: ["*"] },
+        ],
+      });
+      if (typeof selected === "string") await applySource(selected);
+    } catch (err) {
+      console.warn("pickSource", err);
+    }
   };
 
   const pickSourceFolder = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") await applySource(selected);
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string") await applySource(selected);
+    } catch (err) {
+      console.warn("pickSourceFolder", err);
+    }
   };
 
   const pickOutput = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") {
-      setOutputDir(selected);
-      try {
-        localStorage.setItem("comic.outputDir", selected);
-      } catch {
-        /* ignore */
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string") {
+        setOutputDir(selected);
+        try {
+          localStorage.setItem("comic.outputDir", selected);
+        } catch {
+          /* ignore */
+        }
       }
+    } catch (err) {
+      console.warn("pickOutput", err);
     }
   };
 
@@ -778,7 +1002,29 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setQueueOpen(true)}
+              onClick={() => {
+                setQueueOpen(false);
+                setCacheOpen(true);
+              }}
+              title={i18n.cacheShow}
+              aria-label={i18n.cacheShow}
+              aria-pressed={cacheOpen}
+              className={`btn-soft !h-[34px] !w-[34px] !p-0 ${
+                cacheOpen ? "!bg-ink-200 !text-ink-800 dark:!bg-surface-high dark:!text-fg" : ""
+              }`}
+            >
+              <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
+                <rect x="3.4" y="3.4" width="13.2" height="3.7" rx="1.4" fill="currentColor" opacity=".9" />
+                <rect x="3.4" y="8.15" width="13.2" height="3.7" rx="1.4" fill="currentColor" opacity=".62" />
+                <rect x="3.4" y="12.9" width="13.2" height="3.7" rx="1.4" fill="currentColor" opacity=".38" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                closeCachePanel();
+                setQueueOpen(true);
+              }}
               title={i18n.showQueue}
               aria-label={i18n.showQueue}
               className={`btn-soft relative !h-[34px] !w-[34px] !p-0 ${
@@ -915,6 +1161,13 @@ export default function App() {
             )}
             <LibraryView
               entries={library}
+              collections={collections}
+              onCreateCollection={onCreateCollection}
+              onAddToCollection={onAddToCollection}
+              onRemoveFromCollection={onRemoveFromCollection}
+              onMoveInCollection={onMoveInCollection}
+              onRenameCollection={onRenameCollection}
+              onDissolveCollection={onDissolveCollection}
               dragOver={dragOver}
               scanning={libraryScan}
               scanPreview={scanPreview}
@@ -1079,52 +1332,82 @@ export default function App() {
         )}
       </main>
 
-      {queueOpen && (
-        <div className="fixed inset-0 z-40 flex justify-end">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/50"
-            aria-label={i18n.hideQueue}
-            onClick={() => setQueueOpen(false)}
-          />
-          <aside className="relative h-full w-full max-w-md border-l border-ink-200 bg-white shadow-panel flex flex-col dark:border-white/10 dark:bg-surface">
-            <JobQueue
-              jobs={jobs}
-              i18n={i18n}
-              onClose={() => setQueueOpen(false)}
-              onRefresh={refreshJobs}
-              onCancel={(id) =>
-                cancelJob(id)
-                  .then(refreshJobs)
-                  .catch((e) => setError(`取消失败: ${errMsg(e)}`))
-              }
-              onRemove={(id) =>
-                removeJob(id)
-                  .then(refreshJobs)
-                  .catch((e) => setError(`删除失败: ${errMsg(e)}`))
-              }
-              onClearFinished={() =>
-                clearFinishedJobs()
-                  .then(() => {
-                    setError(null);
-                    void refreshJobs();
-                  })
-                  .catch((e) => setError(`清理失败: ${errMsg(e)}`))
-              }
-              onOpen={(id) => openOutputFolder(id).catch((e) => setError(errMsg(e)))}
-              onRead={(id) => {
-                const job = jobs.find((j) => j.jobId === id);
-                openReader({
-                  source: job?.source ?? source ?? "",
-                  jobId: id,
-                  from: "queue",
-                });
-                setQueueOpen(false);
-              }}
-            />
-          </aside>
-        </div>
-      )}
+      <Drawer
+        open={cacheOpen}
+        onClose={closeCachePanel}
+        label={i18n.cacheTitle}
+        closeLabel={i18n.cacheHide}
+      >
+        <CachePanel
+          i18n={i18n}
+          overview={cacheOverviewData}
+          scanning={cacheScanning}
+          busyId={cacheBusyId}
+          lastFreed={cacheLastFreed}
+          bookEntries={cacheBooks}
+          booksLoading={cacheScanning && cacheBooks === null}
+          busyBookKey={cacheBusyBookKey}
+          expandedBookKey={cacheExpandedBook}
+          onToggleBook={toggleCacheBook}
+          onClearBook={(row) => void runClearCacheBook(row)}
+          view={cacheView}
+          onChangeView={setCacheView}
+          onRefresh={() => {
+            void refreshCache().then(reloadExpandedEntries);
+          }}
+          onClear={(id) => void runClearCache(id)}
+          onClearAll={() => void runClearCache("all")}
+          expandedId={cacheExpanded}
+          entries={cacheEntries}
+          entriesLoading={cacheEntriesLoading}
+          busyEntryKey={cacheBusyEntryKey}
+          onToggleGroup={(id) => void toggleCacheGroup(id)}
+          onClearEntry={(id, key) => void runClearCacheEntry(id, key)}
+          onClose={closeCachePanel}
+        />
+      </Drawer>
+
+      <Drawer
+        open={queueOpen}
+        onClose={() => setQueueOpen(false)}
+        label={i18n.queue}
+        closeLabel={i18n.hideQueue}
+      >
+        <JobQueue
+          jobs={jobs}
+          i18n={i18n}
+          onClose={() => setQueueOpen(false)}
+          onRefresh={refreshJobs}
+          onCancel={(id) =>
+            cancelJob(id)
+              .then(refreshJobs)
+              .catch((e) => setError(`取消失败: ${errMsg(e)}`))
+          }
+          onRemove={(id) =>
+            removeJob(id)
+              .then(refreshJobs)
+              .catch((e) => setError(`删除失败: ${errMsg(e)}`))
+          }
+          onClearFinished={() =>
+            clearFinishedJobs()
+              .then(() => {
+                setError(null);
+                void refreshJobs();
+              })
+              .catch((e) => setError(`清理失败: ${errMsg(e)}`))
+          }
+          onOpen={(id) => openOutputFolder(id).catch((e) => setError(errMsg(e)))}
+          onRead={(id) => {
+            const job = jobs.find((j) => j.jobId === id);
+            openReader({
+              source: job?.source ?? source ?? "",
+              jobId: id,
+              from: "queue",
+            });
+            setQueueOpen(false);
+          }}
+        />
+      </Drawer>
     </div>
   );
 }
@@ -1215,7 +1498,7 @@ function stateBadgeClass(state: string): string {
 function Info({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-ink-200 bg-ink-50 px-3 py-2 dark:bg-surface-raised dark:border-white/10">
-      <p className="text-[10px] uppercase tracking-wider text-ink-500">{label}</p>
+      <p className="text-[10px] uppercase tracking-wider text-ink-500 dark:text-fg-muted">{label}</p>
       <p className="mt-0.5 text-ink-800 break-all dark:text-fg">{value}</p>
     </div>
   );
@@ -1275,19 +1558,19 @@ function JobQueue({
               type="button"
               className="text-xs text-amber-800 hover:text-amber-950 border border-amber-500/40 rounded-lg px-2 py-1 transition dark:border-warning-border dark:text-warning-fg dark:hover:bg-warning-soft"
               onClick={onClearFinished}
-              title={`清理 ${finishedCount} 个已结束任务`}
+              title={i18n.clearFinishedTitle.replace("{n}", String(finishedCount))}
             >
               {i18n.clearFinished}
             </button>
           )}
-          <button type="button" className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg" onClick={onRefresh}>
-            刷新
+          <button
+            type="button"
+            className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
+            onClick={onRefresh}
+          >
+            {i18n.refresh}
           </button>
-          {onClose && (
-            <button type="button" className="btn-ghost !px-2.5 !py-1 text-xs" onClick={onClose}>
-              {i18n.hideQueue}
-            </button>
-          )}
+          {onClose && <PanelCloseButton onClick={onClose} label={i18n.hideQueue} />}
         </div>
       </div>
       {jobs.length === 0 ? (

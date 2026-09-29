@@ -230,6 +230,16 @@ fn run_file(
     Ok(())
 }
 
+fn model_availability(path: &Path) -> EngineAvailability {
+    if !(path.is_file() || path.is_dir()) {
+        return EngineAvailability::MissingBinary;
+    }
+    match crate::paths::verify_optional_model_pin(path) {
+        Ok(()) => EngineAvailability::Ready,
+        Err(msg) => EngineAvailability::Unavailable(msg),
+    }
+}
+
 #[async_trait]
 impl UpscaleEngine for RealCuganCoreMlEngine {
     fn id(&self) -> EngineKind {
@@ -240,11 +250,7 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
         if !cfg!(target_os = "macos") {
             return EngineAvailability::Unavailable("仅 macOS".into());
         }
-        if self.model_path.is_file() || self.model_path.is_dir() {
-            EngineAvailability::Ready
-        } else {
-            EngineAvailability::MissingBinary
-        }
+        model_availability(&self.model_path)
     }
 
     fn status(&self) -> EngineStatus {
@@ -254,6 +260,9 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                 available: true,
                 detail: format!("Core ML 就绪 · {}", self.model_path.display()),
                 version: Some("realcugan-se-2x".into()),
+                threads: None,
+                mode: Some("Core ML".into()),
+                is_mock: false,
             },
             EngineAvailability::MissingBinary => EngineStatus {
                 id: "realcugan-coreml".into(),
@@ -261,18 +270,27 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                 detail: "未找到 Real-CUGAN Core ML 模型，请运行 scripts/fetch-realcugan-coreml.sh"
                     .into(),
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
             EngineAvailability::Unavailable(s) => EngineStatus {
                 id: "realcugan-coreml".into(),
                 available: false,
                 detail: s,
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
             _ => EngineStatus {
                 id: "realcugan-coreml".into(),
                 available: false,
                 detail: "不可用".into(),
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
         }
     }

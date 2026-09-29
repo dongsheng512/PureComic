@@ -101,6 +101,31 @@ impl AppConfig {
         self.work_root.join("reader-enhance")
     }
 
+    /// 整本原始页解压缓存（bounded, LRU）。懒创建 —— 不在 `ensure_dirs` 里。
+    pub fn reader_dir(&self) -> PathBuf {
+        self.work_root.join("reader")
+    }
+
+    /// MOBI/AZW3 整本展开缓存（bounded, LRU）。懒创建 —— 不在 `ensure_dirs` 里。
+    ///
+    /// 注意：这里刻意**不**放进 `ensure_dirs()` —— 那会在每次启动时凭空建目录，
+    /// 让"缓存页面"在没有任何缓存时也显示一个 0 字节的空组。
+    pub fn mobi_cache_dir(&self) -> PathBuf {
+        self.work_root.join("mobi-cache")
+    }
+
+    /// 缓存管理的已知存储清单（顺序即 UI 展示顺序）。
+    /// 新增缓存时**必须**同时加进 `crate::cache::collect_overview`，否则它会在页面上隐身 ——
+    /// `mobi-cache` 当初就是因为没进这份注册表而长到 1.4 GB 都没人看见。
+    pub fn cache_roots(&self) -> [(&'static str, PathBuf); 4] {
+        [
+            ("mobi", self.mobi_cache_dir()),
+            ("reader", self.reader_dir()),
+            ("readerEnhance", self.reader_enhance_dir()),
+            ("covers", self.library_covers_dir()),
+        ]
+    }
+
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.jobs_dir())?;
         std::fs::create_dir_all(self.library_covers_dir())?;

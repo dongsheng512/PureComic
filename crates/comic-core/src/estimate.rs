@@ -19,7 +19,12 @@ pub struct DiskEstimate {
 
 /// Rough estimate: sum of decoded RGBA * scale^2 * 2 (in+out) * safety 1.2
 /// For sources we cannot decode yet, use 1200*1800*4 as page default.
-pub fn estimate_disk_usage(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult<DiskEstimate> {
+pub fn estimate_disk_usage(
+    path: &Path,
+    scale: u8,
+    cfg: &AppConfig,
+    output_dir: Option<&Path>,
+) -> AppResult<DiskEstimate> {
     let v = validate_source(path, cfg)?;
     let scale = scale.max(1) as u64;
     let safety_num = 12u64;
@@ -50,13 +55,17 @@ pub fn estimate_disk_usage(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult
         / safety_den;
     let estimate_bytes = per_page.saturating_mul(v.page_count as u64);
 
-    let free_bytes = cfg
-        .forced_free_bytes
-        .or_else(|| {
-            let _ = std::fs::create_dir_all(&cfg.work_root);
-            free_space(&cfg.work_root).ok()
-        })
-        .unwrap_or(0);
+    let free_bytes = cfg.forced_free_bytes.unwrap_or_else(|| {
+        let _ = std::fs::create_dir_all(&cfg.work_root);
+        let work = volume_free(&cfg.work_root);
+        let out = output_dir.and_then(volume_free);
+        match (work, out) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => 0,
+        }
+    });
     let ok = disk_is_sufficient(free_bytes, estimate_bytes);
     let message = if !ok {
         Some(format!(
@@ -77,14 +86,17 @@ pub fn estimate_disk_usage(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult
     })
 }
 
-fn free_space(path: &Path) -> std::io::Result<u64> {
-    // Ensure path exists for statfs
-    let p = if path.exists() {
+/// Free space on the volume that holds `path`. Missing path is unknown, not the temp disk.
+fn volume_free(path: &Path) -> Option<u64> {
+    let probe = if path.exists() {
         path.to_path_buf()
     } else {
-        std::env::temp_dir()
+        path.parent()?.to_path_buf()
     };
-    fs2::available_space(p)
+    if !probe.exists() {
+        return None;
+    }
+    fs2::available_space(probe).ok()
 }
 
 /// Reject when free space is unknown (0) or not strictly greater than the estimate.
@@ -92,8 +104,13 @@ pub fn disk_is_sufficient(free_bytes: u64, estimate_bytes: u64) -> bool {
     free_bytes > 0 && free_bytes > estimate_bytes
 }
 
-pub fn assert_disk_ok(path: &Path, scale: u8, cfg: &AppConfig) -> AppResult<DiskEstimate> {
-    let est = estimate_disk_usage(path, scale, cfg)?;
+pub fn assert_disk_ok(
+    path: &Path,
+    scale: u8,
+    cfg: &AppConfig,
+    output_dir: Option<&Path>,
+) -> AppResult<DiskEstimate> {
+    let est = estimate_disk_usage(path, scale, cfg, output_dir)?;
     if !est.ok {
         return Err(AppError::disk(
             est.message.clone().unwrap_or_else(|| "磁盘空间不足".into()),
@@ -147,10 +164,10 @@ mod tests {
             forced_free_bytes: Some(1024),
             ..Default::default()
         };
-        let est = estimate_disk_usage(&src, 2, &cfg).unwrap();
+        let est = estimate_disk_usage(&src, 2, &cfg, None).unwrap();
         assert!(est.page_count >= 100);
         assert!(!est.ok);
-        let err = assert_disk_ok(&src, 2, &cfg).unwrap_err();
+        let err = assert_disk_ok(&src, 2, &cfg, None).unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::DiskInsufficient);
         assert!(err.message.contains("磁盘空间不足"));
     }

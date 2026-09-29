@@ -150,6 +150,9 @@ impl UpscaleEngine for RealCuganEngine {
             available,
             detail,
             version: None,
+            threads: None,
+            mode: None,
+            is_mock: false,
         }
     }
 

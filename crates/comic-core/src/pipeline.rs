@@ -108,12 +108,10 @@ pub async fn run_job(
         let m = manifest.read().await;
         let scale = m.options.scale as u8;
         let source = m.source.path.clone();
+        let output_dir = m.output.dir.clone();
         drop(m);
-        assert_disk_ok(&source, scale, &cfg)?;
-        if cancel.is_cancelled() {
-            return mark_cancelled(&manifest).await;
-        }
-        archive::validate_source(&source, &cfg)?;
+        // assert_disk_ok 已经 validate_source 一次；不要再开一遍归档。
+        assert_disk_ok(&source, scale, &cfg, Some(&output_dir))?;
     }
 
     if cancel.is_cancelled() {
@@ -1057,7 +1055,7 @@ mod tests {
     use crate::config::AppConfig;
     use crate::error::ErrorCode;
     use crate::job::{EnhanceOptions, ImageFormat, OutputContainer, OutputOptions};
-    use comic_engines::MockEngine;
+    use comic_engines::{MockEngine, UpscaleEngine};
     use image::{ImageBuffer, Rgb};
 
     fn tiny_png(dir: &Path, name: &str) {
@@ -1145,6 +1143,142 @@ mod tests {
         assert_eq!(err.code, ErrorCode::Cancelled);
         let m = manifest.read().await;
         assert_eq!(m.state, JobState::Cancelled);
+    }
+
+    struct FailEngine;
+
+    #[async_trait::async_trait]
+    impl UpscaleEngine for FailEngine {
+        fn id(&self) -> comic_engines::EngineKind {
+            comic_engines::EngineKind::Waifu2x
+        }
+        fn is_available(&self) -> comic_engines::EngineAvailability {
+            comic_engines::EngineAvailability::Ready
+        }
+        fn status(&self) -> comic_engines::EngineStatus {
+            comic_engines::EngineStatus {
+                id: "fail".into(),
+                available: true,
+                detail: "test".into(),
+                version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
+            }
+        }
+        async fn list_gpus(
+            &self,
+        ) -> Result<Vec<comic_engines::GpuInfo>, comic_engines::EngineError> {
+            Ok(vec![])
+        }
+        async fn enhance_batch(
+            &self,
+            _req: comic_engines::EnhanceBatchRequest,
+            _cancel: CancellationToken,
+        ) -> Result<comic_engines::EnhanceBatchResult, comic_engines::EngineError> {
+            Err(comic_engines::EngineError::Image("forced failure".into()))
+        }
+    }
+
+    fn cfg_book(tmp: &Path) -> (AppConfig, PathBuf) {
+        let src = tmp.join("book");
+        std::fs::create_dir_all(&src).unwrap();
+        tiny_png(&src, "0.png");
+        tiny_png(&src, "1.png");
+        let cfg = AppConfig {
+            work_root: tmp.join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        (cfg, src)
+    }
+
+    #[tokio::test]
+    async fn run_job_all_pages_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, src) = cfg_book(tmp.path());
+        let manifest = test_manifest(tmp.path(), src, &cfg);
+        let err = run_job(
+            manifest.clone(),
+            Arc::new(FailEngine),
+            cfg,
+            new_gpu_lock(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_ne!(err.code, ErrorCode::Cancelled);
+        let m = manifest.read().await;
+        assert_eq!(m.state, JobState::Failed);
+        assert_eq!(m.stats.pages_done, 0);
+    }
+
+    #[tokio::test]
+    async fn run_job_resumes_remaining_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, src) = cfg_book(tmp.path());
+        let manifest = test_manifest(tmp.path(), src, &cfg);
+        run_job(
+            manifest.clone(),
+            Arc::new(MockEngine { delay_ms: 0 }),
+            cfg.clone(),
+            new_gpu_lock(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        {
+            let mut m = manifest.write().await;
+            let page = m.pages.last_mut().unwrap();
+            if let Some(out) = page.out_path.take() {
+                let _ = std::fs::remove_file(out);
+            }
+            page.status = crate::job::PageStatus::Pending;
+            m.refresh_stats();
+            m.state = JobState::Extracting;
+            m.stats.finished_at = None;
+            m.save().unwrap();
+        }
+        run_job(
+            manifest.clone(),
+            Arc::new(MockEngine { delay_ms: 0 }),
+            cfg,
+            new_gpu_lock(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let m = manifest.read().await;
+        assert_eq!(m.state, JobState::Completed);
+        assert!(m
+            .pages
+            .iter()
+            .all(|p| p.status == crate::job::PageStatus::Done));
+    }
+
+    #[tokio::test]
+    async fn heal_completed_output_after_finalizing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, src) = cfg_book(tmp.path());
+        let manifest = test_manifest(tmp.path(), src, &cfg);
+        run_job(
+            manifest.clone(),
+            Arc::new(MockEngine { delay_ms: 0 }),
+            cfg,
+            new_gpu_lock(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut m = manifest.write().await;
+        m.state = JobState::Finalizing;
+        assert!(crate::job::heal_if_output_ready(&mut m));
+        assert_eq!(m.state, JobState::Completed);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { comicFileFilter } from "../formats";
-import { errorMessage, getReaderState } from "../api";
+import { errorMessage, getReaderState, touchLibrary } from "../api";
 import type { Messages } from "../i18n";
 import type { JobStatus, ReaderState } from "../types";
 import { setNativeWindowBg } from "../windowDrag";
@@ -473,6 +473,30 @@ export function ReaderView({
   }, [state?.source, pageIndex, spread, direction, fit, view]);
 
   useEffect(() => {
+    const path = state?.source;
+    if (!path) return;
+    const page = pageIndex;
+    const timer = window.setTimeout(() => {
+      void touchLibrary(path, page).catch((err) => {
+        console.warn("touchLibrary", err);
+      });
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [state?.source, pageIndex]);
+
+  useEffect(() => {
+    return () => {
+      const path = sourceRef.current;
+      if (!path) return;
+      // 关书时要的是最新页，不是 effect 创建时的页。
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      void touchLibrary(path, pageIndexRef.current).catch((err) => {
+        console.warn("touchLibrary", err);
+      });
+    };
+  }, [pageIndexRef]);
+
+  useEffect(() => {
     if (!state?.jobId) return;
     const activeStates = [
       "running",
@@ -649,26 +673,34 @@ export function ReaderView({
   });
 
   const pickFile = async () => {
-    const p = await open({
-      multiple: false,
-      directory: false,
-      filters: [comicFileFilter("Comic")],
-    });
-    if (typeof p === "string") {
-      setJobId(null);
-      sourceRef.current = "";
-      onPickedSource?.(p);
-      void refreshState(null, p);
+    try {
+      const p = await open({
+        multiple: false,
+        directory: false,
+        filters: [comicFileFilter("Comic")],
+      });
+      if (typeof p === "string") {
+        setJobId(null);
+        sourceRef.current = "";
+        onPickedSource?.(p);
+        void refreshState(null, p);
+      }
+    } catch (err) {
+      console.warn("pickFile", err);
     }
   };
 
   const pickFolder = async () => {
-    const p = await open({ multiple: false, directory: true });
-    if (typeof p === "string") {
-      setJobId(null);
-      sourceRef.current = "";
-      onPickedSource?.(p);
-      void refreshState(null, p);
+    try {
+      const p = await open({ multiple: false, directory: true });
+      if (typeof p === "string") {
+        setJobId(null);
+        sourceRef.current = "";
+        onPickedSource?.(p);
+        void refreshState(null, p);
+      }
+    } catch (err) {
+      console.warn("pickFolder", err);
     }
   };
 

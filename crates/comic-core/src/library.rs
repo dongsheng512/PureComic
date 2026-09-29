@@ -90,9 +90,29 @@ pub struct LibraryScanResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCollection {
+    pub id: String,
+    pub title: String,
+    pub entry_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_entry_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryIndex {
+    pub entries: Vec<LibraryEntry>,
+    #[serde(default)]
+    pub collections: Vec<LibraryCollection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct LibraryFile {
     version: u32,
     entries: Vec<LibraryEntry>,
+    #[serde(default)]
+    collections: Vec<LibraryCollection>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +120,7 @@ pub struct LibraryStore {
     path: PathBuf,
     cover_dir: PathBuf,
     entries: Vec<LibraryEntry>,
+    collections: Vec<LibraryCollection>,
 }
 
 impl LibraryStore {
@@ -107,20 +128,22 @@ impl LibraryStore {
         let path = cfg.library_path();
         let cover_dir = cfg.library_covers_dir();
         std::fs::create_dir_all(&cover_dir)?;
-        let entries = if path.is_file() {
+        let (entries, collections) = if path.is_file() {
             let data = std::fs::read_to_string(&path)?;
             let file: LibraryFile = serde_json::from_str(&data).unwrap_or(LibraryFile {
                 version: LIBRARY_VERSION,
                 entries: vec![],
+                collections: vec![],
             });
-            file.entries
+            (file.entries, file.collections)
         } else {
-            vec![]
+            (vec![], vec![])
         };
         Ok(Self {
             path,
             cover_dir,
             entries,
+            collections,
         })
     }
 
@@ -131,6 +154,7 @@ impl LibraryStore {
         let file = LibraryFile {
             version: LIBRARY_VERSION,
             entries: self.entries.clone(),
+            collections: self.collections.clone(),
         };
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&file)?)?;
@@ -149,6 +173,37 @@ impl LibraryStore {
                 .then(b.added_at.cmp(&a.added_at))
         });
         out
+    }
+
+    pub fn list_index(&mut self) -> LibraryIndex {
+        let entries = self.list();
+        LibraryIndex {
+            entries,
+            collections: self.collections.clone(),
+        }
+    }
+
+    /// 书库当前**引用**的封面文件名集合（不含路径）。
+    ///
+    /// 清理封面缓存时的唯一判据：只删不在这个集合里的文件。
+    /// **不能按 `COVER_CACHE_TAG` 判断** —— `refresh_covers` 明确保留了
+    /// 指向旧 tag 的 `cover_path`（"已有能显示的封面就保留（含旧版 v3 路径）"），
+    /// 按 tag 判断会删掉正在用的封面。
+    pub fn referenced_cover_names(&self) -> std::collections::HashSet<String> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.cover_path.as_deref())
+            .filter_map(|p| Path::new(p).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// 只读遍历书库条目 —— 缓存归属索引的输入。
+    ///
+    /// 别用 `list()` 代替：它会把每条目的 `missing` 改写并 clone 一遍，
+    /// 只为读几个字段没必要付这个代价，也避免让统计路径产生写副作用。
+    pub fn entries(&self) -> &[LibraryEntry] {
+        &self.entries
     }
 
     pub fn refresh_covers(&mut self, cfg: &AppConfig) {
@@ -280,8 +335,139 @@ impl LibraryStore {
         if self.entries.len() == before {
             return Ok(false);
         }
+        self.detach_ids(&[id.to_string()]);
         self.save()?;
         Ok(true)
+    }
+
+    pub fn create_collection(
+        &mut self,
+        title: &str,
+        entry_ids: &[String],
+    ) -> AppResult<LibraryCollection> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(AppError::invalid("合集名称不能为空"));
+        }
+        let ids = self.clean_member_ids(entry_ids);
+        if ids.is_empty() {
+            return Err(AppError::invalid("合集至少需要一本现有的书"));
+        }
+        self.detach_ids(&ids);
+        let col = LibraryCollection {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: title.to_string(),
+            entry_ids: ids,
+            cover_entry_id: None,
+        };
+        self.collections.push(col.clone());
+        self.save()?;
+        Ok(col)
+    }
+
+    pub fn add_to_collection(&mut self, id: &str, entry_ids: &[String]) -> AppResult<()> {
+        let ids = self.clean_member_ids(entry_ids);
+        if ids.is_empty() {
+            return Err(AppError::invalid("没有可加入的书"));
+        }
+        if !self.collections.iter().any(|c| c.id == id) {
+            return Err(AppError::not_found("没有这个合集"));
+        }
+        self.detach_ids_except(&ids, id);
+        let Some(col) = self.collections.iter_mut().find(|c| c.id == id) else {
+            return Err(AppError::not_found("没有这个合集"));
+        };
+        for entry_id in ids {
+            if !col.entry_ids.iter().any(|x| x == &entry_id) {
+                col.entry_ids.push(entry_id);
+            }
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn remove_from_collection(&mut self, id: &str, entry_id: &str) -> AppResult<()> {
+        let Some(col) = self.collections.iter_mut().find(|c| c.id == id) else {
+            return Err(AppError::not_found("没有这个合集"));
+        };
+        col.entry_ids.retain(|x| x != entry_id);
+        if col.cover_entry_id.as_deref() == Some(entry_id) {
+            col.cover_entry_id = None;
+        }
+        self.collections.retain(|c| !c.entry_ids.is_empty());
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn move_in_collection(&mut self, id: &str, entry_id: &str, delta: i32) -> AppResult<()> {
+        let Some(col) = self.collections.iter_mut().find(|c| c.id == id) else {
+            return Err(AppError::not_found("没有这个合集"));
+        };
+        let Some(pos) = col.entry_ids.iter().position(|x| x == entry_id) else {
+            return Err(AppError::not_found("合集里没有这本书"));
+        };
+        let next = pos as i32 + delta;
+        if next < 0 || next >= col.entry_ids.len() as i32 {
+            return Ok(());
+        }
+        col.entry_ids.swap(pos, next as usize);
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn rename_collection(&mut self, id: &str, title: &str) -> AppResult<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(AppError::invalid("合集名称不能为空"));
+        }
+        let Some(col) = self.collections.iter_mut().find(|c| c.id == id) else {
+            return Err(AppError::not_found("没有这个合集"));
+        };
+        col.title = title.to_string();
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn dissolve_collection(&mut self, id: &str) -> AppResult<()> {
+        let before = self.collections.len();
+        self.collections.retain(|c| c.id != id);
+        if self.collections.len() == before {
+            return Err(AppError::not_found("没有这个合集"));
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    fn clean_member_ids(&self, entry_ids: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        for id in entry_ids {
+            if self.entries.iter().any(|e| e.id == *id) && !out.iter().any(|x| x == id) {
+                out.push(id.clone());
+            }
+        }
+        out
+    }
+
+    fn detach_ids(&mut self, ids: &[String]) {
+        self.detach_ids_except(ids, "");
+    }
+
+    fn detach_ids_except(&mut self, ids: &[String], keep: &str) {
+        for col in &mut self.collections {
+            if col.id == keep {
+                continue;
+            }
+            col.entry_ids.retain(|id| !ids.iter().any(|x| x == id));
+            if col
+                .cover_entry_id
+                .as_ref()
+                .is_some_and(|id| ids.iter().any(|x| x == id))
+            {
+                col.cover_entry_id = None;
+            }
+        }
+        self.collections
+            .retain(|c| c.id == keep || !c.entry_ids.is_empty());
     }
 
     pub fn touch(&mut self, path: &Path, page: Option<u32>) -> AppResult<()> {
@@ -786,6 +972,35 @@ mod tests {
             ]);
         }
         image::DynamicImage::ImageRgb8(img).save(path).unwrap();
+    }
+
+    #[test]
+    fn collection_groups_entries_without_moving_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_tmp(tmp.path());
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        write_tiny_png(&a.join("001.png"));
+        write_tiny_png(&b.join("001.png"));
+        let mut store = LibraryStore::open(&cfg).unwrap();
+        let ea = store.upsert_path(&a, &cfg).unwrap();
+        let eb = store.upsert_path(&b, &cfg).unwrap();
+        let col = store
+            .create_collection("一部", &[eb.id.clone(), ea.id.clone()])
+            .unwrap();
+        assert_eq!(col.entry_ids, vec![eb.id.clone(), ea.id.clone()]);
+        store
+            .add_to_collection(&col.id, &[ea.id.clone()])
+            .unwrap();
+        let again = LibraryStore::open(&cfg).unwrap();
+        assert_eq!(again.collections.len(), 1);
+        assert_eq!(again.collections[0].entry_ids.len(), 2);
+        assert!(a.join("001.png").is_file());
+        store.remove(&ea.id).unwrap();
+        let left = LibraryStore::open(&cfg).unwrap();
+        assert_eq!(left.collections[0].entry_ids, vec![eb.id]);
     }
 
     fn write_solid_png(path: &Path, color: [u8; 3]) {

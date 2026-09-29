@@ -3,6 +3,7 @@
 //! No Tauri dependency: shared by desktop and CLI.
 
 pub mod archive;
+pub mod cache;
 pub mod config;
 pub mod cover;
 pub mod diagnostics;

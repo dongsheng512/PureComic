@@ -3,6 +3,12 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   CreateJobRequest,
   CreateJobResult,
+  CacheClearResult,
+  CacheEntry,
+  BookCacheEntry,
+  CachePartRef,
+  CacheGroupId,
+  CacheOverview,
   DiskEstimate,
   ResumeHint,
   DoctorReport,
@@ -10,7 +16,9 @@ import type {
   EngineStatus,
   GpuInfo,
   JobStatus,
+  LibraryCollection,
   LibraryEntry,
+  LibraryIndex,
   LibraryScanPreview,
   LibraryScanResult,
   PreviewResult,
@@ -207,8 +215,39 @@ export async function cancelReaderEnhance(): Promise<void> {
   return invoke("cancel_reader_enhance");
 }
 
-export async function listLibrary(): Promise<LibraryEntry[]> {
+export async function listLibrary(): Promise<LibraryIndex> {
   return invoke("list_library");
+}
+
+export async function createLibraryCollection(
+  title: string,
+  entryIds: string[],
+): Promise<LibraryCollection> {
+  return invoke("create_library_collection", { title, entryIds });
+}
+
+export async function addLibraryCollectionEntries(id: string, entryIds: string[]): Promise<void> {
+  return invoke("add_library_collection_entries", { id, entryIds });
+}
+
+export async function removeLibraryCollectionEntry(id: string, entryId: string): Promise<void> {
+  return invoke("remove_library_collection_entry", { id, entryId });
+}
+
+export async function moveLibraryCollectionEntry(
+  id: string,
+  entryId: string,
+  delta: number,
+): Promise<void> {
+  return invoke("move_library_collection_entry", { id, entryId, delta });
+}
+
+export async function renameLibraryCollection(id: string, title: string): Promise<void> {
+  return invoke("rename_library_collection", { id, title });
+}
+
+export async function dissolveLibraryCollection(id: string): Promise<void> {
+  return invoke("dissolve_library_collection", { id });
 }
 
 export async function addLibraryPath(path: string): Promise<LibraryEntry> {
@@ -283,6 +322,41 @@ export async function openOutputFolder(jobId: string): Promise<void> {
 
 export async function clearFinishedJobs(): Promise<{ removed: number }> {
   return invoke("clear_finished_jobs");
+}
+
+/** 全量扫描各缓存组（后端会全树遍历，放 blocking 线程）。 */
+export async function cacheOverview(): Promise<CacheOverview> {
+  return invoke("cache_overview");
+}
+
+/** 清理一个缓存组。`jobs` 走后端的 clear_finished_jobs（会跳过活跃任务）。 */
+export async function clearCacheGroup(id: CacheGroupId): Promise<CacheClearResult> {
+  return invoke("clear_cache_group", { id });
+}
+
+/** 按漫画列出一个分组的明细（展开一本一本看的那一层）。 */
+export async function cacheGroupEntries(id: CacheGroupId): Promise<CacheEntry[]> {
+  return invoke("cache_group_entries", { id });
+}
+
+/** 清掉单本缓存。`key` 是明细行上的 key。 */
+export async function clearCacheEntry(
+  id: CacheGroupId,
+  key: string,
+): Promise<CacheClearResult> {
+  return invoke("clear_cache_entry", { id, key });
+}
+
+/** 缓存页主视图：一行 = 一本漫画占用的全部缓存（跨 5 类）。 */
+export async function cacheBookEntries(): Promise<BookCacheEntry[]> {
+  return invoke("cache_book_entries");
+}
+
+/** 清掉一本漫画的**全部类型**缓存。清单由 `BookCacheEntry.parts` 原样回传。 */
+export async function clearBookCache(
+  parts: CachePartRef[],
+): Promise<CacheClearResult> {
+  return invoke("clear_book_cache", { parts });
 }
 
 export async function removeJob(jobId: string): Promise<void> {

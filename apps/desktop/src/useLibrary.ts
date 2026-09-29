@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
+  addLibraryCollectionEntries,
   addLibraryPath,
+  createLibraryCollection,
+  dissolveLibraryCollection,
   errorMessage,
   importLibraryPaths,
   listLibrary,
+  moveLibraryCollectionEntry,
+  removeLibraryCollectionEntry,
+  renameLibraryCollection,
   previewLibraryScan,
   removeLibraryEntry,
 } from "./api";
 import type { Messages } from "./i18n";
 import { pickComicFiles, pickFolder } from "./library/LibraryView";
 import { loadImportSettings, saveImportSettings } from "./library/prefs";
-import type { LibraryEntry, LibraryScanPreview } from "./types";
+import type { LibraryCollection, LibraryEntry, LibraryScanPreview } from "./types";
 
 export type AppTab = "library" | "enhance" | "doctor";
 
@@ -57,6 +63,7 @@ export function useLibrary(opts: {
   const { i18n, setError, setTab } = opts;
   const libraryRef = useRef<LibraryEntry[]>([]);
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
+  const [collections, setCollections] = useState<LibraryCollection[]>([]);
   const [libraryScan, setLibraryScan] = useState(false);
   const [libraryImporting, setLibraryImporting] = useState(false);
   const [libraryImportProgress, setLibraryImportProgress] = useState<{
@@ -75,8 +82,9 @@ export function useLibrary(opts: {
   const refreshLibrary = useCallback(async () => {
     try {
       const list = await listLibrary();
-      setLibrary(list);
-      libraryRef.current = list;
+      setLibrary(list.entries);
+      setCollections(list.collections ?? []);
+      libraryRef.current = list.entries;
     } catch {
       /* backend not ready */
     }
@@ -268,8 +276,49 @@ export function useLibrary(opts: {
     [i18n, refreshLibrary, setError],
   );
 
+  const changeCollection = useCallback(
+    async (op: () => Promise<unknown>) => {
+      try {
+        await op();
+        await refreshLibrary();
+      } catch (e) {
+        setError(errMsg(e));
+      }
+    },
+    [refreshLibrary, setError],
+  );
+  const onCreateCollection = useCallback(
+    (title: string, entryIds: string[]) =>
+      changeCollection(() => createLibraryCollection(title, entryIds)),
+    [changeCollection],
+  );
+  const onAddToCollection = useCallback(
+    (id: string, entryIds: string[]) =>
+      changeCollection(() => addLibraryCollectionEntries(id, entryIds)),
+    [changeCollection],
+  );
+  const onRemoveFromCollection = useCallback(
+    (id: string, entryId: string) =>
+      changeCollection(() => removeLibraryCollectionEntry(id, entryId)),
+    [changeCollection],
+  );
+  const onMoveInCollection = useCallback(
+    (id: string, entryId: string, delta: number) =>
+      changeCollection(() => moveLibraryCollectionEntry(id, entryId, delta)),
+    [changeCollection],
+  );
+  const onRenameCollection = useCallback(
+    (id: string, title: string) => changeCollection(() => renameLibraryCollection(id, title)),
+    [changeCollection],
+  );
+  const onDissolveCollection = useCallback(
+    (id: string) => changeCollection(() => dissolveLibraryCollection(id)),
+    [changeCollection],
+  );
+
   return {
     library,
+    collections,
     libraryRef,
     libraryScan,
     libraryImporting,
@@ -285,5 +334,11 @@ export function useLibrary(opts: {
     onLibCancelScan,
     onLibConfirmScan,
     onLibRemove,
+    onCreateCollection,
+    onAddToCollection,
+    onRemoveFromCollection,
+    onMoveInCollection,
+    onRenameCollection,
+    onDissolveCollection,
   };
 }

@@ -95,12 +95,13 @@ export function parseAccelInfo(
   const selected = catalog.find((e) => e.id === engineId) ?? null;
   const blob = `${selected?.detail ?? ""} ${fallback?.detail ?? ""}`;
   const threads =
-    blob.match(/线程 -j (\S+)/)?.[1] ?? blob.match(/-j (\d+:\d+:\d+)/)?.[1] ?? "";
-  const mode = /目录批处理/.test(blob)
-    ? "目录批处理"
-    : /逐页并行/.test(blob)
-      ? "逐页并行"
-      : "";
+    fallback?.threads ||
+    blob.match(/线程 -j (\S+)/)?.[1] ||
+    blob.match(/-j (\d+:\d+:\d+)/)?.[1] ||
+    "";
+  const mode =
+    fallback?.mode ||
+    (/目录批处理/.test(blob) ? "目录批处理" : /逐页并行/.test(blob) ? "逐页并行" : "");
   const ready = selected ? selected.available : (fallback?.available ?? false);
   const engineLabel =
     engineId === "realcugan-coreml" || engineId === "realcugan"
@@ -117,7 +118,10 @@ export function parseAccelInfo(
   const modelLabel = selected?.models.find((m) => m.id === cuganModel)?.label ?? selected?.models[0]?.label ?? "";
   const gpu =
     ready &&
-    (engineId.includes("coreml") || /core ml|ane|metal|gpu|vulkan/i.test(blob));
+    !fallback?.isMock &&
+    (engineId.includes("coreml") ||
+      fallback?.mode === "Core ML" ||
+      /core ml|ane|metal|gpu|vulkan/i.test(blob));
   return {
     ready,
     engineLabel,

@@ -37,6 +37,9 @@ impl UpscaleEngine for MockEngine {
             available: true,
             detail: "开发/测试用 mock 引擎（非真实 Waifu2x）".into(),
             version: Some("0.2.0-mock".into()),
+            threads: None,
+            mode: Some("mock".into()),
+            is_mock: true,
         }
     }
 

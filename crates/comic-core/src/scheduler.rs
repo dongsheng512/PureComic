@@ -100,6 +100,28 @@ impl Scheduler {
         })
     }
 
+    /// 启动时把"会自己长个儿"的缓存夹回上限。
+    ///
+    /// 只在代码里补上上限是不够的：淘汰挂在"构建新缓存"那条路径上，
+    /// 所以**存量**超限的部分要等用户下次打开同类型的新书才会被回收。
+    /// 这里在启动时补跑一次，让历史上已经长出去的部分也收回来。
+    ///
+    /// 放独立线程：遍历上 GB 的目录树有真实磁盘 IO，不能拖慢启动。
+    /// 失败只记日志 —— 缓存清不掉不该影响应用能用。
+    pub fn spawn_cache_maintenance(&self) {
+        let cfg = self.cfg.clone();
+        let spawn = std::thread::Builder::new()
+            .name("cache-maintenance".into())
+            .spawn(move || {
+                if let Err(e) = crate::ebook::evict_mobi_cache(&cfg, None) {
+                    warn!(error = %e.message, "mobi cache eviction failed");
+                }
+            });
+        if let Err(e) = spawn {
+            warn!(error = %e, "failed to spawn cache maintenance thread");
+        }
+    }
+
     pub fn with_engine(cfg: AppConfig, engine: Arc<dyn UpscaleEngine>) -> AppResult<Self> {
         cfg.ensure_dirs()?;
         let hub = EngineHub::from_config(
@@ -162,7 +184,12 @@ impl Scheduler {
         let normalized = options.normalize_realcugan();
         self.ensure_engine_ready(options.engine, explicit_engine)?;
         let engine = self.pick_engine(options.engine)?;
-        crate::estimate::assert_disk_ok(&source, options.scale.as_u8(), &self.cfg)?;
+        crate::estimate::assert_disk_ok(
+            &source,
+            options.scale.as_u8(),
+            &self.cfg,
+            Some(&output.dir),
+        )?;
         if !output.dir.exists() {
             std::fs::create_dir_all(&output.dir)?;
         }
@@ -594,7 +621,7 @@ impl Scheduler {
         path: &str,
         scale: u8,
     ) -> AppResult<crate::estimate::DiskEstimate> {
-        crate::estimate::estimate_disk_usage(PathBuf::from(path).as_path(), scale, &self.cfg)
+        crate::estimate::estimate_disk_usage(PathBuf::from(path).as_path(), scale, &self.cfg, None)
     }
 
     pub async fn preview_page(
@@ -745,6 +772,248 @@ impl Scheduler {
             .map_err(|e| AppError::internal(format!("清理增强缓存 join: {e}")))?
     }
 
+    /// 缓存清单的**运行态快照** —— 磁盘上看不到、只有调度器知道的那部分：
+    /// 哪些任务还活着（不能删目录）、书库正在引用哪些封面（不能删文件）。
+    async fn cache_context(&self) -> crate::cache::CacheContext {
+        let protected_jobs: HashSet<String> = {
+            let map = self.jobs.read().await;
+            let mut set = HashSet::new();
+            for (id, live) in map.iter() {
+                if live.active.load(Ordering::Acquire) {
+                    set.insert(id.clone());
+                    continue;
+                }
+                // 与 clear_finished_jobs 的保护集保持**完全一致**，
+                // 否则页面上承诺"可回收 X"而实际清不掉，或反过来删了在跑的。
+                if is_active_state(live.manifest.read().await.state) {
+                    set.insert(id.clone());
+                }
+            }
+            set
+        };
+        let referenced_covers = match self.library.lock() {
+            Ok(g) => g.referenced_cover_names(),
+            Err(_) => HashSet::new(),
+        };
+        crate::cache::CacheContext {
+            protected_jobs,
+            referenced_covers,
+        }
+    }
+
+    /// 缓存总览。全树递归遍历很贵，必须放 blocking 线程。
+    pub async fn cache_overview(&self) -> AppResult<crate::cache::CacheOverview> {
+        let ctx = self.cache_context().await;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || crate::cache::collect_overview(&cfg, &ctx))
+            .await
+            .map_err(|e| AppError::internal(format!("缓存统计 join: {e}")))
+    }
+
+    /// 清理一个缓存组。每个组的"在途保护"不一样，这里逐个分派。
+    pub async fn clear_cache_group(
+        &self,
+        id: crate::cache::CacheGroupId,
+    ) -> AppResult<crate::cache::CacheClearResult> {
+        use crate::cache::CacheGroupId as G;
+
+        // jobs 必须走 clear_finished_jobs：它有 gc 锁、活跃保护、以及
+        // "置 abandoned 标志防目录复活"这一整套。绝不在这里自己 remove_dir_all。
+        if id == G::Jobs {
+            let jobs_dir = self.cfg.jobs_dir();
+            let before = dir_total_bytes(&jobs_dir);
+            let removed = self.clear_finished_jobs().await?;
+            let after = dir_total_bytes(&jobs_dir);
+            return Ok(crate::cache::CacheClearResult {
+                removed,
+                bytes_freed: before.saturating_sub(after),
+            });
+        }
+
+        // 增强缓存：先取消在途推理并等它退出（照 clear_reader_enhance_cache 的做法）
+        if id == G::ReaderEnhance {
+            self.cancel_reader_enhance();
+            crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
+        }
+        // 整本解压缓存：等在途读页退出，避免把正在写的那一页写进已删除的目录。
+        // 超时也放行 —— 腾空间比等一个卡住的读页重要。
+        if id == G::Reader {
+            let _ = crate::reader::wait_reader_reads_idle(std::time::Duration::from_secs(5)).await;
+        }
+
+        let ctx = self.cache_context().await;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || crate::cache::clear_group(&cfg, id, &ctx))
+            .await
+            .map_err(|e| AppError::internal(format!("缓存清理 join: {e}")))?
+    }
+
+    /// 书库侧快照，供缓存页把磁盘目录归属回书名。
+    ///
+    /// 这里只取 id / path / title / job_id —— 哈希**重算**留给
+    /// `cache.rs::BookIndex`，好让它与生产函数（`source_cache_key`、
+    /// `mobi_cache_key_prefix`）共用同一份实现，避免出现第二套密钥算法。
+    fn cache_book_refs(&self) -> Vec<crate::cache::CacheBookRef> {
+        let Ok(lib) = self.library.lock() else {
+            // 锁中毒时给空表：缓存页会退化成"全是未知目录"，但至少还能清，
+            // 比整个命令失败强。
+            return Vec::new();
+        };
+        lib.entries()
+            .iter()
+            .map(|e| crate::cache::CacheBookRef {
+                id: e.id.clone(),
+                path: e.path.clone(),
+                title: e.title.clone(),
+                job_id: e.job_id.clone(),
+                source_missing: !std::path::Path::new(&e.path).exists(),
+            })
+            .collect()
+    }
+
+    /// 按漫画列出一个分组的占用明细。全树递归遍历，必须放 blocking 线程。
+    pub async fn cache_group_entries(
+        &self,
+        id: crate::cache::CacheGroupId,
+    ) -> AppResult<Vec<crate::cache::CacheEntry>> {
+        let ctx = self.cache_context().await;
+        let books = self.cache_book_refs();
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::cache::collect_group_entries(&cfg, id, &ctx, &books)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("缓存明细 join: {e}")))
+    }
+
+    /// 清掉**单本**缓存。
+    ///
+    /// 在途保护的时序与整组清理**完全一致**：单本不等于可以少一层保护 ——
+    /// 正在写的那一页一样会写进一个已删除的目录，结果就是阅读器报错。
+    pub async fn clear_cache_entry(
+        &self,
+        id: crate::cache::CacheGroupId,
+        key: String,
+    ) -> AppResult<crate::cache::CacheClearResult> {
+        use crate::cache::CacheGroupId as G;
+
+        if id == G::Jobs {
+            // 在途任务**不从缓存页删**：那实质是"取消任务"，和"清缓存"是两件事，
+            // 应该在队列面板里做（那里有明确的取消语义）。这里只清已结束的。
+            if self.cache_context().await.protected_jobs.contains(&key) {
+                return Err(AppError::invalid("任务正在进行中，请先在队列里取消"));
+            }
+            let dir = self.cfg.jobs_dir().join(&key);
+            let before = dir_total_bytes(&dir);
+            // 仍走 remove_job：它带 uuid 格式校验 + 防目录复活
+            self.remove_job(&key).await?;
+            let after = dir_total_bytes(&dir);
+            return Ok(crate::cache::CacheClearResult {
+                removed: u32::from(before != after || !dir.exists()),
+                bytes_freed: before.saturating_sub(after),
+            });
+        }
+        if id == G::ReaderEnhance {
+            self.cancel_reader_enhance();
+            crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
+        }
+        if id == G::Reader {
+            let _ = crate::reader::wait_reader_reads_idle(std::time::Duration::from_secs(5)).await;
+        }
+
+        let ctx = self.cache_context().await;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || crate::cache::clear_entry(&cfg, id, &key, &ctx))
+            .await
+            .map_err(|e| AppError::internal(format!("缓存条目清理 join: {e}")))?
+    }
+
+    /// 缓存页**主视图**：一行 = 一本漫画占用的全部缓存（跨 5 类）。
+    /// 全树递归遍历，必须放 blocking 线程。
+    pub async fn cache_book_entries(&self) -> AppResult<Vec<crate::cache::BookCacheEntry>> {
+        let ctx = self.cache_context().await;
+        let books = self.cache_book_refs();
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || crate::cache::collect_book_entries(&cfg, &ctx, &books))
+            .await
+            .map_err(|e| AppError::internal(format!("按书缓存明细 join: {e}")))
+    }
+
+    /// 清掉**一本书的全部类型缓存**。
+    ///
+    /// 与 `clear_cache_entry` 的关系：**不是**简单循环 —— 在途保护只做一遍。
+    /// 一本漫画可能同时有 reader-enhance 和 reader 两类缓存，逐个做一遍
+    /// 取消+等待会把 10s + 5s 的等待累加成 N 倍。先归并出要碰的组，再统一等一次。
+    ///
+    /// 安全语义与单清完全一致：封面仍只清孤儿、在途任务仍拒绝。
+    pub async fn clear_book_cache(
+        &self,
+        parts: Vec<crate::cache::CachePartRef>,
+    ) -> AppResult<crate::cache::CacheClearResult> {
+        use crate::cache::CacheGroupId as G;
+
+        let mut groups: Vec<G> = parts.iter().map(|p| p.group).collect();
+        groups.sort_by_key(|g| g.as_str());
+        groups.dedup();
+
+        // 在途任务先拦下来：那实质是"取消任务"，该在队列面板里做。
+        // 拦在**动任何磁盘内容之前** —— 否则会出现"清了半本、然后报错"。
+        if groups.contains(&G::Jobs) {
+            let ctx = self.cache_context().await;
+            if parts
+                .iter()
+                .any(|p| p.group == G::Jobs && ctx.protected_jobs.contains(&p.key))
+            {
+                return Err(AppError::invalid("任务正在进行中，请先在队列里取消"));
+            }
+        }
+
+        // 在途保护：时序与整组/单条清理逐字一致，只做一遍
+        if groups.contains(&G::ReaderEnhance) {
+            self.cancel_reader_enhance();
+            crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
+        }
+        if groups.contains(&G::Reader) {
+            let _ = crate::reader::wait_reader_reads_idle(std::time::Duration::from_secs(5)).await;
+        }
+
+        let ctx = self.cache_context().await;
+        let cfg = self.cfg.clone();
+        let disk: Vec<(G, String)> = parts
+            .iter()
+            .filter(|p| p.group != G::Jobs)
+            .map(|p| (p.group, p.key.clone()))
+            .collect();
+
+        // 磁盘上的四类：一趟 spawn_blocking 全清掉。
+        // 逐项的校验（目录穿越 / mobi 目录名形状 / 封面引用集）都在 `clear_entry` 里。
+        let mut total = tokio::task::spawn_blocking(move || -> AppResult<crate::cache::CacheClearResult> {
+            let mut acc = crate::cache::CacheClearResult {
+                removed: 0,
+                bytes_freed: 0,
+            };
+            for (group, key) in disk {
+                let r = crate::cache::clear_entry(&cfg, group, &key, &ctx)?;
+                acc.removed += r.removed;
+                acc.bytes_freed = acc.bytes_freed.saturating_add(r.bytes_freed);
+            }
+            Ok(acc)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("整本缓存清理 join: {e}")))??;
+
+        // 任务目录单独走 remove_job：它带 uuid 格式校验 + 防目录复活
+        for p in parts.iter().filter(|p| p.group == G::Jobs) {
+            let dir = self.cfg.jobs_dir().join(&p.key);
+            let before = dir_total_bytes(&dir);
+            self.remove_job(&p.key).await?;
+            let after = dir_total_bytes(&dir);
+            total.removed += u32::from(before != after || !dir.exists());
+            total.bytes_freed = total.bytes_freed.saturating_add(before.saturating_sub(after));
+        }
+        Ok(total)
+    }
+
     async fn resolve_reader_source(
         &self,
         job_id: Option<&str>,
@@ -781,6 +1050,9 @@ impl Scheduler {
         page_indexes: &[u32],
         prefer_original: bool,
     ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
+        // 在读页期间挂"在途"标记：清空整本缓存时会等它归零，
+        // 免得把正在写盘的那一页写进已被删除的目录。
+        let _inflight = crate::reader::ReaderInflightGuard::enter();
         let cfg = self.cfg.clone();
         let indexes = page_indexes.to_vec();
         if prefer_original {
@@ -849,13 +1121,74 @@ impl Scheduler {
             .map(|j| j.job_id)
     }
 
-    pub fn list_library(&self) -> AppResult<Vec<crate::library::LibraryEntry>> {
+    pub fn list_library(&self) -> AppResult<crate::library::LibraryIndex> {
         let mut lib = self
             .library
             .lock()
             .map_err(|_| AppError::internal("书库锁失败"))?;
         lib.refresh_covers(&self.cfg);
-        Ok(lib.list())
+        Ok(lib.list_index())
+    }
+
+    pub fn create_library_collection(
+        &self,
+        title: &str,
+        entry_ids: &[String],
+    ) -> AppResult<crate::library::LibraryCollection> {
+        let mut lib = self
+            .library
+            .lock()
+            .map_err(|_| AppError::internal("书库锁失败"))?;
+        lib.create_collection(title, entry_ids)
+    }
+
+    pub fn add_library_collection_entries(
+        &self,
+        id: &str,
+        entry_ids: &[String],
+    ) -> AppResult<()> {
+        let mut lib = self
+            .library
+            .lock()
+            .map_err(|_| AppError::internal("书库锁失败"))?;
+        lib.add_to_collection(id, entry_ids)
+    }
+
+    pub fn remove_library_collection_entry(&self, id: &str, entry_id: &str) -> AppResult<()> {
+        let mut lib = self
+            .library
+            .lock()
+            .map_err(|_| AppError::internal("书库锁失败"))?;
+        lib.remove_from_collection(id, entry_id)
+    }
+
+    pub fn move_library_collection_entry(
+        &self,
+        id: &str,
+        entry_id: &str,
+        delta: i32,
+    ) -> AppResult<()> {
+        let mut lib = self
+            .library
+            .lock()
+            .map_err(|_| AppError::internal("书库锁失败"))?;
+        lib.move_in_collection(id, entry_id, delta)
+    }
+
+    pub fn rename_library_collection(&self, id: &str, title: &str) -> AppResult<()> {
+        let mut lib = self
+            .library
+            .lock()
+            .map_err(|_| AppError::internal("书库锁失败"))?;
+        lib.rename_collection(id, title)
+    }
+
+    pub fn dissolve_library_collection(&self, id: &str) -> AppResult<()> {
+        let mut lib = self
+            .library
+            .lock()
+            .map_err(|_| AppError::internal("书库锁失败"))?;
+        lib.dissolve_collection(id)
     }
 
     pub fn add_library_path(&self, path: &str) -> AppResult<crate::library::LibraryEntry> {
@@ -1160,6 +1493,27 @@ async fn wait_for_worker_handle(
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
     }
+}
+
+/// 递归统计一个目录的总字节数（不存在的目录返回 0）。
+/// 用于清理前后对比得出"实际回收了多少" —— 比让每个清理路径自己记账可靠。
+fn dir_total_bytes(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            match p.metadata() {
+                Ok(m) if m.is_dir() => stack.push(p),
+                Ok(m) if m.is_file() => total = total.saturating_add(m.len()),
+                _ => {}
+            }
+        }
+    }
+    total
 }
 
 fn is_active_state(state: JobState) -> bool {

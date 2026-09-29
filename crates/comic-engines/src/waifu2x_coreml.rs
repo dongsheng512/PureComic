@@ -237,6 +237,16 @@ fn run_file(
     Ok(())
 }
 
+fn model_availability(path: &Path) -> EngineAvailability {
+    if !(path.is_file() || path.is_dir()) {
+        return EngineAvailability::MissingBinary;
+    }
+    match crate::paths::verify_optional_model_pin(path) {
+        Ok(()) => EngineAvailability::Ready,
+        Err(msg) => EngineAvailability::Unavailable(msg),
+    }
+}
+
 #[async_trait]
 impl UpscaleEngine for Waifu2xCoreMlEngine {
     fn id(&self) -> EngineKind {
@@ -247,11 +257,7 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
         if !cfg!(target_os = "macos") {
             return EngineAvailability::Unavailable("仅 macOS".into());
         }
-        if self.model_path.is_file() || self.model_path.is_dir() {
-            EngineAvailability::Ready
-        } else {
-            EngineAvailability::MissingBinary
-        }
+        model_availability(&self.model_path)
     }
 
     fn status(&self) -> EngineStatus {
@@ -261,24 +267,36 @@ impl UpscaleEngine for Waifu2xCoreMlEngine {
                 available: true,
                 detail: format!("Core ML 就绪 · {}", self.model_path.display()),
                 version: Some("waifu2x-anime-2x".into()),
+                threads: None,
+                mode: Some("Core ML".into()),
+                is_mock: false,
             },
             EngineAvailability::MissingBinary => EngineStatus {
                 id: "waifu2x-coreml".into(),
                 available: false,
                 detail: "未找到 Core ML 模型，请运行 scripts/fetch-waifu2x-coreml.sh".into(),
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
             EngineAvailability::Unavailable(s) => EngineStatus {
                 id: "waifu2x-coreml".into(),
                 available: false,
                 detail: s,
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
             _ => EngineStatus {
                 id: "waifu2x-coreml".into(),
                 available: false,
                 detail: "不可用".into(),
                 version: None,
+                threads: None,
+                mode: None,
+                is_mock: false,
             },
         }
     }

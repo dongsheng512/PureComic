@@ -201,6 +201,33 @@ pub struct EngineStatus {
     pub available: bool,
     pub detail: String,
     pub version: Option<String>,
+    /// 运行时线程参数，例如 `2:2:2`。没有则前端再从说明文字里认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<String>,
+    /// 目录批处理 / 逐页 / Core ML。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_mock: bool,
+}
+
+impl EngineStatus {
+    pub fn new(
+        id: impl Into<String>,
+        available: bool,
+        detail: impl Into<String>,
+        version: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            available,
+            detail: detail.into(),
+            version,
+            threads: None,
+            mode: None,
+            is_mock: false,
+        }
+    }
 }
 
 #[derive(Debug, Error)]

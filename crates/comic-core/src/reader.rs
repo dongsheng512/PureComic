@@ -7,9 +7,9 @@ use crate::job::{JobManifest, PageRecord, PageStatus, SourceKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Whole-book directories under `work_root/reader/{key}/`.
 pub const MAX_READER_CACHE_BOOKS: usize = 10;
@@ -338,19 +338,34 @@ pub(crate) fn extract_original(
 }
 
 fn reader_cache_root(cfg: &AppConfig) -> PathBuf {
-    cfg.work_root.join("reader")
+    cfg.reader_dir()
 }
 
-fn touch_path(path: &Path) {
+/// 更新文件/目录 mtime，用于 LRU 的"最近使用"排序。
+pub(crate) fn touch_path(path: &Path) {
     let now = SystemTime::now();
     if let Ok(f) = std::fs::File::open(path) {
         let _ = f.set_modified(now);
     }
 }
 
-fn book_dir_weight(dir: &Path) -> (SystemTime, u64) {
+/// 递归称一个目录：返回（最新 mtime, 总字节数）。
+///
+/// 缓存管理页的体积统计与 LRU 淘汰共用这一个实现 —— 别在别处再写一份，
+/// 否则"页面上显示的体积"和"淘汰时算的体积"迟早会对不上。
+pub(crate) fn book_dir_weight(dir: &Path) -> (SystemTime, u64) {
+    let (newest, bytes, _) = book_dir_weight_full(dir);
+    (newest, bytes)
+}
+
+/// 同上，但多返回文件数（"按漫画显示缓存"要显示每本几个文件）。
+///
+/// 仍然只有**这一处**遍历：`book_dir_weight` 也走这里。分两次遍历会让
+/// 同一本书在总览行和明细行的体积出现不一致的窗口。
+pub(crate) fn book_dir_weight_full(dir: &Path) -> (SystemTime, u64, u64) {
     let mut newest = SystemTime::UNIX_EPOCH;
     let mut bytes = 0u64;
+    let mut files = 0u64;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(p) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&p) else {
@@ -364,6 +379,7 @@ fn book_dir_weight(dir: &Path) -> (SystemTime, u64) {
             }
             if let Ok(meta) = path.metadata() {
                 bytes = bytes.saturating_add(meta.len());
+                files = files.saturating_add(1);
                 if let Ok(t) = meta.modified() {
                     if t > newest {
                         newest = t;
@@ -379,7 +395,7 @@ fn book_dir_weight(dir: &Path) -> (SystemTime, u64) {
             }
         }
     }
-    (newest, bytes)
+    (newest, bytes, files)
 }
 
 /// Evict oldest whole-book extract dirs until under caps. `keep` is never deleted.
@@ -439,6 +455,50 @@ fn schedule_reader_cache_evict(cfg: &AppConfig) {
         });
     if spawn.is_err() {
         BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 在途"读页"计数（含解压写盘）。
+///
+/// 清空整本缓存前必须等它归零 —— 否则正在写盘的那一页会被写进刚删掉的目录，
+/// 前端表现为该页加载失败一次。下一页会自愈，所以只是体验瑕疵，
+/// 但完全可避免。显式闸门比 `remove_dir_all` 快或慢的运气可靠。
+static INFLIGHT_READS: AtomicUsize = AtomicUsize::new(0);
+static INFLIGHT_READ_IDLE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// RAII 守卫：在解析/抽取期间持有，保证缓存清理能等到它退出。
+pub(crate) struct ReaderInflightGuard;
+
+impl ReaderInflightGuard {
+    pub(crate) fn enter() -> Self {
+        INFLIGHT_READS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ReaderInflightGuard {
+    fn drop(&mut self) {
+        INFLIGHT_READS.fetch_sub(1, Ordering::SeqCst);
+        INFLIGHT_READ_IDLE.notify_waiters();
+    }
+}
+
+/// 等待在途读页退出（最多 `timeout`），返回是否已空闲。
+/// 超时也返回 false 而**不阻塞清理** —— 腾空间比等一个卡住的读页更重要。
+pub async fn wait_reader_reads_idle(timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if INFLIGHT_READS.load(Ordering::SeqCst) == 0 {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::select! {
+            _ = INFLIGHT_READ_IDLE.notified() => {}
+            _ = tokio::time::sleep_until(deadline) => {}
+        }
     }
 }
 

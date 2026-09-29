@@ -3,7 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { comicFileFilter } from "../formats";
 import type { Messages } from "../i18n";
-import type { LibraryEntry, LibraryScanPreview } from "../types";
+import type { LibraryCollection, LibraryEntry, LibraryScanPreview } from "../types";
+import { buildShelf, continueVolume, coverVolume } from "./collections";
 import { loadAllReaderPrefs, prefKey } from "../reader/prefs";
 import {
   loadImportSettings,
@@ -22,6 +23,13 @@ import {
 
 type Props = {
   entries: LibraryEntry[];
+  collections: LibraryCollection[];
+  onCreateCollection: (title: string, entryIds: string[]) => Promise<unknown>;
+  onAddToCollection: (id: string, entryIds: string[]) => Promise<unknown>;
+  onRemoveFromCollection: (id: string, entryId: string) => Promise<unknown>;
+  onMoveInCollection: (id: string, entryId: string, delta: number) => Promise<unknown>;
+  onRenameCollection: (id: string, title: string) => Promise<unknown>;
+  onDissolveCollection: (id: string) => Promise<unknown>;
   dragOver: boolean;
   scanning: boolean;
   i18n: Messages;
@@ -92,13 +100,15 @@ function isEnhanced(e: LibraryEntry): boolean {
   return Boolean(e.outputPath) || !["", "none"].includes(e.enhanceState || "");
 }
 
-/** 已读完：读过且页码到达末页（pageIndex 为 0 基） */
-function isFinished(e: LibraryEntry, page: number): boolean {
-  return page > 0 && e.pageCount > 0 && page >= e.pageCount - 1;
-}
-
 function LibraryView({
   entries,
+  collections,
+  onCreateCollection,
+  onAddToCollection,
+  onRemoveFromCollection,
+  onMoveInCollection,
+  onRenameCollection,
+  onDissolveCollection,
   dragOver,
   scanning,
   i18n,
@@ -222,36 +232,33 @@ function LibraryView({
   }, [entries, prefsRev]);
   const progressOf = (e: LibraryEntry): number => progressMap.get(e.path) ?? 0;
 
-  const processed = useMemo(() => {
-    let list = [...entries];
-    const q = query.trim().toLowerCase();
-    if (q) {
-      list = list.filter((e) => e.title.toLowerCase().includes(q) || e.path.toLowerCase().includes(q));
-    }
-    if (filter === "reading") {
-      list = list.filter((e) => progressOf(e) > 0 && !isFinished(e, progressOf(e)) && !e.missing);
-    } else if (filter === "unread") {
-      list = list.filter((e) => progressOf(e) <= 0 && !e.missing);
-    } else if (filter === "finished") {
-      list = list.filter((e) => isFinished(e, progressOf(e)) && !e.missing);
-    } else if (filter === "missing") {
-      list = list.filter((e) => e.missing);
-    }
-    list.sort((a, b) => {
-      if (sort === "title") return a.title.localeCompare(b.title, "zh");
-      if (sort === "added") return (b.addedAt || "").localeCompare(a.addedAt || "");
-      if (sort === "progress") return progressOf(b) - progressOf(a);
-      // recent: lastOpenedAt then addedAt
-      const ao = a.lastOpenedAt || a.addedAt || "";
-      const bo = b.lastOpenedAt || b.addedAt || "";
-      return bo.localeCompare(ao);
-    });
-    return list;
+  const [sheetId, setSheetId] = useState<string | null>(null);
+  const [menuEntryId, setMenuEntryId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const shelf = useMemo(
+    () =>
+      buildShelf({
+        entries,
+        collections,
+        query,
+        filter,
+        sort,
+        progressOf,
+      }),
+    // progressOf closes over progressMap
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, query, filter, sort, progressMap]);
+    [entries, collections, query, filter, sort, progressMap],
+  );
 
   const hasBooks = entries.length > 0;
-  const emptyFiltered = processed.length === 0;
+  const emptyFiltered = shelf.length === 0;
+  const openCollection = collections.find((c) => c.id === sheetId) ?? null;
+  const openVolumes = openCollection
+    ? openCollection.entryIds
+        .map((id) => entries.find((e) => e.id === id))
+        .filter((e): e is LibraryEntry => Boolean(e))
+    : [];
+  const resume = continueVolume(openVolumes);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -546,7 +553,42 @@ function LibraryView({
         </button>
       ) : view === "list" ? (
         <ul className="lib-scroll mt-3 min-h-0 flex-1 space-y-1 pb-4">
-          {processed.map((e) => {
+          {shelf.map((item) => {
+            if (item.kind === "collection") {
+              const coverEntry = coverVolume(item);
+              const cover = coverUrl(
+                coverEntry?.coverPath,
+                `${item.collection.id}:${item.volumes.length}`,
+              );
+              const next = continueVolume(item.volumes);
+              return (
+                <li key={item.collection.id}>
+                  <button
+                    type="button"
+                    className="card flex w-full items-center gap-3 p-2 text-left"
+                    onClick={() => setSheetId(item.collection.id)}
+                  >
+                    <div className="cover-frame h-14 w-10 shrink-0 overflow-hidden rounded-md">
+                      {cover ? (
+                        <img src={cover} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="grid h-full place-items-center text-[9px] text-ink-400">
+                          {i18n.libraryCollection}
+                        </div>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{item.collection.title}</p>
+                      <p className="truncate text-[11px] text-ink-500">
+                        {i18n.libraryCollectionVolumes.replace("{count}", String(item.volumes.length))}
+                        {next ? ` · ${splitTitle(next.title)}` : ""}
+                      </p>
+                    </div>
+                  </button>
+                </li>
+              );
+            }
+            const e = item.entry;
             const cover = coverUrl(e.coverPath, `${e.id}:${e.pageCount}:${e.coverPath ?? ""}`);
             const page = progressOf(e);
             return (
@@ -590,6 +632,16 @@ function LibraryView({
                       )}
                     </div>
                   </button>
+                  <button
+                    type="button"
+                    className="btn-card-enhance !opacity-100"
+                    onClick={() => {
+                      setDraftName("");
+                      setMenuEntryId((id) => (id === e.id ? null : e.id));
+                    }}
+                  >
+                    {i18n.libraryCollection}
+                  </button>
                   <button type="button" className="btn-card-enhance !opacity-100" disabled={e.missing} onClick={() => onEnhance(e)}>
                     {i18n.libraryEnhance}
                   </button>
@@ -609,7 +661,49 @@ function LibraryView({
         </ul>
       ) : (
         <ul className="lib-scroll mt-3 grid min-h-0 flex-1 grid-cols-3 gap-3 pb-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
-          {processed.map((e) => {
+          {shelf.map((item) => {
+            if (item.kind === "collection") {
+              const coverEntry = coverVolume(item);
+              const cover = coverUrl(
+                coverEntry?.coverPath,
+                `${item.collection.id}:${coverEntry?.pageCount ?? 0}:${coverEntry?.coverPath ?? ""}`,
+              );
+              const next = continueVolume(item.volumes);
+              const page = next ? progressOf(next) : 0;
+              return (
+                <li key={item.collection.id}>
+                  <article className="card group relative overflow-hidden">
+                    <button
+                      type="button"
+                      className="block w-full text-left"
+                      onClick={() => setSheetId(item.collection.id)}
+                    >
+                      <div className="cover-frame aspect-[2/3]">
+                        {cover ? (
+                          <img src={cover} alt="" loading="lazy" className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="grid h-full place-items-center text-[10px] text-ink-400">
+                            {i18n.libraryCollection}
+                          </div>
+                        )}
+                        <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-0.5 text-[10px] text-white">
+                          {i18n.libraryCollectionVolumes.replace("{count}", String(item.volumes.length))}
+                        </span>
+                        <div className="cover-scrim">
+                          <p className="truncate text-[11px] font-medium leading-tight">{item.collection.title}</p>
+                          <p className="truncate text-[9px] text-ink-500">
+                            {next
+                              ? `${splitTitle(next.title)}${page > 0 ? ` · ${page + 1}/${next.pageCount || "?"}` : ""}`
+                              : i18n.libraryCollection}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  </article>
+                </li>
+              );
+            }
+            const e = item.entry;
             const cover = coverUrl(e.coverPath, `${e.id}:${e.pageCount}:${e.coverPath ?? ""}`);
             const page = progressOf(e);
             return (
@@ -659,6 +753,18 @@ function LibraryView({
                     <button
                       type="button"
                       className="btn-card-enhance"
+                      title={i18n.libraryCollection}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        setDraftName("");
+                        setMenuEntryId((id) => (id === e.id ? null : e.id));
+                      }}
+                    >
+                      {i18n.libraryCollection}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-card-enhance"
                       title={i18n.libraryEnhance}
                       disabled={e.missing}
                       onClick={(ev) => {
@@ -686,6 +792,164 @@ function LibraryView({
             );
           })}
         </ul>
+      )}
+
+      {menuEntryId && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
+          onClick={() => setMenuEntryId(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-white p-4 shadow-panel dark:bg-surface-panel"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <form
+              className="flex gap-2"
+              onSubmit={(ev) => {
+                ev.preventDefault();
+                const title = draftName.trim();
+                if (!title) return;
+                void onCreateCollection(title, [menuEntryId]);
+                setMenuEntryId(null);
+              }}
+            >
+              <input
+                value={draftName}
+                onChange={(ev) => setDraftName(ev.target.value)}
+                placeholder={i18n.libraryCollectionName}
+                className="min-w-0 flex-1 rounded-lg border border-ink-200 px-2 py-1.5 text-sm dark:border-white/10 dark:bg-transparent"
+                autoFocus
+              />
+              <button type="submit" className="btn-primary px-3 py-1.5 text-sm">
+                {i18n.libraryCollectionNew}
+              </button>
+            </form>
+            <div className="mt-3 max-h-48 space-y-1 overflow-auto">
+              {collections.length === 0 && (
+                <p className="text-xs text-ink-500">{i18n.libraryCollectionEmpty}</p>
+              )}
+              {collections.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className="block w-full rounded-lg px-2 py-1.5 text-left text-sm hover:bg-ink-50 dark:hover:bg-white/5"
+                  onClick={() => {
+                    void onAddToCollection(c.id, [menuEntryId]);
+                    setMenuEntryId(null);
+                  }}
+                >
+                  {i18n.libraryCollectionAdd} · {c.title}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {openCollection && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
+          onClick={() => setSheetId(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-4 shadow-panel dark:bg-surface-panel"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <input
+                defaultValue={openCollection.title}
+                key={openCollection.id}
+                className="min-w-0 flex-1 bg-transparent text-base font-medium outline-none"
+                aria-label={i18n.libraryCollectionRename}
+                onBlur={(ev) => {
+                  const title = ev.target.value.trim();
+                  if (title && title !== openCollection.title) {
+                    void onRenameCollection(openCollection.id, title);
+                  }
+                }}
+              />
+              <button type="button" className="text-sm text-ink-500" onClick={() => setSheetId(null)}>
+                {i18n.dismiss}
+              </button>
+            </div>
+            {resume && !resume.missing && (
+              <button
+                type="button"
+                className="btn-primary mt-3 w-full py-2 text-sm"
+                onClick={() => {
+                  setSheetId(null);
+                  onOpen(resume);
+                }}
+              >
+                {i18n.libraryCollectionContinue} · {splitTitle(resume.title)}
+              </button>
+            )}
+            <ul className="mt-3 max-h-80 space-y-1 overflow-auto">
+              {openVolumes.map((volume, index) => (
+                <li key={volume.id} className="flex items-center gap-2 rounded-lg px-1 py-1">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm">{splitTitle(volume.title)}</p>
+                    <p className="text-[11px] text-ink-500">
+                      {progressOf(volume) > 0
+                        ? `${progressOf(volume) + 1}/${volume.pageCount || "?"}`
+                        : `${volume.pageCount || "?"} ${i18n.libraryPages}`}
+                    </p>
+                  </div>
+                  <button type="button" className="text-xs" onClick={() => void onMoveInCollection(openCollection.id, volume.id, -1)} disabled={index === 0}>
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs"
+                    onClick={() => void onMoveInCollection(openCollection.id, volume.id, 1)}
+                    disabled={index === openVolumes.length - 1}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs"
+                    disabled={volume.missing}
+                    onClick={() => {
+                      setSheetId(null);
+                      onOpen(volume);
+                    }}
+                  >
+                    {i18n.libraryCollectionOpen}
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs"
+                    disabled={volume.missing}
+                    onClick={() => {
+                      setSheetId(null);
+                      onEnhance(volume);
+                    }}
+                  >
+                    {i18n.libraryEnhance}
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-rose-700"
+                    onClick={() => void onRemoveFromCollection(openCollection.id, volume.id)}
+                  >
+                    {i18n.libraryCollectionRemoveVolume}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              className="mt-3 text-sm text-ink-500"
+              onClick={() => {
+                void onDissolveCollection(openCollection.id);
+                setSheetId(null);
+              }}
+            >
+              {i18n.libraryCollectionDissolve}
+            </button>
+          </div>
+        </div>
       )}
 
       {scanPreview && (

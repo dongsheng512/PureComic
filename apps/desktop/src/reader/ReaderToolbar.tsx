@@ -644,7 +644,8 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             className="absolute inset-0 z-0"
             onMouseDown={startWindowDrag}
           />
-          <div className="relative z-10 flex h-full items-center gap-2 pointer-events-none">
+          {/* pt-3：28px 控件顶在 12px，圆心落在 26px，与 y=20 的 12px 红绿灯对齐。栏高仍 44px。 */}
+          <div className="relative z-10 flex h-full items-start gap-2 pt-3 pointer-events-none">
             {/* gap-2(8pt) 而不是 gap-1(4pt)：返回键现在有可见的底，
                 4pt 会让它的右边框紧贴书名（书名的首个字形是 [ ，视觉上更挤） */}
             <div
@@ -693,7 +694,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             {barCompact ? (
               <div className="relative z-10 mx-1 flex min-w-0 flex-1 justify-center">{pagerControls}</div>
             ) : (
-              <div className="pointer-events-none absolute inset-x-0 z-10 flex justify-center">
+              <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center">
                 {pagerControls}
               </div>
             )}

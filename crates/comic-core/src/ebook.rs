@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use zip::ZipArchive;
 
 /// Ordered list of image entry paths inside an EPUB (zip-relative, forward slashes).
@@ -561,8 +562,47 @@ pub fn write_mobi_engine_input(bytes: &[u8], dest: &Path) -> AppResult<()> {
 
 /// MOBI 解析展开目录（work/mobi-cache/<hash>-<len>-<mtime>）。
 /// 目录名带内容指纹：文件变化即换新目录，不会命中陈旧缓存。
-fn mobi_cache_path(source: &Path, cfg: &AppConfig) -> PathBuf {
+/// mobi 缓存目录名里的哈希段 = `sha256(源路径)` 的前 6 字节（12 位十六进制）。
+///
+/// 单独抽出来，是为了让**缓存管理页把目录归属回书名**时能用同一份实现：
+/// 它拿书库里的源路径反算前缀去匹配目录名。
+///
+/// ⚠️ 别拿书库条目的 `id` 前 12 位当这个前缀走捷径：`id` 是历史上写入的值，
+/// 实测 13 个真实目录里有 2 个的前缀**不在任何 `id` 里**，用 id 匹配会静默漏书。
+pub(crate) fn mobi_cache_key_prefix(source: &Path) -> String {
     use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(source.to_string_lossy().as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// 反解目录名 `mobi-{hash12}-{len}-{mtime}` 取回哈希段；不是我们生成的形状就返回 `None`。
+///
+/// 格式只在本文件生成一次，所以解析也放这里 —— 缓存页不应自己 `split('-')`。
+pub(crate) fn mobi_cache_dir_prefix(dir_name: &str) -> Option<&str> {
+    let rest = dir_name.strip_prefix("mobi-")?;
+    let (hash, tail) = rest.split_once('-')?;
+    if hash.len() != 12 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut parts = tail.split('-');
+    let len = parts.next()?;
+    let mtime = parts.next()?;
+    // 多一段就说明不是这个形状（旧格式 / 别的目录）
+    if parts.next().is_some() {
+        return None;
+    }
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(len) && digits(mtime)).then_some(hash)
+}
+
+fn mobi_cache_path(source: &Path, cfg: &AppConfig) -> PathBuf {
     use std::time::UNIX_EPOCH;
 
     let meta = std::fs::metadata(source).ok();
@@ -573,14 +613,7 @@ fn mobi_cache_path(source: &Path, cfg: &AppConfig) -> PathBuf {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let mut hasher = Sha256::new();
-    hasher.update(source.to_string_lossy().as_bytes());
-    let digest: String = hasher
-        .finalize()
-        .iter()
-        .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let digest = mobi_cache_key_prefix(source);
     cfg.work_root
         .join("mobi-cache")
         .join(format!("mobi-{digest}-{len}-{mtime}"))
@@ -639,11 +672,68 @@ fn install_mobi_cache(source: &Path, dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// MOBI 展开缓存的容量上限。
+///
+/// 单个目录 ≈ 整整一本书的图片，实测 36–287 MB —— 比 `reader/` 的整本解压缓存大一个量级，
+/// 所以按"本数"给得比 reader（10 本）少。
+///
+/// 上限存在的唯一目的是兜住"经年累月读了十几本、每本都留一份"这种累积；
+/// 正常同时读的几本永远不会触发淘汰。**这个上限曾经完全不存在**，
+/// 于是它独自长到 1.4 GB（占整个 work_root 的 82%）。
+pub const MAX_MOBI_CACHE_BOOKS: usize = 8;
+pub const MAX_MOBI_CACHE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+
+/// 按 LRU 淘汰最旧的几本，直到同时满足两个上限。`keep` 保护刚建好的那本。
+///
+/// 只认 `mobi-*` 目录：`tmp-*` 构建残留由 `install_mobi_cache` 自己按 10 分钟超时清，
+/// 这里不碰（它可能正被别的线程 rename 走）。
+pub(crate) fn evict_mobi_cache(cfg: &AppConfig, keep: Option<&Path>) -> AppResult<()> {
+    let root = cfg.mobi_cache_dir();
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let mut books: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() || !e.file_name().to_string_lossy().starts_with("mobi-") {
+                continue;
+            }
+            if keep.is_some_and(|k| k == p.as_path()) {
+                continue;
+            }
+            let (mtime, bytes) = crate::reader::book_dir_weight(&p);
+            books.push((p, mtime, bytes));
+        }
+    }
+    books.sort_by_key(|b| b.1);
+    let keep_bytes = keep.map(|k| crate::reader::book_dir_weight(k).1).unwrap_or(0);
+    let mut total: u64 = books
+        .iter()
+        .map(|b| b.2)
+        .sum::<u64>()
+        .saturating_add(keep_bytes);
+    let mut count = books.len() + usize::from(keep.is_some());
+    for (path, _, len) in books {
+        if count <= MAX_MOBI_CACHE_BOOKS && total <= MAX_MOBI_CACHE_BYTES {
+            break;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            total = total.saturating_sub(len);
+            count = count.saturating_sub(1);
+        }
+    }
+    Ok(())
+}
+
 /// 首次把 MOBI 全部图片展开到缓存目录，之后按页读取——
 /// 避免每翻一页都整本重读 + 全量解析（500MB 的 AZW3 = O(全书)/页）。
 fn ensure_mobi_cache(source: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
     let dir = mobi_cache_path(source, cfg);
     if dir.join("meta.json").is_file() {
+        // 命中时刷新目录 mtime —— 否则 LRU 依据的是"首次构建时间"而不是"最近使用时间"，
+        // 一本读了二十遍的老书会先于只翻过一次的新书被淘汰。
+        crate::reader::touch_path(&dir);
         return Ok(dir);
     }
     let _guard = MOBI_CACHE_BUILD_LOCK
@@ -651,9 +741,15 @@ fn ensure_mobi_cache(source: &Path, cfg: &AppConfig) -> AppResult<PathBuf> {
         .unwrap_or_else(|e| e.into_inner());
     // 双重检查：等锁期间可能已有其它线程建好
     if dir.join("meta.json").is_file() {
+        crate::reader::touch_path(&dir);
         return Ok(dir);
     }
     install_mobi_cache(source, &dir)?;
+    // 淘汰放构建之后，并把刚建好的这本排除在外。
+    // 失败不影响阅读（下次再淘汰），所以只记日志不外传。
+    if let Err(e) = evict_mobi_cache(cfg, Some(&dir)) {
+        tracing::warn!(error = %e.message, "mobi cache evict failed");
+    }
     Ok(dir)
 }
 
@@ -771,5 +867,87 @@ mod tests {
         let png = tiny_png_bytes();
         let img = unwrap_kindle_image(&png).unwrap();
         assert_eq!(img, png.as_slice());
+    }
+
+    /// 造 N 个带递增 mtime 的 mobi 缓存目录，返回目录列表（index 0 最旧）。
+    fn seed_mobi_books(cfg: &AppConfig, n: usize) -> Vec<PathBuf> {
+        let root = cfg.mobi_cache_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut dirs = Vec::new();
+        for i in 0..n {
+            let d = root.join(format!("mobi-book{i:02}-100-{}", 1_700_000_000 + i));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("00000.img"), b"page").unwrap();
+            let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + i as u64);
+            if let Ok(f) = std::fs::File::open(&d) {
+                let _ = f.set_modified(t);
+            }
+            if let Ok(f) = std::fs::File::open(d.join("00000.img")) {
+                let _ = f.set_modified(t);
+            }
+            dirs.push(d);
+        }
+        dirs
+    }
+
+    fn count_mobi_dirs(cfg: &AppConfig) -> usize {
+        std::fs::read_dir(cfg.mobi_cache_dir())
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("mobi-"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn mobi_cache_evicts_oldest_books() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let dirs = seed_mobi_books(&cfg, MAX_MOBI_CACHE_BOOKS + 3);
+        // 构建残留：转瞬即逝，不归缓存淘汰管
+        let tmpdir = cfg.mobi_cache_dir().join("tmp-4242-deadbeef");
+        std::fs::create_dir_all(&tmpdir).unwrap();
+
+        evict_mobi_cache(&cfg, None).unwrap();
+
+        assert_eq!(count_mobi_dirs(&cfg), MAX_MOBI_CACHE_BOOKS);
+        assert!(!dirs[0].exists(), "最旧的一本应被淘汰");
+        assert!(
+            dirs.last().unwrap().exists(),
+            "最新的一本应保留（LRU 而不是按名字）"
+        );
+        assert!(tmpdir.is_dir(), "tmp-* 不能被缓存淘汰误删");
+    }
+
+    #[test]
+    fn mobi_cache_evict_protects_the_book_just_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        // keep 指向**最旧**的一本 —— 正常 LRU 会先删它，但它是"刚建好正在读"的那本
+        let dirs = seed_mobi_books(&cfg, MAX_MOBI_CACHE_BOOKS + 3);
+        evict_mobi_cache(&cfg, Some(&dirs[0])).unwrap();
+
+        assert!(dirs[0].is_dir(), "keep 指定的那本必须活着");
+        assert_eq!(count_mobi_dirs(&cfg), MAX_MOBI_CACHE_BOOKS);
+        assert!(!dirs[1].exists(), "被淘汰的应顺延到次旧的");
+    }
+
+    #[test]
+    fn mobi_cache_under_caps_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let dirs = seed_mobi_books(&cfg, MAX_MOBI_CACHE_BOOKS);
+        evict_mobi_cache(&cfg, None).unwrap();
+        assert!(dirs.iter().all(|d| d.is_dir()), "未超上限时一个都不该删");
     }
 }

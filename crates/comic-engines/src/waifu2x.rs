@@ -83,6 +83,9 @@ impl UpscaleEngine for Waifu2xEngine {
             available,
             detail,
             version: None,
+            threads: None,
+            mode: None,
+            is_mock: false,
         }
     }
 
