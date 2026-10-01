@@ -66,6 +66,7 @@
       "resources/waifu2x-coreml",
       "resources/realesrgan-coreml",
       "resources/realcugan-coreml",
+      "resources/animevideo-coreml",
       "resources/NOTICE"
     ],
     "macOS": {

@@ -20,7 +20,7 @@ for stale in models-cunet models-se models-pro models-nose; do
 done
 
 # tauri.conf.json resources 已声明，缺失则 fail-fast
-for model_dir in waifu2x-coreml realesrgan-coreml realcugan-coreml; do
+for model_dir in waifu2x-coreml realesrgan-coreml realcugan-coreml animevideo-coreml; do
   if [[ ! -d "$TP/$model_dir" ]] || [[ -z "$(ls -A "$TP/$model_dir" 2>/dev/null || true)" ]]; then
     echo "缺少 Core ML 模型: $TP/$model_dir" >&2
     echo "请运行 ./scripts/fetch-${model_dir}.sh" >&2
