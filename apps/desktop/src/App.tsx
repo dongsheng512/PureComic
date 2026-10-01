@@ -39,7 +39,7 @@ import { EnhanceView } from "./enhance/EnhanceView";
 import {
   DEFAULT_EXPORT_QUALITY,
   formatBytes,
-  jpegQualityOf,
+  exportTierOf,
   migrateBatchEngineId,
   type Container,
   type ExportQuality,
@@ -602,7 +602,16 @@ export default function App() {
         engineId === "auto"
           ? (catalog.find((e) => e.available)?.id ?? engineId)
           : engineId;
-      estimateDisk(source, scale, effectiveEngine, imageFormat, outputDir)
+      const tier = exportTierOf(exportQuality);
+      estimateDisk(
+        source,
+        scale,
+        effectiveEngine,
+        imageFormat,
+        outputDir,
+        tier.jpegQuality,
+        tier.outputMaxSide,
+      )
         .then((e) => {
           if (cancelled) return;
           setEstimate(e);
@@ -618,7 +627,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [source, scale, engineId, imageFormat, outputDir, validation, catalog]);
+  }, [source, scale, engineId, imageFormat, outputDir, exportQuality, validation, catalog]);
 
   /** Prefer CBZ/ZIP files over random paths; accept directories. */
   const pickDroppedPath = (paths: string[]): string | null => {
@@ -839,7 +848,8 @@ export default function App() {
           dir: outputDir,
           container,
           imageFormat,
-          jpegQuality: jpegQualityOf(exportQuality),
+          jpegQuality: exportTierOf(exportQuality).jpegQuality,
+          outputMaxSide: exportTierOf(exportQuality).outputMaxSide,
         },
         enhance: { scale, noiseLevel: noise, tta, cuganModel },
       });

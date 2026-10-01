@@ -14,31 +14,56 @@ export type ImgFmt = "jpeg" | "png" | "webp" | "same";
 export type ExportQuality = "high" | "balanced" | "compact" | "minimal";
 
 /**
- * 导出 JPEG 画质档位 → libjpeg quality 值。
- *
- * 档位是实测定的，不是拍的：在真实 Real-CUGAN 输出上按阅读宽度（1600px）算 SSIM，
- * quality 88 与 92 的差距在小数点后第 4～5 位（肉眼不可分辨），体积小约 13%。
+ * 导出档位。quality 是同一分辨率下的 JPEG 质量。
+ * `outputMaxSide` 为 0 时不限宽；其余档在超分之后把长边收到 3200。
+ * 最高画质保持引擎分辨率，避免「最高」仍被静默缩小。
  */
+export const EXPORT_TIER: Record<
+  ExportQuality,
+  { jpegQuality: number; outputMaxSide: number }
+> = {
+  high: { jpegQuality: 92, outputMaxSide: 0 },
+  balanced: { jpegQuality: 88, outputMaxSide: 3200 },
+  compact: { jpegQuality: 82, outputMaxSide: 3200 },
+  minimal: { jpegQuality: 75, outputMaxSide: 3200 },
+};
+
 export const JPEG_QUALITY_OF: Record<ExportQuality, number> = {
-  high: 92,
-  balanced: 88,
-  compact: 82,
-  minimal: 75,
+  high: EXPORT_TIER.high.jpegQuality,
+  balanced: EXPORT_TIER.balanced.jpegQuality,
+  compact: EXPORT_TIER.compact.jpegQuality,
+  minimal: EXPORT_TIER.minimal.jpegQuality,
 };
 
 export const DEFAULT_EXPORT_QUALITY: ExportQuality = "balanced";
 
+export function exportTierOf(q: ExportQuality): {
+  jpegQuality: number;
+  outputMaxSide: number;
+} {
+  return EXPORT_TIER[q] ?? EXPORT_TIER[DEFAULT_EXPORT_QUALITY];
+}
+
 export function jpegQualityOf(q: ExportQuality): number {
-  return JPEG_QUALITY_OF[q] ?? JPEG_QUALITY_OF[DEFAULT_EXPORT_QUALITY];
+  return exportTierOf(q).jpegQuality;
+}
+
+/** 首页扩展名。空列表视为未知，不当成 PNG。 */
+export function sourcePageIsJpeg(pageNames: readonly string[] | undefined): boolean {
+  const name = pageNames?.find((n) => n.length > 0 && !n.endsWith("/")) ?? "";
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return ext !== "png" && ext !== "webp";
 }
 
 /**
  * 画质档位是否对该格式生效。
  * PNG 恒为无损；WebP 在本项目（image 0.25）只有无损编码，两者都不吃 quality。
- * `same` 只在源图解析为 JPEG 时生效。
+ * `same` 只在源页是 JPEG（或扩展名还未知）时生效。
  */
-export function qualityAppliesTo(fmt: ImgFmt): boolean {
-  return fmt === "jpeg" || fmt === "same";
+export function qualityAppliesTo(fmt: ImgFmt, sourceIsJpeg = true): boolean {
+  if (fmt === "png" || fmt === "webp") return false;
+  if (fmt === "same") return sourceIsJpeg;
+  return true;
 }
 
 export function formatBytes(n: number): string {

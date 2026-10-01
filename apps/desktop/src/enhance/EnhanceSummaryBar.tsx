@@ -3,6 +3,7 @@ import type { DiskEstimate, JobStatus, ValidateResult } from "../types";
 import {
   formatBytes,
   qualityAppliesTo,
+  sourcePageIsJpeg,
   startBlockReason,
   type Container,
   type ExportQuality,
@@ -169,7 +170,9 @@ export function EnhanceSummaryBar({
                 {i18n.outputLabel}{" "}
                 <b className="font-semibold text-ink-800 dark:text-fg">
                   {containerLabel(i18n, container)} · {imageFormatLabel(i18n, imageFormat)}
-                  {qualityAppliesTo(imageFormat) ? ` · ${qualityLabel(i18n, quality)}` : ""}
+                  {qualityAppliesTo(imageFormat, sourcePageIsJpeg(validation?.pageNames))
+                    ? ` · ${qualityLabel(i18n, quality)}`
+                    : ""}
                 </b>
               </span>
             )}

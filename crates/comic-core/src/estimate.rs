@@ -6,7 +6,8 @@
 //!   2. 管线落盘的是**编码后的文件**（源页 / 引擎输出 / 导出物），
 //!      不是 RGBA 缓冲。按 RGBA 算等于凭空乘了 4 字节/像素。
 //!
-//! 实测：1.08 GiB 的《四万十食堂》被估成 12.67 GB，而真实峰值约 3.4 GiB。
+//! 实测：1.08 GiB 的《四万十食堂》在不限宽时峰值约 3.4 GiB，旧模型估成 12.67 GB。
+//! 导出默认把长边收到 3200 之后，峰值主要是解出来的源页。
 //!
 //! 现在的模型按管线真实的三个阶段累加：
 //!   in_dir   —— 解出来的源页，≈ 包内页条目字节和（STORED 包≈包体积）
@@ -65,6 +66,10 @@ pub struct EstimateParams {
     pub scale: u8,
     pub engine: EngineKind,
     pub image_format: ImageFormat,
+    /// `None` uses `AppConfig::output_max_side`. `Some(0)` keeps engine resolution.
+    pub output_max_side: Option<u32>,
+    /// Export JPEG quality. Size is scaled relative to quality 92.
+    pub jpeg_quality: u8,
 }
 
 impl Default for EstimateParams {
@@ -73,8 +78,30 @@ impl Default for EstimateParams {
             scale: 2,
             engine: EngineKind::RealCuganCoreMl,
             image_format: ImageFormat::Jpeg,
+            output_max_side: None,
+            jpeg_quality: 92,
         }
     }
+}
+
+/// JPEG byte size relative to quality 92 at the same pixels.
+/// Anchors from the export tiers: 88 → 0.87, 82 → 0.73, 75 → 0.63.
+fn jpeg_size_factor(quality: u8) -> f64 {
+    let q = f64::from(quality.clamp(1, 100));
+    if q >= 92.0 {
+        return 1.0;
+    }
+    let points = [(92.0, 1.0), (88.0, 0.87), (82.0, 0.73), (75.0, 0.63)];
+    for pair in points.windows(2) {
+        let (q0, f0) = pair[0];
+        let (q1, f1) = pair[1];
+        if q <= q0 && q >= q1 {
+            let t = (q0 - q) / (q0 - q1);
+            return f0 + (f1 - f0) * t;
+        }
+    }
+    let extra = (75.0 - q) * (0.10 / 7.0);
+    (0.63 - extra).max(0.40)
 }
 
 /// 源页抽样结果：平均页尺寸 + 源页字节总量
@@ -214,10 +241,11 @@ fn model_bytes(
     let mut out_px = in_px * (scale * scale) as f64;
     // Whole-book export scales the written page down to output_max_side.
     // Input cap stays put, so the model still sees the larger source.
-    if cfg.output_max_side > 0 {
+    let max_side = params.output_max_side.unwrap_or(cfg.output_max_side);
+    if max_side > 0 {
         let out_long = long_side * shrink * scale as f64;
-        if out_long > f64::from(cfg.output_max_side) {
-            let fit = f64::from(cfg.output_max_side) / out_long;
+        if out_long > f64::from(max_side) {
+            let fit = f64::from(max_side) / out_long;
             out_px *= fit * fit;
         }
     }
@@ -229,7 +257,8 @@ fn model_bytes(
     } else {
         FALLBACK_SRC_BPP
     };
-    let jpeg_bpp = (src_bpp * JPEG_EFFICIENCY).clamp(JPEG_BPP_MIN, JPEG_BPP_MAX);
+    let jpeg_bpp = (src_bpp * JPEG_EFFICIENCY * jpeg_size_factor(params.jpeg_quality))
+        .clamp(JPEG_BPP_MIN, JPEG_BPP_MAX);
     let png_bpp = PNG_BPP.max(jpeg_bpp);
 
     // 引擎中间页：Real-CUGAN 在 JPEG 导出时直出 JPEG（导出可原样拷贝），
@@ -503,6 +532,35 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_quality_shrinks_the_same_resolution() {
+        let cfg = cfg_with_cap(4096);
+        let s = sample(800, 1200, 2_000_000);
+        let high = model_bytes(
+            &s,
+            EstimateParams {
+                jpeg_quality: 92,
+                output_max_side: Some(0),
+                ..Default::default()
+            },
+            10,
+            &cfg,
+        );
+        let smaller = model_bytes(
+            &s,
+            EstimateParams {
+                jpeg_quality: 75,
+                output_max_side: Some(0),
+                ..Default::default()
+            },
+            10,
+            &cfg,
+        );
+        assert!(smaller.output < high.output);
+        assert!((jpeg_size_factor(88) - 0.87).abs() < 1e-9);
+        assert!((jpeg_size_factor(92) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn jpeg_intermediates_are_far_cheaper_than_png() {
         let cfg = cfg_with_cap(4096);
         let s = sample(4800, 7568, 700_000_000);
@@ -512,6 +570,7 @@ mod tests {
                 engine: EngineKind::RealCuganCoreMl,
                 image_format: ImageFormat::Jpeg,
                 scale: 2,
+                ..Default::default()
             },
             100,
             &cfg,
@@ -522,6 +581,7 @@ mod tests {
                 engine: EngineKind::Waifu2xCoreMl,
                 image_format: ImageFormat::Jpeg,
                 scale: 2,
+                ..Default::default()
             },
             100,
             &cfg,
@@ -564,6 +624,7 @@ mod tests {
                 engine: EngineKind::RealCuganCoreMl,
                 image_format: ImageFormat::Jpeg,
                 scale: 2,
+                ..Default::default()
             },
             10,
             &cfg,
@@ -574,6 +635,7 @@ mod tests {
                 engine: EngineKind::RealEsrganCoreMl,
                 image_format: ImageFormat::Jpeg,
                 scale: 4,
+                ..Default::default()
             },
             10,
             &cfg,

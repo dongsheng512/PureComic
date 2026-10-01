@@ -244,6 +244,8 @@ impl Scheduler {
                     scale: options.scale.as_u8(),
                     engine: options.engine,
                     image_format: output.image_format,
+                    output_max_side: Some(output.output_max_side),
+                    jpeg_quality: output.jpeg_quality,
                 },
                 Some(&output.dir),
             )

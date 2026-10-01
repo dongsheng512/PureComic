@@ -1,6 +1,6 @@
 import type { Messages } from "../i18n";
 import { Field, SelectBox } from "./controls";
-import { qualityAppliesTo } from "./enhanceViewModel";
+import { qualityAppliesTo, sourcePageIsJpeg } from "./enhanceViewModel";
 import type { Container, ExportQuality, ImgFmt } from "./enhanceViewModel";
 
 type Props = {
@@ -9,6 +9,8 @@ type Props = {
   container: Container;
   imageFormat: ImgFmt;
   quality: ExportQuality;
+  /** 首页文件名。用来判断「与源相同」时画质档位是否生效。 */
+  sourcePageName?: string | null;
   onPickOutput: () => void;
   onContainerChange: (c: Container) => void;
   onImageFormatChange: (f: ImgFmt) => void;
@@ -24,6 +26,7 @@ export function OutputSettings({
   container,
   imageFormat,
   quality,
+  sourcePageName,
   onPickOutput,
   onContainerChange,
   onImageFormatChange,
@@ -40,7 +43,10 @@ export function OutputSettings({
           : i18n.formatHintJpeg;
 
   // PNG / WebP 在本项目里都是无损编码，quality 不参与；`same` 取决于源图是否为 JPEG。
-  const qualityEnabled = qualityAppliesTo(imageFormat);
+  const qualityEnabled = qualityAppliesTo(
+    imageFormat,
+    sourcePageIsJpeg(sourcePageName ? [sourcePageName] : undefined),
+  );
   const qualityHint = !qualityEnabled
     ? i18n.qualityHintLossless
     : quality === "high"

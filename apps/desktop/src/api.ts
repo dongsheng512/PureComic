@@ -114,14 +114,19 @@ export async function estimateDisk(
   engine?: string | null,
   imageFormat?: string | null,
   outputDir?: string | null,
+  jpegQuality?: number | null,
+  outputMaxSide?: number | null,
 ): Promise<DiskEstimate> {
-  // 引擎与格式会改变中间页编码（JPEG vs PNG），估算结果差好几倍
+  // 引擎与格式会改变中间页编码（JPEG vs PNG），估算结果差好几倍。
+  // 画质档位同时决定 JPEG quality 和导出长边。
   return invoke("estimate_disk_usage", {
     path,
     scale,
     engine: engine ?? null,
     imageFormat: imageFormat ?? null,
     outputDir: outputDir ?? null,
+    jpegQuality: jpegQuality ?? null,
+    outputMaxSide: outputMaxSide ?? null,
   });
 }
 

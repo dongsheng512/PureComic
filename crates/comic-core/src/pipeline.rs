@@ -110,6 +110,8 @@ pub async fn run_job(
             scale: m.options.scale as u8,
             engine: m.options.engine,
             image_format: m.output.image_format,
+            output_max_side: Some(m.output.output_max_side),
+            jpeg_quality: m.output.jpeg_quality,
         };
         let source = m.source.path.clone();
         let output_dir = m.output.dir.clone();

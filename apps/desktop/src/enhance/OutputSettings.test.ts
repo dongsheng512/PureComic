@@ -82,9 +82,28 @@ describe("OutputSettings quality selector", () => {
     }
   });
 
-  it("keeps the selector enabled when the format follows the source", () => {
+  it("keeps the selector enabled when the source format is unknown", () => {
     const view = renderSettings("same", "compact");
     expect(buttonFor(view, TIER_LABEL.compact).disabled).toBe(false);
+  });
+
+  it("disables the selector when same-format follows a PNG page", () => {
+    const view = render(
+      createElement(OutputSettings, {
+        i18n,
+        outputDir: "/tmp/out",
+        container: "cbz",
+        imageFormat: "same",
+        quality: "compact",
+        sourcePageName: "00001.png",
+        onPickOutput: noop,
+        onContainerChange: noop,
+        onImageFormatChange: noop,
+        onQualityChange: noop,
+      }),
+    );
+    expect(buttonFor(view, TIER_LABEL.compact).disabled).toBe(true);
+    expect(view.getByText(i18n.qualityHintLossless)).toBeTruthy();
   });
 
   it("opens the tier list on click and lists all four tiers", () => {

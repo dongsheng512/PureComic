@@ -75,6 +75,8 @@ export type CreateJobRequest = {
     container: string;
     imageFormat: string;
     jpegQuality?: number;
+    /** 0 表示不限导出长边。缺省时后端用 3200。 */
+    outputMaxSide?: number;
     webpQuality?: number;
     naming?: string;
   };

@@ -96,6 +96,7 @@ export const EnhanceView = memo(function EnhanceView(props: EnhanceViewProps) {
             container={props.container}
             imageFormat={props.imageFormat}
             quality={props.quality}
+            sourcePageName={props.validation?.pageNames?.[0] ?? null}
             onPickOutput={props.onPickOutput}
             onContainerChange={props.onContainerChange}
             onImageFormatChange={props.onImageFormatChange}

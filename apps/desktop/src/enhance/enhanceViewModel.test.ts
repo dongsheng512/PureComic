@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_EXPORT_QUALITY,
   JPEG_QUALITY_OF,
+  exportTierOf,
   jpegQualityOf,
   parseAccelInfo,
   qualityAppliesTo,
@@ -60,8 +61,15 @@ describe("export quality tiers", () => {
   it("quality only applies where the encoder is lossy", () => {
     expect(qualityAppliesTo("jpeg")).toBe(true);
     expect(qualityAppliesTo("same")).toBe(true);
+    expect(qualityAppliesTo("same", false)).toBe(false);
     // PNG is always lossless; WebP is lossless-only with image 0.25
     expect(qualityAppliesTo("png")).toBe(false);
     expect(qualityAppliesTo("webp")).toBe(false);
+  });
+
+  it("highest tier keeps engine resolution; the others cap the long side", () => {
+    expect(exportTierOf("high")).toEqual({ jpegQuality: 92, outputMaxSide: 0 });
+    expect(exportTierOf("balanced").outputMaxSide).toBe(3200);
+    expect(exportTierOf("minimal").outputMaxSide).toBe(3200);
   });
 });

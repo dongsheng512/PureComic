@@ -129,6 +129,8 @@ async fn estimate_disk_usage(
     engine: Option<String>,
     image_format: Option<String>,
     output_dir: Option<String>,
+    jpeg_quality: Option<u8>,
+    output_max_side: Option<u32>,
 ) -> Result<comic_core::estimate::DiskEstimate, AppError> {
     // 引擎与格式决定中间页是 JPEG 还是 PNG，估算必须知道，
     // 否则默认（Real-CUGAN + JPEG）路径会被高估数倍。
@@ -142,6 +144,8 @@ async fn estimate_disk_usage(
         image_format: comic_core::job::parse_image_format(
             image_format.as_deref().unwrap_or("jpeg"),
         ),
+        output_max_side,
+        jpeg_quality: jpeg_quality.unwrap_or(92),
     };
     let out = output_dir.as_deref().map(std::path::Path::new);
     state.scheduler.estimate(&path, params, out).await
