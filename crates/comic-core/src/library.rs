@@ -992,7 +992,7 @@ mod tests {
             .unwrap();
         assert_eq!(col.entry_ids, vec![eb.id.clone(), ea.id.clone()]);
         store
-            .add_to_collection(&col.id, &[ea.id.clone()])
+            .add_to_collection(&col.id, std::slice::from_ref(&ea.id))
             .unwrap();
         let again = LibraryStore::open(&cfg).unwrap();
         assert_eq!(again.collections.len(), 1);

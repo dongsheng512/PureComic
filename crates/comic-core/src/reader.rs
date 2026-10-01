@@ -7,7 +7,7 @@ use crate::job::{JobManifest, PageRecord, PageStatus, SourceKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -458,46 +458,40 @@ fn schedule_reader_cache_evict(cfg: &AppConfig) {
     }
 }
 
-/// 在途"读页"计数（含解压写盘）。
-///
-/// 清空整本缓存前必须等它归零 —— 否则正在写盘的那一页会被写进刚删掉的目录，
-/// 前端表现为该页加载失败一次。下一页会自愈，所以只是体验瑕疵，
-/// 但完全可避免。显式闸门比 `remove_dir_all` 快或慢的运气可靠。
-static INFLIGHT_READS: AtomicUsize = AtomicUsize::new(0);
-static INFLIGHT_READ_IDLE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// 读页与清缓存互斥。读页持读锁；清缓存持写锁期间，新的读页进不来，
+/// 已经在跑的读页也会先结束。计数加 Notify 会在「看见 0」和「开始等」之间丢唤醒，
+/// 超时后仍去删正在写的目录。
+static READ_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
-/// RAII 守卫：在解析/抽取期间持有，保证缓存清理能等到它退出。
-pub(crate) struct ReaderInflightGuard;
+/// 一次 `prepare_reader_pages` 的在途标记。守卫活着时，清缓存拿不到写锁。
+pub(crate) struct ReaderInflightGuard {
+    _permit: tokio::sync::RwLockReadGuard<'static, ()>,
+}
 
 impl ReaderInflightGuard {
-    pub(crate) fn enter() -> Self {
-        INFLIGHT_READS.fetch_add(1, Ordering::SeqCst);
-        Self
+    pub(crate) async fn enter() -> Self {
+        Self {
+            _permit: READ_GATE.read().await,
+        }
     }
 }
 
-impl Drop for ReaderInflightGuard {
-    fn drop(&mut self) {
-        INFLIGHT_READS.fetch_sub(1, Ordering::SeqCst);
-        INFLIGHT_READ_IDLE.notify_waiters();
-    }
+/// 清 reader / mobi 缓存时持有。拿不到就不要删：超时后照样删，会删到还在读的那本。
+pub(crate) struct ReaderClearPermit {
+    _permit: tokio::sync::RwLockWriteGuard<'static, ()>,
 }
 
-/// 等待在途读页退出（最多 `timeout`），返回是否已空闲。
-/// 超时也返回 false 而**不阻塞清理** —— 腾空间比等一个卡住的读页更重要。
-pub async fn wait_reader_reads_idle(timeout: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub(crate) fn acquire_reader_clear_permit(timeout: Duration) -> Option<ReaderClearPermit> {
+    let start = std::time::Instant::now();
     loop {
-        if INFLIGHT_READS.load(Ordering::SeqCst) == 0 {
-            return true;
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        tokio::select! {
-            _ = INFLIGHT_READ_IDLE.notified() => {}
-            _ = tokio::time::sleep_until(deadline) => {}
+        match READ_GATE.try_write() {
+            Ok(permit) => return Some(ReaderClearPermit { _permit: permit }),
+            Err(_) => {
+                if start.elapsed() >= timeout {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
         }
     }
 }
@@ -782,5 +776,19 @@ mod tests {
         assert_eq!(left, MAX_READER_CACHE_BOOKS);
         assert!(!dirs[0].exists(), "oldest book dir should be evicted");
         assert!(dirs[11].exists(), "newest book dir should remain");
+    }
+
+    #[tokio::test]
+    async fn clear_permit_blocks_until_the_read_finishes() {
+        let guard = ReaderInflightGuard::enter().await;
+        let blocked = tokio::task::spawn_blocking(|| {
+            acquire_reader_clear_permit(std::time::Duration::from_millis(80)).is_none()
+        });
+        assert!(blocked.await.unwrap(), "读页未结束时不能开始删");
+        drop(guard);
+        let acquired = tokio::task::spawn_blocking(|| {
+            acquire_reader_clear_permit(std::time::Duration::from_millis(500)).is_some()
+        });
+        assert!(acquired.await.unwrap());
     }
 }

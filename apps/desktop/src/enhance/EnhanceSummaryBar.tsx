@@ -2,8 +2,10 @@ import { stateLabel, type Messages } from "../i18n";
 import type { DiskEstimate, JobStatus, ValidateResult } from "../types";
 import {
   formatBytes,
+  qualityAppliesTo,
   startBlockReason,
   type Container,
+  type ExportQuality,
   type ImgFmt,
 } from "./enhanceViewModel";
 
@@ -13,6 +15,7 @@ type Props = {
   outputDir: string | null;
   container: Container;
   imageFormat: ImgFmt;
+  quality: ExportQuality;
   source: string | null;
   sourceLoading: boolean;
   validation: ValidateResult | null;
@@ -43,6 +46,13 @@ function imageFormatLabel(i18n: Messages, f: ImgFmt): string {
   return i18n.formatSame;
 }
 
+function qualityLabel(i18n: Messages, q: ExportQuality): string {
+  if (q === "high") return i18n.qualityHigh;
+  if (q === "compact") return i18n.qualityCompact;
+  if (q === "minimal") return i18n.qualityMinimal;
+  return i18n.qualityBalanced;
+}
+
 /** 底部固定操作栏：资源预估 + 不可用原因 + 提交；任务进行时切换为进度条 */
 export function EnhanceSummaryBar({
   i18n,
@@ -50,6 +60,7 @@ export function EnhanceSummaryBar({
   outputDir,
   container,
   imageFormat,
+  quality,
   source,
   sourceLoading,
   validation,
@@ -130,6 +141,12 @@ export function EnhanceSummaryBar({
         <>
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-5 gap-y-1 text-xs text-ink-500 dark:text-fg-muted">
             <span>
+              {i18n.estOutput}{" "}
+              <b className="font-semibold tabular-nums text-ink-800 dark:text-fg">
+                {estimate ? formatBytes(estimate.outputBytes) : "—"}
+              </b>
+            </span>
+            <span>
               {i18n.estUsage}{" "}
               <b
                 className={`font-semibold tabular-nums ${
@@ -152,6 +169,7 @@ export function EnhanceSummaryBar({
                 {i18n.outputLabel}{" "}
                 <b className="font-semibold text-ink-800 dark:text-fg">
                   {containerLabel(i18n, container)} · {imageFormatLabel(i18n, imageFormat)}
+                  {qualityAppliesTo(imageFormat) ? ` · ${qualityLabel(i18n, quality)}` : ""}
                 </b>
               </span>
             )}

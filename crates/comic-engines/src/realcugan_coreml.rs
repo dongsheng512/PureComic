@@ -113,16 +113,15 @@ fn wants_png(params: &crate::EnhanceParams) -> bool {
     !matches!(params.output_format.as_deref(), Some("jpg") | Some("jpeg"))
 }
 
-fn run_file(
-    input: &Path,
-    output: &Path,
-    png: bool,
-    cancel: &CancellationToken,
-) -> Result<(), EngineError> {
+/// Reader cache leaves this unset and keeps quality 98. Whole-book export passes the manifest value.
+fn jpeg_quality_of(params: &crate::EnhanceParams) -> u8 {
+    params.jpeg_quality.unwrap_or(98).clamp(1, 100)
+}
+
+fn infer_rgb(input: &Path, cancel: &CancellationToken) -> Result<RgbImage, EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
-    let t0 = Instant::now();
     let rgb = open_rgb(input)?;
     let src_w = rgb.width();
     let src_h = rgb.height();
@@ -196,38 +195,84 @@ fn run_file(
     }
     let expect = ow as usize * oh as usize * 3;
     out_buf.truncate(expect);
-    let cropped = RgbImage::from_raw(ow, oh, out_buf)
-        .ok_or_else(|| EngineError::Image("无法组装输出".into()))?;
+    RgbImage::from_raw(ow, oh, out_buf).ok_or_else(|| EngineError::Image("无法组装输出".into()))
+}
 
+fn write_output(
+    cropped: &RgbImage,
+    output: &Path,
+    png: bool,
+    quality: u8,
+    max_side: u32,
+) -> Result<(), EngineError> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| EngineError::Io(e.to_string()))?;
     }
+    let fitted = crate::jpeg_encode::fit_long_side(cropped, max_side);
     if png {
-        cropped
+        fitted
             .save_with_format(output, image::ImageFormat::Png)
             .map_err(|e| EngineError::Image(e.to_string()))?;
     } else {
-        use std::io::BufWriter;
-        let file = std::fs::File::create(output).map_err(|e| EngineError::Io(e.to_string()))?;
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), 98);
-        enc.encode(
-            cropped.as_raw(),
-            cropped.width(),
-            cropped.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|e| EngineError::Image(e.to_string()))?;
+        crate::jpeg_encode::write_comic_jpeg(output, &fitted, quality)?;
     }
+    Ok(())
+}
+
+fn run_file(
+    input: &Path,
+    output: &Path,
+    png: bool,
+    quality: u8,
+    max_side: u32,
+    cancel: &CancellationToken,
+) -> Result<(), EngineError> {
+    let t0 = Instant::now();
+    let cropped = infer_rgb(input, cancel)?;
+    let (w, h) = cropped.dimensions();
+    write_output(&cropped, output, png, quality, max_side)?;
     info!(
-        w = src_w,
-        h = src_h,
-        out_w = ow,
-        out_h = oh,
+        w,
+        h,
         png,
         ms = t0.elapsed().as_millis() as u64,
         "realcugan-coreml page"
     );
     Ok(())
+}
+
+type EncodeJob = std::thread::JoinHandle<Result<(), EngineError>>;
+
+async fn settle_encode(
+    slot: &mut Option<EncodeJob>,
+    queued: &mut bool,
+    ok: &mut u32,
+    failed: &mut u32,
+    last_err: &mut Option<EngineError>,
+) {
+    if !*queued {
+        return;
+    }
+    *queued = false;
+    let Some(handle) = slot.take() else {
+        return;
+    };
+    let joined = tokio::task::spawn_blocking(move || handle.join()).await;
+    let result = match joined {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(EngineError::Process("编码线程异常退出".into())),
+        Err(e) => Err(EngineError::Process(e.to_string())),
+    };
+    match result {
+        Ok(()) => *ok += 1,
+        Err(e) => {
+            warn!(error = %e, "cugan-coreml encode failed");
+            *failed += 1;
+            if last_err.is_none() {
+                *last_err = Some(e);
+            }
+        }
+    }
 }
 
 fn model_availability(path: &Path) -> EngineAvailability {
@@ -327,9 +372,13 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
             EnhanceBatchRequest::SingleFile { params, .. }
             | EnhanceBatchRequest::Directory { params, .. } => params.noise_level,
         };
-        let png = match &req {
+        let (png, quality, max_side) = match &req {
             EnhanceBatchRequest::SingleFile { params, .. }
-            | EnhanceBatchRequest::Directory { params, .. } => wants_png(params),
+            | EnhanceBatchRequest::Directory { params, .. } => (
+                wants_png(params),
+                jpeg_quality_of(params),
+                params.output_max_side.unwrap_or(0),
+            ),
         };
         // 模型加载（首次含同步编译）限时；卡死时置毒标记并交接锁
         {
@@ -361,8 +410,9 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                 let inp = input.clone();
                 let outp = output.clone();
                 let cancel2 = cancel.clone();
-                let mut handle =
-                    tokio::task::spawn_blocking(move || run_file(&inp, &outp, png, &cancel2));
+                let mut handle = tokio::task::spawn_blocking(move || {
+                    run_file(&inp, &outp, png, quality, max_side, &cancel2)
+                });
                 match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle).await {
                     Ok(r) => {
                         r.map_err(|e| EngineError::Process(e.to_string()))??;
@@ -401,8 +451,19 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                     .collect();
                 entries.sort();
                 let out_ext = if png { "png" } else { "jpg" };
+                // 上一页的编码与下一页的推理重叠。只保留一页的输出缓冲。
+                let mut encoding: Option<EncodeJob> = None;
+                let mut queued = false;
                 for path in entries {
                     if cancel.is_cancelled() {
+                        settle_encode(
+                            &mut encoding,
+                            &mut queued,
+                            &mut ok,
+                            &mut failed,
+                            &mut last_err,
+                        )
+                        .await;
                         return Err(EngineError::Cancelled);
                     }
                     let name = match path.file_name() {
@@ -411,18 +472,19 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                     };
                     let dest = output_dir.join(name).with_extension(out_ext);
                     let p2 = path.clone();
-                    let d2 = dest.clone();
                     let c2 = cancel.clone();
-                    let mut handle =
-                        tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, &c2));
-                    match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle).await {
-                        Ok(Ok(Ok(()))) => ok += 1,
+                    let mut handle = tokio::task::spawn_blocking(move || infer_rgb(&p2, &c2));
+                    let inferred = match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle)
+                        .await
+                    {
+                        Ok(Ok(Ok(img))) => Some(img),
                         Ok(Ok(Err(e))) => {
                             warn!(error = %e, file = %path.display(), "cugan-coreml page failed");
                             failed += 1;
                             if last_err.is_none() {
                                 last_err = Some(e);
                             }
+                            None
                         }
                         Ok(Err(join)) => {
                             let e = EngineError::Process(join.to_string());
@@ -431,9 +493,17 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                             if last_err.is_none() {
                                 last_err = Some(e);
                             }
+                            None
                         }
                         Err(_) => {
-                            // 页级超时：置毒 + 锁交接，整批中止
+                            settle_encode(
+                                &mut encoding,
+                                &mut queued,
+                                &mut ok,
+                                &mut failed,
+                                &mut last_err,
+                            )
+                            .await;
                             COREML_POISONED.store(true, Ordering::Relaxed);
                             let g = guard.take();
                             tokio::spawn(async move {
@@ -444,8 +514,32 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
                             warn!(file = %path.display(), "cugan-coreml predict timed out");
                             return Err(EngineError::Timeout(PAGE_PREDICT_TIMEOUT));
                         }
-                    }
+                    };
+                    let Some(img) = inferred else {
+                        continue;
+                    };
+                    // 推理已经结束，这里才等上一页写完，避免两页 2× 缓冲叠在一起
+                    settle_encode(
+                        &mut encoding,
+                        &mut queued,
+                        &mut ok,
+                        &mut failed,
+                        &mut last_err,
+                    )
+                    .await;
+                    encoding = Some(std::thread::spawn(move || {
+                        write_output(&img, &dest, png, quality, max_side)
+                    }));
+                    queued = true;
                 }
+                settle_encode(
+                    &mut encoding,
+                    &mut queued,
+                    &mut ok,
+                    &mut failed,
+                    &mut last_err,
+                )
+                .await;
                 info!(ok, failed, png, "realcugan-coreml directory done");
                 if ok == 0 {
                     return Err(last_err.unwrap_or_else(|| {
@@ -479,10 +573,11 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let mut img = RgbImage::new(200, 280);
+        // 宽 400 会切成两块，覆盖「下一块预测和上一块贴图重叠」
+        let mut img = RgbImage::new(400, 280);
         for y in 0..280 {
-            for x in 0..200 {
-                img.put_pixel(x, y, Rgb([(40 + x / 2) as u8, (80 + y / 3) as u8, 160]));
+            for x in 0..400 {
+                img.put_pixel(x, y, Rgb([(40 + x / 4) as u8, (80 + y / 3) as u8, 160]));
             }
         }
         let inp = dir.path().join("in.png");
@@ -490,9 +585,9 @@ mod tests {
         image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
         let engine = RealCuganCoreMlEngine::new(model);
         engine.load_for_noise(0).unwrap();
-        run_file(&inp, &out, false, &CancellationToken::new()).unwrap();
+        run_file(&inp, &out, false, 98, 0, &CancellationToken::new()).unwrap();
         let got = image::open(&out).unwrap().to_rgb8();
-        assert_eq!(got.dimensions(), (400, 560));
+        assert_eq!(got.dimensions(), (800, 560));
         let mut live = 0u32;
         for p in got.pixels() {
             if p.0[1] > 20 && p.0[2] > 20 {
@@ -516,7 +611,7 @@ mod tests {
         let out = dir.path().join("out.jpg");
         let engine = RealCuganCoreMlEngine::new(model_path());
         engine.load_for_noise(0).unwrap();
-        run_file(&inp, &out, false, &CancellationToken::new()).unwrap();
+        run_file(&inp, &out, false, 98, 0, &CancellationToken::new()).unwrap();
         let got = image::open(&out).unwrap();
         eprintln!("real_page out {}x{}", got.width(), got.height());
     }

@@ -23,6 +23,9 @@ pub struct AppConfig {
     /// Batch enhance input cap: pages larger than this are downscaled (aspect
     /// preserved) before inference, bounding engine output buffers.
     pub engine_input_max_side: u32,
+    /// Long side of a whole-book export page after inference. 0 keeps the
+    /// engine resolution. The reader cache does not use this.
+    pub output_max_side: u32,
     /// Force mock engine. Default **false** (prefer real Waifu2x when bundled).
     /// Set true for CI / offline dev without GPU binary.
     pub use_mock_engine: bool,
@@ -69,6 +72,7 @@ impl Default for AppConfig {
             page_timeout_secs: 180,
             max_image_side: 16_384,
             engine_input_max_side: 4096,
+            output_max_side: 3200,
             use_mock_engine: false,
             waifu2x_bin: None,
             models_dir: None,

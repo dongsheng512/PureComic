@@ -121,6 +121,7 @@ fn run_file(
     input: &Path,
     output: &Path,
     png: bool,
+    max_side: u32,
     cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     if cancel.is_cancelled() {
@@ -206,21 +207,13 @@ fn run_file(
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| EngineError::Io(e.to_string()))?;
     }
+    let fitted = crate::jpeg_encode::fit_long_side(&cropped, max_side);
     if png {
-        cropped
+        fitted
             .save_with_format(output, image::ImageFormat::Png)
             .map_err(|e| EngineError::Image(e.to_string()))?;
     } else {
-        use std::io::BufWriter;
-        let file = std::fs::File::create(output).map_err(|e| EngineError::Io(e.to_string()))?;
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), 94);
-        enc.encode(
-            cropped.as_raw(),
-            cropped.width(),
-            cropped.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|e| EngineError::Image(e.to_string()))?;
+        crate::jpeg_encode::write_comic_jpeg(output, &fitted, 94)?;
     }
     info!(
         w = src_w,
@@ -327,9 +320,11 @@ impl UpscaleEngine for AnimeVideoCoreMlEngine {
             g = COREML_BATCH_LOCK.lock() => g,
             _ = cancel.cancelled() => return Err(EngineError::Cancelled),
         });
-        let png = match &req {
+        let (png, max_side) = match &req {
             EnhanceBatchRequest::SingleFile { params, .. }
-            | EnhanceBatchRequest::Directory { params, .. } => wants_png(params),
+            | EnhanceBatchRequest::Directory { params, .. } => {
+                (wants_png(params), params.output_max_side.unwrap_or(0))
+            }
         };
         // 模型加载（首次含同步编译）限时；卡死时置毒标记并交接锁
         {
@@ -361,8 +356,9 @@ impl UpscaleEngine for AnimeVideoCoreMlEngine {
                 let inp = input.clone();
                 let outp = output.clone();
                 let cancel2 = cancel.clone();
-                let mut handle =
-                    tokio::task::spawn_blocking(move || run_file(&inp, &outp, png, &cancel2));
+                let mut handle = tokio::task::spawn_blocking(move || {
+                    run_file(&inp, &outp, png, max_side, &cancel2)
+                });
                 match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle).await {
                     Ok(r) => {
                         r.map_err(|e| EngineError::Process(e.to_string()))??;
@@ -414,7 +410,7 @@ impl UpscaleEngine for AnimeVideoCoreMlEngine {
                     let d2 = dest.clone();
                     let c2 = cancel.clone();
                     let mut handle =
-                        tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, &c2));
+                        tokio::task::spawn_blocking(move || run_file(&p2, &d2, png, max_side, &c2));
                     match tokio::time::timeout(PAGE_PREDICT_TIMEOUT, &mut handle).await {
                         Ok(Ok(Ok(()))) => ok += 1,
                         Ok(Ok(Err(e))) => {
@@ -490,7 +486,7 @@ mod tests {
         image::DynamicImage::ImageRgb8(img).save(&inp).unwrap();
         let engine = AnimeVideoCoreMlEngine::new(model);
         engine.load().unwrap();
-        run_file(&inp, &out, false, &CancellationToken::new()).unwrap();
+        run_file(&inp, &out, false, 0, &CancellationToken::new()).unwrap();
         let got = image::open(&out).unwrap().to_rgb8();
         assert_eq!(got.dimensions(), (320, 400));
         let mut live = 0u32;

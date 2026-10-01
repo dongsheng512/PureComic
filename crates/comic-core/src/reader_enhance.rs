@@ -7,9 +7,12 @@ use crate::preview::{options_from_dto, EnhanceOptionsDto};
 use crate::reader::{extract_original, source_cache_key, ReaderPageFile};
 use comic_engines::{EnhanceBatchRequest, UpscaleEngine};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -18,42 +21,169 @@ pub const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Extra safety: do not keep more than this many enhanced pages.
 pub const MAX_CACHE_FILES: usize = 400;
 
-/// 在途增强计数：clear_cache 需等待归零，避免删除推理中的缓存目录
-static INFLIGHT_ENHANCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static INFLIGHT_IDLE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// 在途增强按缓存键分开。清一本书只拦住那本书的新任务，并等它自己的计数归零。
+/// 全局计数留给「清空整组」。Notify 必须先 enable 再读计数，否则最后一次退出的
+/// 通知会丢，等待方睡到超时。
+static TOTAL_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_CLEARING: AtomicBool = AtomicBool::new(false);
+static GLOBAL_IDLE: Notify = Notify::const_new();
+static GLOBAL_RESUME: Notify = Notify::const_new();
 
-struct InflightGuard;
+struct GateState {
+    inflight: AtomicUsize,
+    clearing: AtomicBool,
+    idle: Notify,
+    resume: Notify,
+}
 
-impl InflightGuard {
-    fn enter() -> Self {
-        INFLIGHT_ENHANCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Self
+fn gates() -> &'static Mutex<HashMap<String, Arc<GateState>>> {
+    static G: OnceLock<Mutex<HashMap<String, Arc<GateState>>>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn gate_for(key: &str) -> Arc<GateState> {
+    let mut map = gates().lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(key.to_string())
+        .or_insert_with(|| {
+            Arc::new(GateState {
+                inflight: AtomicUsize::new(0),
+                clearing: AtomicBool::new(false),
+                idle: Notify::new(),
+                resume: Notify::new(),
+            })
+        })
+        .clone()
+}
+
+fn release_inflight(gate: &GateState) {
+    if gate.inflight.fetch_sub(1, Ordering::SeqCst) == 1 {
+        gate.idle.notify_waiters();
+    }
+    if TOTAL_INFLIGHT.fetch_sub(1, Ordering::SeqCst) == 1 {
+        GLOBAL_IDLE.notify_waiters();
     }
 }
 
-impl Drop for InflightGuard {
+struct EnhanceInflight {
+    gate: Arc<GateState>,
+}
+
+impl Drop for EnhanceInflight {
     fn drop(&mut self) {
-        INFLIGHT_ENHANCES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        INFLIGHT_IDLE.notify_waiters();
+        release_inflight(&self.gate);
     }
 }
 
-/// 等待在途增强退出（最多 timeout），返回是否已空闲。
-pub async fn wait_reader_enhance_idle(timeout: std::time::Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+/// 清缓存期间新的增强进不来。`global` 拦住所有键；否则只拦住 `keys`。
+pub(crate) struct EnhanceClearGuard {
+    keys: Vec<Arc<GateState>>,
+    global: bool,
+}
+
+impl Drop for EnhanceClearGuard {
+    fn drop(&mut self) {
+        if self.global {
+            GLOBAL_CLEARING.store(false, Ordering::SeqCst);
+            GLOBAL_RESUME.notify_waiters();
+        }
+        for gate in &self.keys {
+            gate.clearing.store(false, Ordering::SeqCst);
+            gate.resume.notify_waiters();
+        }
+    }
+}
+
+pub(crate) fn begin_clear_all() -> EnhanceClearGuard {
+    GLOBAL_CLEARING.store(true, Ordering::SeqCst);
+    EnhanceClearGuard {
+        keys: Vec::new(),
+        global: true,
+    }
+}
+
+pub(crate) fn begin_clear_keys(keys: &[String]) -> EnhanceClearGuard {
+    let keys: Vec<Arc<GateState>> = keys.iter().map(|k| gate_for(k)).collect();
+    for gate in &keys {
+        gate.clearing.store(true, Ordering::SeqCst);
+    }
+    EnhanceClearGuard {
+        keys,
+        global: false,
+    }
+}
+
+async fn enter_enhance(key: &str) -> EnhanceInflight {
+    let gate = gate_for(key);
     loop {
-        if INFLIGHT_ENHANCES.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        let ready = {
+            let global_resume = GLOBAL_RESUME.notified();
+            let key_resume = gate.resume.notified();
+            tokio::pin!(global_resume);
+            tokio::pin!(key_resume);
+            global_resume.as_mut().enable();
+            key_resume.as_mut().enable();
+            if !GLOBAL_CLEARING.load(Ordering::SeqCst) && !gate.clearing.load(Ordering::SeqCst) {
+                TOTAL_INFLIGHT.fetch_add(1, Ordering::SeqCst);
+                gate.inflight.fetch_add(1, Ordering::SeqCst);
+                if GLOBAL_CLEARING.load(Ordering::SeqCst) || gate.clearing.load(Ordering::SeqCst) {
+                    release_inflight(&gate);
+                    false
+                } else {
+                    true
+                }
+            } else {
+                tokio::select! {
+                    _ = global_resume => {}
+                    _ = key_resume => {}
+                }
+                false
+            }
+        };
+        if ready {
+            return EnhanceInflight { gate };
+        }
+    }
+}
+
+async fn wait_counter(
+    counter: &AtomicUsize,
+    idle: &Notify,
+    deadline: tokio::time::Instant,
+) -> bool {
+    loop {
+        let notified = idle.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if counter.load(Ordering::SeqCst) == 0 {
             return true;
         }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return false;
         }
         tokio::select! {
-            _ = INFLIGHT_IDLE.notified() => {}
-            _ = tokio::time::sleep_until(deadline) => {}
+            _ = notified => {}
+            _ = tokio::time::sleep_until(deadline) => return false,
         }
     }
+}
+
+pub(crate) async fn wait_paused(guard: &EnhanceClearGuard, timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    if guard.global {
+        return wait_counter(&TOTAL_INFLIGHT, &GLOBAL_IDLE, deadline).await;
+    }
+    for gate in &guard.keys {
+        if !wait_counter(&gate.inflight, &gate.idle, deadline).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// 等待全部在途增强退出。不设置清理标志，只给还在用旧调用点的地方。
+pub async fn wait_reader_enhance_idle(timeout: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    wait_counter(&TOTAL_INFLIGHT, &GLOBAL_IDLE, deadline).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +363,20 @@ pub fn evict_cache(cfg: &AppConfig, max_bytes: u64, max_files: usize) -> AppResu
     Ok(())
 }
 
+/// 与 `cache_stats` 同一套过滤：只数已经落地的图片，临时文件和中间目录不算。
+pub(crate) fn weigh_cache_dir(dir: &Path) -> (SystemTime, u64, u64) {
+    let files = collect_cache_files(dir);
+    let mut newest = SystemTime::UNIX_EPOCH;
+    let mut bytes = 0u64;
+    for (_, modified, len) in &files {
+        bytes = bytes.saturating_add(*len);
+        if *modified > newest {
+            newest = *modified;
+        }
+    }
+    (newest, bytes, files.len() as u64)
+}
+
 pub fn cache_stats(cfg: &AppConfig) -> EnhanceCacheStats {
     let root = cfg.reader_enhance_dir();
     let files = if root.is_dir() {
@@ -303,6 +447,8 @@ fn reader_engine_params(opts: &crate::job::EnhanceOptions) -> comic_engines::Enh
     params.output_format = Some("jpg".into());
     params.tile_size = Some(READER_TILE);
     params.jobs = Some("2:2:2".into());
+    // Reader cache keeps the 2× of MAX_INPUT_SIDE. Export cap is whole-book only.
+    params.output_max_side = None;
     if params.engine == comic_engines::EngineKind::RealEsrganCoreMl
         || params.engine == comic_engines::EngineKind::AnimeVideoCoreMl
     {
@@ -604,7 +750,8 @@ pub async fn enhance_pages(
     cfg: &AppConfig,
     cancel: CancellationToken,
 ) -> AppResult<Vec<ReaderPageFile>> {
-    let _inflight = InflightGuard::enter();
+    let key = source_cache_key(source);
+    let _inflight = enter_enhance(&key).await;
     if page_indexes.is_empty() {
         return Err(AppError::invalid("需要至少一页"));
     }

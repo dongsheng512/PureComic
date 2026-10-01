@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 export function Field({
   label,
@@ -11,7 +11,7 @@ export function Field({
 }) {
   return (
     <div className="min-w-0">
-      <div className="mb-2 flex min-h-4 items-center justify-between gap-3">
+      <div className="mb-1.5 flex min-h-4 items-center justify-between gap-3">
         <p className="label shrink-0">{label}</p>
         {hint && (
           <p className="field-hint min-w-0 truncate text-right" title={hint}>
@@ -53,19 +53,76 @@ export function Segmented<T extends string>({
   );
 }
 
+/** 下拉列表的估算高度：每项一行 + 列表内边距 + 与触发按钮之间的间距 */
+const LIST_ITEM_H = 36;
+const LIST_PAD = 8;
+const LIST_GAP = 6;
+
+/**
+ * 下拉列表向上还是向下展开。
+ * 下方放不下整个列表、且上方更宽敞时向上弹——否则最后一个选项会落到可视区之外，
+ * 用户得先滚动页面才能点选。
+ */
+export function pickPlacement(args: {
+  anchorTop: number;
+  anchorBottom: number;
+  boundsTop: number;
+  boundsBottom: number;
+  itemCount: number;
+}): "up" | "down" {
+  const need = args.itemCount * LIST_ITEM_H + LIST_PAD + LIST_GAP;
+  const below = args.boundsBottom - args.anchorBottom;
+  const above = args.anchorTop - args.boundsTop;
+  return below < need && above > below ? "up" : "down";
+}
+
+/** 最近的可滚动祖先的可视范围；没有可滚动祖先时退回视口。 */
+function scrollBounds(el: HTMLElement | null): { top: number; bottom: number } {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    if (/(auto|scroll|overlay)/.test(getComputedStyle(node).overflowY)) {
+      const r = node.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom };
+    }
+    node = node.parentElement;
+  }
+  const h = typeof window === "undefined" ? 0 : window.innerHeight;
+  return { top: 0, bottom: h };
+}
+
 export function SelectBox<T extends string>({
   value,
   onChange,
   options,
+  disabled,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: { id: T; label: string }[];
+  /** 外部禁用（例如 PNG 无损格式下画质档位不生效） */
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<"up" | "down">("down");
   const rootRef = useRef<HTMLDivElement>(null);
   const selected = options.find((o) => o.id === value) ?? options[0];
-  const single = options.length <= 1;
+  const locked = disabled || options.length <= 1;
+
+  const place = useCallback(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const b = scrollBounds(el);
+    setPlacement(
+      pickPlacement({
+        anchorTop: r.top,
+        anchorBottom: r.bottom,
+        boundsTop: b.top,
+        boundsBottom: b.bottom,
+        itemCount: options.length,
+      }),
+    );
+  }, [options.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -83,15 +140,28 @@ export function SelectBox<T extends string>({
     };
   }, [open]);
 
+  // 展开期间页面/容器滚动会改变可用空间，实时重算，避免列表又跑到屏幕外
+  useEffect(() => {
+    if (!open) return;
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, place]);
+
   return (
     <div className="relative" ref={rootRef}>
       <button
         type="button"
-        disabled={single}
+        disabled={locked}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => {
-          if (!single) setOpen((v) => !v);
+          if (locked) return;
+          if (!open) place();
+          setOpen((v) => !v);
         }}
         className={`w-full h-10 flex items-center justify-between gap-2 rounded-full border px-3 text-sm text-left transition ${
           open
@@ -111,10 +181,12 @@ export function SelectBox<T extends string>({
           />
         </svg>
       </button>
-      {open && !single && (
+      {open && !locked && (
         <ul
           role="listbox"
-          className="absolute z-30 mt-1.5 w-full overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/10 dark:bg-surface-raised/95 dark:backdrop-blur-md"
+          className={`absolute z-30 max-h-72 w-full overflow-y-auto rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/10 dark:bg-surface-raised/95 dark:backdrop-blur-md ${
+            placement === "up" ? "bottom-full mb-1.5" : "mt-1.5"
+          }`}
         >
           {options.map((opt) => {
             const active = opt.id === value;

@@ -49,12 +49,23 @@ pub struct Scheduler {
     jobs: Arc<RwLock<HashMap<String, LiveJob>>>,
     on_progress: Arc<RwLock<Option<ProgressCallback>>>,
     library: StdMutex<crate::library::LibraryStore>,
-    reader_enhance_cancels: Arc<StdMutex<Vec<(u64, CancellationToken)>>>,
+    reader_enhance_cancels: Arc<StdMutex<Vec<(u64, String, CancellationToken)>>>,
     reader_enhance_cancel_seq: AtomicU64,
     /// Serializes resume discovery with finished-job GC so a resumed id is not deleted mid-insert.
     gc: tokio::sync::Mutex<()>,
     /// Terminal disk jobs: reuse JobStatus while manifest mtime/len are unchanged.
     disk_status_cache: Arc<StdMutex<HashMap<String, CachedDiskStatus>>>,
+    /// Last successful source validate. Estimate and job creation reuse it.
+    source_validation: Arc<StdMutex<Option<CachedValidation>>>,
+    /// One in-flight validate per scheduler, so estimate does not scan the book again.
+    validate_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct CachedValidation {
+    path: PathBuf,
+    mtime_nanos: u128,
+    len: u64,
+    result: crate::archive::ValidateResult,
 }
 
 struct CachedDiskStatus {
@@ -63,16 +74,52 @@ struct CachedDiskStatus {
     status: JobStatus,
 }
 
+fn source_stamp(path: &Path) -> Option<(u128, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let nanos = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((nanos, meta.len()))
+}
+
 struct UnregisterReaderCancel {
-    slots: Arc<StdMutex<Vec<(u64, CancellationToken)>>>,
+    slots: Arc<StdMutex<Vec<(u64, String, CancellationToken)>>>,
     id: u64,
 }
 
 impl Drop for UnregisterReaderCancel {
     fn drop(&mut self) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        slots.retain(|(slot_id, _)| *slot_id != self.id);
+        slots.retain(|(slot_id, _, _)| *slot_id != self.id);
     }
+}
+
+/// 在 blocking 线程里删缓存。需要时先独占读页，再拿 mobi 构建锁，锁盖住整个 `op`。
+async fn blocking_cache_op<T, F>(gate_reads: bool, lock_mobi: bool, op: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _reads = if gate_reads {
+            Some(
+                crate::reader::acquire_reader_clear_permit(Duration::from_secs(5))
+                    .ok_or_else(|| AppError::invalid("正在读取，请稍后再清理缓存"))?,
+            )
+        } else {
+            None
+        };
+        let _mobi = if lock_mobi {
+            Some(crate::ebook::mobi_build_lock())
+        } else {
+            None
+        };
+        op()
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("缓存清理 join: {e}")))?
 }
 
 impl Scheduler {
@@ -97,6 +144,8 @@ impl Scheduler {
             reader_enhance_cancel_seq: AtomicU64::new(0),
             gc: tokio::sync::Mutex::new(()),
             disk_status_cache: Arc::new(StdMutex::new(HashMap::new())),
+            source_validation: Arc::new(StdMutex::new(None)),
+            validate_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -113,7 +162,9 @@ impl Scheduler {
         let spawn = std::thread::Builder::new()
             .name("cache-maintenance".into())
             .spawn(move || {
-                if let Err(e) = crate::ebook::evict_mobi_cache(&cfg, None) {
+                // 不拿读页写锁：拿到之后会把「刚翻完的那本」也删掉，下一页整本重建。
+                // 正在读的目录由 pin 跳过。
+                if let Err(e) = crate::ebook::evict_mobi_cache_blocking(&cfg, None) {
                     warn!(error = %e.message, "mobi cache eviction failed");
                 }
             });
@@ -143,6 +194,8 @@ impl Scheduler {
             reader_enhance_cancel_seq: AtomicU64::new(0),
             gc: tokio::sync::Mutex::new(()),
             disk_status_cache: Arc::new(StdMutex::new(HashMap::new())),
+            source_validation: Arc::new(StdMutex::new(None)),
+            validate_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -184,12 +237,22 @@ impl Scheduler {
         let normalized = options.normalize_realcugan();
         self.ensure_engine_ready(options.engine, explicit_engine)?;
         let engine = self.pick_engine(options.engine)?;
-        crate::estimate::assert_disk_ok(
-            &source,
-            options.scale.as_u8(),
-            &self.cfg,
-            Some(&output.dir),
-        )?;
+        let est = self
+            .estimate(
+                &source.to_string_lossy(),
+                crate::estimate::EstimateParams {
+                    scale: options.scale.as_u8(),
+                    engine: options.engine,
+                    image_format: output.image_format,
+                },
+                Some(&output.dir),
+            )
+            .await?;
+        if !est.ok {
+            return Err(AppError::disk(
+                est.message.unwrap_or_else(|| "磁盘空间不足".into()),
+            ));
+        }
         if !output.dir.exists() {
             std::fs::create_dir_all(&output.dir)?;
         }
@@ -613,15 +676,73 @@ impl Scheduler {
         &self,
         path: &str,
     ) -> AppResult<crate::archive::ValidateResult> {
-        crate::archive::validate_source(PathBuf::from(path).as_path(), &self.cfg)
+        let pathb = PathBuf::from(path);
+        let _gate = self.validate_gate.lock().await;
+        if let Some(hit) = self.cached_validation(&pathb) {
+            return Ok(hit);
+        }
+        let cfg = self.cfg.clone();
+        let path_for_task = pathb.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::archive::validate_source(&path_for_task, &cfg)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("校验源 join: {e}")))??;
+        self.store_validation(&pathb, &result);
+        Ok(result)
+    }
+
+    fn cached_validation(&self, path: &Path) -> Option<crate::archive::ValidateResult> {
+        let (mtime_nanos, len) = source_stamp(path)?;
+        let guard = self
+            .source_validation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cached = guard.as_ref()?;
+        if cached.path == path && cached.mtime_nanos == mtime_nanos && cached.len == len {
+            Some(cached.result.clone())
+        } else {
+            None
+        }
+    }
+
+    fn store_validation(&self, path: &Path, result: &crate::archive::ValidateResult) {
+        let Some((mtime_nanos, len)) = source_stamp(path) else {
+            return;
+        };
+        let mut guard = self
+            .source_validation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(CachedValidation {
+            path: path.to_path_buf(),
+            mtime_nanos,
+            len,
+            result: result.clone(),
+        });
     }
 
     pub async fn estimate(
         &self,
         path: &str,
-        scale: u8,
+        params: crate::estimate::EstimateParams,
+        output_dir: Option<&Path>,
     ) -> AppResult<crate::estimate::DiskEstimate> {
-        crate::estimate::estimate_disk_usage(PathBuf::from(path).as_path(), scale, &self.cfg, None)
+        let validated = self.validate_source_path(path).await?;
+        let cfg = self.cfg.clone();
+        let source = PathBuf::from(path);
+        let output = output_dir.map(Path::to_path_buf);
+        tokio::task::spawn_blocking(move || {
+            crate::estimate::estimate_validated(
+                &source,
+                params,
+                &cfg,
+                output.as_deref(),
+                &validated,
+            )
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("磁盘估算 join: {e}")))
     }
 
     pub async fn preview_page(
@@ -707,12 +828,13 @@ impl Scheduler {
         let id = self
             .reader_enhance_cancel_seq
             .fetch_add(1, Ordering::Relaxed);
+        let cache_key = crate::reader::source_cache_key(src.as_path());
         {
             let mut slots = self
                 .reader_enhance_cancels
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            slots.push((id, cancel.clone()));
+            slots.push((id, cache_key, cancel.clone()));
         }
         let _unreg = UnregisterReaderCancel {
             slots: self.reader_enhance_cancels.clone(),
@@ -735,9 +857,44 @@ impl Scheduler {
             .reader_enhance_cancels
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        for (_, t) in slots.drain(..) {
-            t.cancel();
+        for (_, _, token) in slots.drain(..) {
+            token.cancel();
         }
+    }
+
+    /// 只取消这一本书的在途增强。槽位留给任务自己的 Drop 摘掉，
+    /// 避免把别的书的取消令牌一起排空。
+    fn cancel_reader_enhance_keys(&self, keys: &[String]) {
+        let want: HashSet<&str> = keys.iter().map(String::as_str).collect();
+        let slots = self
+            .reader_enhance_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (_, key, token) in slots.iter() {
+            if want.contains(key.as_str()) {
+                token.cancel();
+            }
+        }
+    }
+
+    /// 先挡住新的增强，再取消已在跑的，然后等计数归零。
+    /// 守卫要一直拿到删除结束：提前丢掉的话，新任务会在删除过程中写回目录。
+    async fn pause_reader_enhance(
+        &self,
+        keys: Option<&[String]>,
+    ) -> AppResult<crate::reader_enhance::EnhanceClearGuard> {
+        let guard = match keys {
+            Some(keys) => crate::reader_enhance::begin_clear_keys(keys),
+            None => crate::reader_enhance::begin_clear_all(),
+        };
+        match keys {
+            Some(keys) => self.cancel_reader_enhance_keys(keys),
+            None => self.cancel_reader_enhance(),
+        }
+        if !crate::reader_enhance::wait_paused(&guard, Duration::from_secs(10)).await {
+            return Err(AppError::invalid("阅读增强仍在进行，请稍后再清理"));
+        }
+        Ok(guard)
     }
 
     pub fn lookup_reader_enhance_pages(
@@ -762,10 +919,7 @@ impl Scheduler {
     pub async fn clear_reader_enhance_cache(
         &self,
     ) -> AppResult<crate::reader_enhance::EnhanceCacheClearResult> {
-        // 先取消在途增强，等待其退出（推理中的页写盘失败会浪费 GPU 且目录
-        // 被删），再在 blocking 线程删除目录。
-        self.cancel_reader_enhance();
-        crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
+        let _guard = self.pause_reader_enhance(None).await?;
         let cfg = self.cfg.clone();
         tokio::task::spawn_blocking(move || crate::reader_enhance::clear_cache(&cfg))
             .await
@@ -830,22 +984,19 @@ impl Scheduler {
             });
         }
 
-        // 增强缓存：先取消在途推理并等它退出（照 clear_reader_enhance_cache 的做法）
-        if id == G::ReaderEnhance {
-            self.cancel_reader_enhance();
-            crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
-        }
-        // 整本解压缓存：等在途读页退出，避免把正在写的那一页写进已删除的目录。
-        // 超时也放行 —— 腾空间比等一个卡住的读页重要。
-        if id == G::Reader {
-            let _ = crate::reader::wait_reader_reads_idle(std::time::Duration::from_secs(5)).await;
-        }
-
+        let _enhance = if id == G::ReaderEnhance {
+            Some(self.pause_reader_enhance(None).await?)
+        } else {
+            None
+        };
         let ctx = self.cache_context().await;
         let cfg = self.cfg.clone();
-        tokio::task::spawn_blocking(move || crate::cache::clear_group(&cfg, id, &ctx))
-            .await
-            .map_err(|e| AppError::internal(format!("缓存清理 join: {e}")))?
+        let gate_reads = id == G::Reader || id == G::Mobi;
+        let lock_mobi = id == G::Mobi;
+        blocking_cache_op(gate_reads, lock_mobi, move || {
+            crate::cache::clear_group(&cfg, id, &ctx)
+        })
+        .await
     }
 
     /// 书库侧快照，供缓存页把磁盘目录归属回书名。
@@ -913,19 +1064,22 @@ impl Scheduler {
                 bytes_freed: before.saturating_sub(after),
             });
         }
-        if id == G::ReaderEnhance {
-            self.cancel_reader_enhance();
-            crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
-        }
-        if id == G::Reader {
-            let _ = crate::reader::wait_reader_reads_idle(std::time::Duration::from_secs(5)).await;
-        }
-
+        let _enhance = if id == G::ReaderEnhance {
+            Some(
+                self.pause_reader_enhance(Some(std::slice::from_ref(&key)))
+                    .await?,
+            )
+        } else {
+            None
+        };
         let ctx = self.cache_context().await;
         let cfg = self.cfg.clone();
-        tokio::task::spawn_blocking(move || crate::cache::clear_entry(&cfg, id, &key, &ctx))
-            .await
-            .map_err(|e| AppError::internal(format!("缓存条目清理 join: {e}")))?
+        let gate_reads = id == G::Reader || id == G::Mobi;
+        let lock_mobi = id == G::Mobi;
+        blocking_cache_op(gate_reads, lock_mobi, move || {
+            crate::cache::clear_entry(&cfg, id, &key, &ctx)
+        })
+        .await
     }
 
     /// 缓存页**主视图**：一行 = 一本漫画占用的全部缓存（跨 5 类）。
@@ -968,14 +1122,16 @@ impl Scheduler {
             }
         }
 
-        // 在途保护：时序与整组/单条清理逐字一致，只做一遍
-        if groups.contains(&G::ReaderEnhance) {
-            self.cancel_reader_enhance();
-            crate::reader_enhance::wait_reader_enhance_idle(std::time::Duration::from_secs(10)).await;
-        }
-        if groups.contains(&G::Reader) {
-            let _ = crate::reader::wait_reader_reads_idle(std::time::Duration::from_secs(5)).await;
-        }
+        let enhance_keys: Vec<String> = parts
+            .iter()
+            .filter(|p| p.group == G::ReaderEnhance)
+            .map(|p| p.key.clone())
+            .collect();
+        let _enhance = if enhance_keys.is_empty() {
+            None
+        } else {
+            Some(self.pause_reader_enhance(Some(&enhance_keys)).await?)
+        };
 
         let ctx = self.cache_context().await;
         let cfg = self.cfg.clone();
@@ -985,9 +1141,11 @@ impl Scheduler {
             .map(|p| (p.group, p.key.clone()))
             .collect();
 
-        // 磁盘上的四类：一趟 spawn_blocking 全清掉。
-        // 逐项的校验（目录穿越 / mobi 目录名形状 / 封面引用集）都在 `clear_entry` 里。
-        let mut total = tokio::task::spawn_blocking(move || -> AppResult<crate::cache::CacheClearResult> {
+        let gate_reads = groups.contains(&G::Reader) || groups.contains(&G::Mobi);
+        let lock_mobi = groups.contains(&G::Mobi);
+        // 磁盘上的四类：一趟清掉。读页写锁和 mobi 构建锁盖住整个删除，
+        // 避免等完之后又有新的读页写进正在删的目录。
+        let mut total = blocking_cache_op(gate_reads, lock_mobi, move || {
             let mut acc = crate::cache::CacheClearResult {
                 removed: 0,
                 bytes_freed: 0,
@@ -999,8 +1157,7 @@ impl Scheduler {
             }
             Ok(acc)
         })
-        .await
-        .map_err(|e| AppError::internal(format!("整本缓存清理 join: {e}")))??;
+        .await?;
 
         // 任务目录单独走 remove_job：它带 uuid 格式校验 + 防目录复活
         for p in parts.iter().filter(|p| p.group == G::Jobs) {
@@ -1009,7 +1166,9 @@ impl Scheduler {
             self.remove_job(&p.key).await?;
             let after = dir_total_bytes(&dir);
             total.removed += u32::from(before != after || !dir.exists());
-            total.bytes_freed = total.bytes_freed.saturating_add(before.saturating_sub(after));
+            total.bytes_freed = total
+                .bytes_freed
+                .saturating_add(before.saturating_sub(after));
         }
         Ok(total)
     }
@@ -1052,7 +1211,7 @@ impl Scheduler {
     ) -> AppResult<Vec<crate::reader::ReaderPageFile>> {
         // 在读页期间挂"在途"标记：清空整本缓存时会等它归零，
         // 免得把正在写盘的那一页写进已被删除的目录。
-        let _inflight = crate::reader::ReaderInflightGuard::enter();
+        let _inflight = crate::reader::ReaderInflightGuard::enter().await;
         let cfg = self.cfg.clone();
         let indexes = page_indexes.to_vec();
         if prefer_original {
@@ -1142,11 +1301,7 @@ impl Scheduler {
         lib.create_collection(title, entry_ids)
     }
 
-    pub fn add_library_collection_entries(
-        &self,
-        id: &str,
-        entry_ids: &[String],
-    ) -> AppResult<()> {
+    pub fn add_library_collection_entries(&self, id: &str, entry_ids: &[String]) -> AppResult<()> {
         let mut lib = self
             .library
             .lock()
@@ -1620,6 +1775,7 @@ mod tests {
                     jpeg_quality: Some(90),
                     webp_quality: None,
                     naming: Some("{stem}_x{scale}".into()),
+                    output_max_side: None,
                 },
                 enhance: EnhanceDto {
                     scale: Some(2),
@@ -1700,6 +1856,7 @@ mod tests {
                 jpeg_quality: Some(90),
                 webp_quality: None,
                 naming: Some("{stem}_x{scale}".into()),
+                output_max_side: None,
             },
             enhance: EnhanceDto {
                 scale: Some(1),
@@ -1878,8 +2035,10 @@ mod tests {
             .count();
         assert_eq!(ok_count, 1, "只有一个请求应成功: {ra:?} {rb:?}");
         assert_eq!(dup_count, 1, "另一个应报已在队列中: {ra:?} {rb:?}");
-        // 清理：取消残留任务，等待 worker 退出
-        let id = ra.unwrap().job_id;
+        // 清理：取消残留任务，等待 worker 退出。
+        // 竞态里谁先注册并不固定，成功方可能是任意一个 future——
+        // 早先这里写死 ra.unwrap()，b 先赢时会 panic（去重本身是对的）。
+        let id = ra.or(rb).unwrap().job_id;
         let _ = sched.cancel_job(&id).await;
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(50)).await;

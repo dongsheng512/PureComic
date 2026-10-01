@@ -3,6 +3,7 @@
 #import <Accelerate/Accelerate.h>
 #include <Availability.h>
 #include "realcugan_coreml.h"
+#include "coreml_cache.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -113,25 +114,23 @@ static void comic_cug_warmup(MLModel *model) {
 
 static MLModel *comic_cug_compile_load(NSString *path, NSError **err) {
     NSURL *url = [NSURL fileURLWithPath:path];
-    NSString *cached = [path hasSuffix:@".mlpackage"]
+    NSString *legacy = [path hasSuffix:@".mlpackage"]
         ? [NSString stringWithFormat:@"%@.i%d.mlmodelc",
                       [path stringByDeletingPathExtension], kCugIn]
         : [NSString stringWithFormat:@"%@.i%d.c", path, kCugIn];
-    BOOL cacheDir = NO;
+    NSString *parent = [[path stringByDeletingLastPathComponent] lastPathComponent];
+    NSString *leaf = [NSString stringWithFormat:@"%@_%@", parent, legacy.lastPathComponent];
+    BOOL ready = NO;
+    NSURL *dest = comic_coreml_cache_destination(legacy, leaf, &ready);
     NSURL *compiled = nil;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:cached isDirectory:&cacheDir] && cacheDir) {
-        compiled = [NSURL fileURLWithPath:cached isDirectory:YES];
+    if (ready) {
+        compiled = dest;
     } else {
         NSURL *tmp = [MLModel compileModelAtURL:url error:err];
-        if (tmp) {
-            [[NSFileManager defaultManager] removeItemAtPath:cached error:nil];
-            if ([[NSFileManager defaultManager] copyItemAtURL:tmp
-                                                       toURL:[NSURL fileURLWithPath:cached isDirectory:YES]
-                                                       error:nil]) {
-                compiled = [NSURL fileURLWithPath:cached isDirectory:YES];
-            } else {
-                compiled = tmp;
-            }
+        if (tmp && comic_coreml_store_compiled(tmp, dest)) {
+            compiled = dest;
+        } else if (tmp) {
+            compiled = tmp;
         } else {
             compiled = url;
         }
@@ -229,11 +228,25 @@ static unsigned char *comic_cug_pad_canvas(const unsigned char *rgb, int w, int 
     if (!canvas) {
         return NULL;
     }
+    /* Interior x maps 1:1 onto the source row. Only the pad and the
+       tile-grid overhang need reflect. */
+    const int x0 = kCugPad;
+    const int x1 = kCugPad + w;
     for (int y = 0; y < ch; y++) {
         const int sy = comic_cug_reflect(y - kCugPad, h);
         const unsigned char *src = rgb + ((size_t)sy * (size_t)w) * 3;
         unsigned char *dst = canvas + ((size_t)y * (size_t)cw) * 3;
-        for (int x = 0; x < cw; x++) {
+        for (int x = 0; x < x0 && x < cw; x++) {
+            const int sx = comic_cug_reflect(x - kCugPad, w);
+            memcpy(dst + (size_t)x * 3, src + (size_t)sx * 3, 3);
+        }
+        if (w > 0 && x0 < cw) {
+            const int n = (x1 < cw ? x1 : cw) - x0;
+            if (n > 0) {
+                memcpy(dst + (size_t)x0 * 3, src, (size_t)n * 3);
+            }
+        }
+        for (int x = x1; x < cw; x++) {
             const int sx = comic_cug_reflect(x - kCugPad, w);
             memcpy(dst + (size_t)x * 3, src + (size_t)sx * 3, 3);
         }
@@ -424,26 +437,27 @@ int comic_cugan_coreml_enhance_rgb(
         }
         const int cw = pw + 2 * kCugPad;
 
+        /* 填下一块、贴上一块都和当前预测重叠。输入缓冲乒乓，同一时刻只有一块在预测。 */
         comic_cug_fill_from_canvas(g_in0, canvas, cw, 0, 0);
-        for (int t = 0; t < ntiles; t++) {
-            if (comic_cug_cancelled(cancel_flag)) {
-                rc = -9;
-                break;
-            }
-            const int tx = t % nx;
-            const int ty = t / nx;
-            MLMultiArray *cur_in = (t % 2) == 0 ? g_in0 : g_in1;
-            ComicCuganInput *feat = (t % 2) == 0 ? g_feat0 : g_feat1;
-            feat.input = cur_in;
-            __block id<MLFeatureProvider> pred = nil;
-            __block NSError *err = nil;
-            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        __block id<MLFeatureProvider> pred = nil;
+        __block NSError *err = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        {
+            g_feat0.input = g_in0;
+            ComicCuganInput *feat = g_feat0;
             dispatch_async(g_pred_q, ^{
                 @autoreleasepool {
                     pred = [model predictionFromFeatures:feat error:&err];
                 }
                 dispatch_semaphore_signal(sem);
             });
+        }
+        for (int t = 0; t < ntiles; t++) {
+            if (comic_cug_cancelled(cancel_flag)) {
+                dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+                rc = -9;
+                break;
+            }
             if (t + 1 < ntiles) {
                 const int ntx = (t + 1) % nx;
                 const int nty = (t + 1) / nx;
@@ -451,18 +465,41 @@ int comic_cugan_coreml_enhance_rgb(
                 comic_cug_fill_from_canvas(nxt, canvas, cw, ntx * kCugInner, nty * kCugInner);
             }
             dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-            if (!pred) {
-                if (err) {
-                    NSLog(@"realcugan-coreml predict failed: %@", err.localizedDescription);
+            id<MLFeatureProvider> done = pred;
+            NSError *doneErr = err;
+            pred = nil;
+            err = nil;
+            const int tx = t % nx;
+            const int ty = t / nx;
+            BOOL kicked = NO;
+            if (t + 1 < ntiles && done) {
+                sem = dispatch_semaphore_create(0);
+                MLMultiArray *nxtIn = ((t + 1) % 2) == 0 ? g_in0 : g_in1;
+                ComicCuganInput *feat = ((t + 1) % 2) == 0 ? g_feat0 : g_feat1;
+                feat.input = nxtIn;
+                dispatch_async(g_pred_q, ^{
+                    @autoreleasepool {
+                        pred = [model predictionFromFeatures:feat error:&err];
+                    }
+                    dispatch_semaphore_signal(sem);
+                });
+                kicked = YES;
+            }
+            if (!done) {
+                if (doneErr) {
+                    NSLog(@"realcugan-coreml predict failed: %@", doneErr.localizedDescription);
                 }
                 rc = -6;
                 break;
             }
-            MLFeatureValue *fv = [pred featureValueForName:@"output"];
+            MLFeatureValue *fv = [done featureValueForName:@"output"];
             if (!fv) {
-                fv = [pred featureValueForName:@"input"];
+                fv = [done featureValueForName:@"input"];
             }
             if (comic_cug_copy_out(fv.multiArrayValue, g_rgb_out) != 0) {
+                if (kicked) {
+                    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+                }
                 rc = -7;
                 break;
             }

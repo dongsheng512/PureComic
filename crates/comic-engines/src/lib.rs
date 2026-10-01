@@ -2,6 +2,7 @@
 
 mod animevideo_coreml;
 mod hub;
+mod jpeg_encode;
 mod mock;
 pub mod paths;
 mod realcugan;
@@ -12,6 +13,7 @@ mod waifu2x_coreml;
 
 pub use animevideo_coreml::AnimeVideoCoreMlEngine;
 pub use hub::{EngineHub, EngineInfo};
+pub use jpeg_encode::{encode_comic_jpeg, fit_long_side};
 pub use mock::MockEngine;
 pub use paths::{
     host_target_triple, resolve_animevideo_coreml_model, resolve_realcugan_coreml_model,
@@ -135,6 +137,14 @@ pub struct EnhanceParams {
     /// waifu2x `-f jpg|png|webp` so export can skip a second encode
     #[serde(default)]
     pub output_format: Option<String>,
+    /// JPEG quality 1–100. Absent keeps the engine default (reader cache).
+    #[serde(default)]
+    pub jpeg_quality: Option<u8>,
+    /// Long-side cap applied after inference, before the page is written.
+    /// Absent or 0 keeps the engine output. Whole-book export sets this;
+    /// the reader cache does not.
+    #[serde(default)]
+    pub output_max_side: Option<u32>,
     /// Real-CUGAN pack: se | pro | nose
     #[serde(default)]
     pub cugan_model: Option<String>,
@@ -152,6 +162,8 @@ impl Default for EnhanceParams {
             tta: false,
             jobs: None,
             output_format: None,
+            jpeg_quality: None,
+            output_max_side: None,
             cugan_model: None,
         }
     }

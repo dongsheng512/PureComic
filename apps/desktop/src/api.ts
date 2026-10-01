@@ -108,8 +108,21 @@ export async function validateSource(path: string): Promise<ValidateResult> {
   return invoke("validate_source", { path });
 }
 
-export async function estimateDisk(path: string, scale: number): Promise<DiskEstimate> {
-  return invoke("estimate_disk_usage", { path, scale });
+export async function estimateDisk(
+  path: string,
+  scale: number,
+  engine?: string | null,
+  imageFormat?: string | null,
+  outputDir?: string | null,
+): Promise<DiskEstimate> {
+  // 引擎与格式会改变中间页编码（JPEG vs PNG），估算结果差好几倍
+  return invoke("estimate_disk_usage", {
+    path,
+    scale,
+    engine: engine ?? null,
+    imageFormat: imageFormat ?? null,
+    outputDir: outputDir ?? null,
+  });
 }
 
 export async function listGpus(): Promise<GpuInfo[]> {

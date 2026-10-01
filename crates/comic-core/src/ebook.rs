@@ -624,6 +624,50 @@ fn mobi_cache_path(source: &Path, cfg: &AppConfig) -> PathBuf {
 /// 导致并发读页误报「索引越界」。
 static MOBI_CACHE_BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 正在被读的 mobi 目录。引用计数：同一本的两页会各 pin 一次，
+/// 先结束的那页不能把目录从集合里拿掉。
+fn open_mobi() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
+    static OPEN: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    OPEN.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(crate) struct MobiReadPin {
+    path: PathBuf,
+}
+
+impl Drop for MobiReadPin {
+    fn drop(&mut self) {
+        let mut open = open_mobi().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = open.get_mut(&self.path) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                open.remove(&self.path);
+            }
+        }
+    }
+}
+
+pub(crate) fn pin_mobi_dir(path: &Path) -> MobiReadPin {
+    let mut open = open_mobi().lock().unwrap_or_else(|e| e.into_inner());
+    *open.entry(path.to_path_buf()).or_insert(0) += 1;
+    MobiReadPin {
+        path: path.to_path_buf(),
+    }
+}
+
+pub(crate) fn mobi_build_lock() -> std::sync::MutexGuard<'static, ()> {
+    MOBI_CACHE_BUILD_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// 启动淘汰走这里：自己拿构建锁。`ensure_mobi_cache` 已经持锁，只能调 `evict_mobi_cache`。
+pub(crate) fn evict_mobi_cache_blocking(cfg: &AppConfig, keep: Option<&Path>) -> AppResult<()> {
+    let _build = mobi_build_lock();
+    evict_mobi_cache(cfg, keep)
+}
+
 /// 把整本书展开进 tmp 目录（调用方持有构建锁）。
 fn build_mobi_cache_into(source: &Path, tmp: &Path) -> AppResult<()> {
     std::fs::create_dir_all(tmp)?;
@@ -707,7 +751,9 @@ pub(crate) fn evict_mobi_cache(cfg: &AppConfig, keep: Option<&Path>) -> AppResul
         }
     }
     books.sort_by_key(|b| b.1);
-    let keep_bytes = keep.map(|k| crate::reader::book_dir_weight(k).1).unwrap_or(0);
+    let keep_bytes = keep
+        .map(|k| crate::reader::book_dir_weight(k).1)
+        .unwrap_or(0);
     let mut total: u64 = books
         .iter()
         .map(|b| b.2)
@@ -718,7 +764,16 @@ pub(crate) fn evict_mobi_cache(cfg: &AppConfig, keep: Option<&Path>) -> AppResul
         if count <= MAX_MOBI_CACHE_BOOKS && total <= MAX_MOBI_CACHE_BYTES {
             break;
         }
-        if std::fs::remove_dir_all(&path).is_ok() {
+        // 持着引用表锁再删：读页的 pin 会等到这次删除结束，不会读到删了一半的目录。
+        let removed = {
+            let open = open_mobi().lock().unwrap_or_else(|e| e.into_inner());
+            if open.contains_key(&path) {
+                false
+            } else {
+                std::fs::remove_dir_all(&path).is_ok()
+            }
+        };
+        if removed {
             total = total.saturating_sub(len);
             count = count.saturating_sub(1);
         }
@@ -759,6 +814,9 @@ pub fn extract_mobi_page_index(
     dest_png: &Path,
     cfg: &AppConfig,
 ) -> AppResult<()> {
+    // 先钉住目标目录，再进 ensure：里面的淘汰会跳过正在读的这本。
+    let pinned = mobi_cache_path(source, cfg);
+    let _pin = pin_mobi_dir(&pinned);
     let dir = ensure_mobi_cache(source, cfg)?;
     let file = dir.join(format!("{page_index:05}.img"));
     if let Ok(bytes) = std::fs::read(&file) {
@@ -878,7 +936,8 @@ mod tests {
             let d = root.join(format!("mobi-book{i:02}-100-{}", 1_700_000_000 + i));
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("00000.img"), b"page").unwrap();
-            let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + i as u64);
+            let t =
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + i as u64);
             if let Ok(f) = std::fs::File::open(&d) {
                 let _ = f.set_modified(t);
             }
@@ -949,5 +1008,19 @@ mod tests {
         let dirs = seed_mobi_books(&cfg, MAX_MOBI_CACHE_BOOKS);
         evict_mobi_cache(&cfg, None).unwrap();
         assert!(dirs.iter().all(|d| d.is_dir()), "未超上限时一个都不该删");
+    }
+
+    #[test]
+    fn mobi_cache_evict_skips_a_pinned_book() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let dirs = seed_mobi_books(&cfg, MAX_MOBI_CACHE_BOOKS + 2);
+        let _pin = pin_mobi_dir(&dirs[0]);
+        evict_mobi_cache(&cfg, None).unwrap();
+        assert!(dirs[0].is_dir(), "正在读的目录不能被启动淘汰删掉");
+        assert!(!dirs[1].exists(), "超限时改为淘汰下一本");
     }
 }

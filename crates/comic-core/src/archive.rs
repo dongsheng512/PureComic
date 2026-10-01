@@ -1105,6 +1105,7 @@ fn encode_or_copy_page(
         manifest.output.jpeg_quality,
         manifest.output.webp_quality,
         orig_ext,
+        manifest.output.output_max_side,
     )
 }
 
@@ -1123,6 +1124,7 @@ fn encode_or_copy_bytes(
         manifest.output.jpeg_quality,
         manifest.output.webp_quality,
         orig_ext,
+        manifest.output.output_max_side,
     )
 }
 

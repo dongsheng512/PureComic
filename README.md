@@ -1,7 +1,7 @@
 # PureComic
 
 [![CI](https://github.com/dongsheng512/PureComic/actions/workflows/ci.yml/badge.svg)](https://github.com/dongsheng512/PureComic/actions/workflows/ci.yml)
-[![version](https://img.shields.io/badge/version-v0.4.2-6bb6ff)](https://github.com/dongsheng512/PureComic/tags)
+[![version](https://img.shields.io/badge/version-v0.4.3-6bb6ff)](https://github.com/dongsheng512/PureComic/tags)
 
 本地优先的桌面端 **漫画增强 + 阅读 + 书库** 工具。
 
@@ -9,7 +9,7 @@ Local-first desktop **comic enhancer, reader, and library**.
 
 技术栈：**Tauri 2 + Rust + React + TypeScript + Tailwind CSS**
 
-当前版本：**v0.4.2**。引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
+当前版本：**v0.4.3**。引擎拉取与打包说明见 [scripts/README.md](scripts/README.md)。
 
 ## 能做什么
 
@@ -29,13 +29,12 @@ PureComic/
 ├── apps/desktop/          # Tauri 2 + React + Tailwind UI
 ├── crates/
 │   ├── comic-core/        # 导入导出、任务、阅读器增强缓存
-│   ├── comic-engines/     # 引擎：mock / Core ML（Waifu2x、Real-CUGAN、Real-ESRGAN）
-│   └── comic-cli/         # 命令行（purecomic）
+│   └── comic-engines/     # 引擎：mock / Core ML（Waifu2x、Real-CUGAN、Real-ESRGAN）
 ├── third_party/           # Core ML pin / NOTICE；可选 ncnn-vulkan/ 见该目录 README
 └── scripts/               # fetch / verify / macOS 打包
 ```
 
-内部 crate 仍为 `comic-core` / `comic-engines` / `comic-cli`；CLI 可执行文件为 **`purecomic`**。
+内部 crate 为 `comic-core` / `comic-engines`。桌面端包名是 `purecomic`。
 
 ## 前置条件
 
@@ -69,15 +68,7 @@ npm install
 npm run tauri dev
 ```
 
-CLI：
-
-```bash
-cargo run -p comic-cli -- doctor
-cargo run -p comic-cli -- preview ./pages --page 0 --save-dir ./prev-out
-cargo run -p comic-cli -- export-diagnostics -o ./diag
-```
-
-找不到 Core ML 模型时，开发配置可回退 mock；**发行包默认不回退**。强制 mock：`COMIC_USE_MOCK=1` 或 `purecomic --mock doctor`。
+找不到 Core ML 模型时，开发配置可回退 mock；**发行包默认不回退**。强制 mock：`COMIC_USE_MOCK=1`。
 
 引擎与模型体积较大，**不入库**。Pin 与说明：`third_party/*.pin.json`、`third_party/NOTICE`、[scripts/README.md](scripts/README.md)。
 

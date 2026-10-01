@@ -11,11 +11,14 @@ fn main() {
     println!("cargo:rerun-if-changed=src/realcugan_coreml.h");
     println!("cargo:rerun-if-changed=src/animevideo_coreml.m");
     println!("cargo:rerun-if-changed=src/animevideo_coreml.h");
+    println!("cargo:rerun-if-changed=src/coreml_cache.m");
+    println!("cargo:rerun-if-changed=src/coreml_cache.h");
     cc::Build::new()
         .file("src/waifu2x_coreml.m")
         .file("src/realesrgan_coreml.m")
         .file("src/realcugan_coreml.m")
         .file("src/animevideo_coreml.m")
+        .file("src/coreml_cache.m")
         .flag("-fobjc-arc")
         .opt_level(3)
         .compile("comic_coreml");

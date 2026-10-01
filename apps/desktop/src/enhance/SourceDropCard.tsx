@@ -71,21 +71,21 @@ export function SourceDropCard({
       {!source ? (
         <div
           onClick={onPickFile}
-          className="w-full flex-1 min-h-[12rem] cursor-pointer rounded-xl border border-dashed border-ink-300 bg-ink-100 transition hover:border-ink-500 hover:bg-ink-200/50 dark:border-white/10 dark:bg-surface-panel"
+          className="w-full flex-1 min-h-[10rem] cursor-pointer rounded-xl border border-dashed border-ink-300 bg-ink-100 transition hover:border-ink-500 hover:bg-ink-200/50 dark:border-white/10 dark:bg-surface-panel"
         >
-          <div className="grid h-full place-items-center px-5 py-10 text-center">
+          <div className="grid h-full place-items-center px-5 py-7 text-center">
             <div>
               <svg
                 viewBox="0 0 24 24"
-                className="mx-auto h-9 w-9 text-ink-400 dark:text-fg-muted"
+                className="mx-auto h-8 w-8 text-ink-400 dark:text-fg-muted"
                 fill="currentColor"
                 aria-hidden="true"
               >
                 <path d="M4 5.5C4 4.67 4.67 4 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5v-13Zm16 0v13A1.5 1.5 0 0 1 18.5 20H13V4h5.5c.83 0 1.5.67 1.5 1.5Z" />
               </svg>
-              <p className="mt-3 text-sm text-ink-800 dark:text-fg">{i18n.dropCompact}</p>
+              <p className="mt-2.5 text-sm text-ink-800 dark:text-fg">{i18n.dropCompact}</p>
               <p className="mt-1 text-xs text-ink-500 dark:text-fg-muted">{i18n.importHint}</p>
-              <div className="mt-4 flex justify-center gap-2">
+              <div className="mt-3 flex justify-center gap-2">
                 <button
                   type="button"
                   onClick={(e) => {
@@ -111,7 +111,7 @@ export function SourceDropCard({
           </div>
         </div>
       ) : loading ? (
-        <div className="flex-1 grid place-items-center py-10 text-sm text-ink-500 dark:text-fg-muted">
+        <div className="flex-1 grid place-items-center py-7 text-sm text-ink-500 dark:text-fg-muted">
           <span className="inline-flex items-center gap-2">
             <svg viewBox="0 0 20 20" className="h-4 w-4 animate-spin" aria-hidden="true">
               <circle

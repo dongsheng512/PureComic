@@ -106,12 +106,16 @@ pub async fn run_job(
 
     {
         let m = manifest.read().await;
-        let scale = m.options.scale as u8;
+        let params = crate::estimate::EstimateParams {
+            scale: m.options.scale as u8,
+            engine: m.options.engine,
+            image_format: m.output.image_format,
+        };
         let source = m.source.path.clone();
         let output_dir = m.output.dir.clone();
         drop(m);
         // assert_disk_ok 已经 validate_source 一次；不要再开一遍归档。
-        assert_disk_ok(&source, scale, &cfg, Some(&output_dir))?;
+        assert_disk_ok(&source, params, &cfg, Some(&output_dir))?;
     }
 
     if cancel.is_cancelled() {
@@ -313,12 +317,32 @@ pub async fn run_job(
                 .map(|e| if e == "jpeg" { "jpg".to_string() } else { e }),
         }
     };
-    // CoreML 引擎输出无损中间 PNG，导出阶段统一按 output_format / quality 重编码
-    if matches!(
+    params.jpeg_quality = {
+        let m = manifest.read().await;
+        Some(m.output.jpeg_quality)
+    };
+    params.output_max_side = {
+        let m = manifest.read().await;
+        let side = m.output.output_max_side;
+        if side == 0 {
+            None
+        } else {
+            Some(side)
+        }
+    };
+    // Real-CUGAN 直接写成 JPEG/PNG，导出可原样拷贝。WebP 和其它 Core ML 仍用 PNG 中间页。
+    if params.engine == comic_engines::EngineKind::RealCuganCoreMl {
+        if !matches!(
+            params.output_format.as_deref(),
+            Some("jpg") | Some("jpeg") | Some("png")
+        ) {
+            params.output_format = Some("png".into());
+        }
+    } else if matches!(
         params.engine,
         comic_engines::EngineKind::Waifu2xCoreMl
             | comic_engines::EngineKind::RealEsrganCoreMl
-            | comic_engines::EngineKind::RealCuganCoreMl
+            | comic_engines::EngineKind::AnimeVideoCoreMl
     ) {
         params.output_format = Some("png".into());
     }
@@ -326,12 +350,26 @@ pub async fn run_job(
     {
         let mut m = manifest.write().await;
         let jobs = cfg.resolved_waifu2x_jobs();
-        let mode = if cfg.use_directory_enhance() {
+        let coreml = matches!(
+            params.engine,
+            comic_engines::EngineKind::Waifu2xCoreMl
+                | comic_engines::EngineKind::RealEsrganCoreMl
+                | comic_engines::EngineKind::RealCuganCoreMl
+                | comic_engines::EngineKind::AnimeVideoCoreMl
+        );
+        let mode = if coreml {
+            "Core ML"
+        } else if cfg.use_directory_enhance() {
             "目录批处理"
         } else {
             "逐页"
         };
-        m.last_message = Some(format!("{mode} · 线程 -j {jobs}"));
+        // Core ML 不读 -j，那是 ncnn 进程的线程划分
+        m.last_message = Some(if coreml {
+            mode.to_string()
+        } else {
+            format!("{mode} · 线程 -j {jobs}")
+        });
         let _ = m.save();
         emit(&m, "enhance", None);
     }

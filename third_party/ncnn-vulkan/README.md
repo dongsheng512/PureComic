@@ -71,13 +71,7 @@ export COMIC_GITHUB_MIRROR=https://ghfast.top/
 - `waifu2x-vulkan` / `waifu2x-ncnn`
 - `realcugan-vulkan` / `realcugan-ncnn`
 
-旧 id `waifu2x`、`realcugan` 已映射到 Core ML，**不会**再走 Vulkan。
-
-```bash
-cargo run -p comic-cli -- doctor
-```
-
-`doctor` 会列出 Vulkan sidecar 是否在本目录被解析到。没有二进制时不影响桌面端。
+旧 id `waifu2x`、`realcugan` 已映射到 Core ML，**不会**再走 Vulkan。没有二进制时不影响桌面端。
 
 ## 和 Core ML 的关系
 

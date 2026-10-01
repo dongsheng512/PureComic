@@ -81,7 +81,4 @@ python3 scripts/re-export-fp16-coreml.py --verify
 
 ## Use real engine after fetch
 
-```bash
-cargo run -p comic-cli -- doctor
-# force mock: COMIC_USE_MOCK=1  or  --mock
-```
+桌面端从 `third_party/` 解析 Core ML 模型。强制 mock：`COMIC_USE_MOCK=1`。

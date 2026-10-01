@@ -172,6 +172,7 @@ pub fn save_export(
     jpeg_quality: u8,
     _webp_quality: u8,
     source_ext: Option<&str>,
+    output_max_side: u32,
 ) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -190,23 +191,28 @@ pub fn save_export(
 
     match fmt {
         ImgFmt::Jpeg => {
-            let rgb = flatten_white(img).to_rgb8();
-            let mut file = std::fs::File::create(path)?;
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut file,
-                jpeg_quality.clamp(1, 100),
-            );
-            enc.encode(
+            let rgb = flatten_white(img).into_rgb8();
+            let rgb = comic_engines::fit_long_side(&rgb, output_max_side);
+            let bytes = comic_engines::encode_comic_jpeg(
                 rgb.as_raw(),
                 rgb.width(),
                 rgb.height(),
-                image::ExtendedColorType::Rgb8,
+                jpeg_quality,
             )
-            .map_err(|e| {
-                AppError::new(ErrorCode::DecodeFail, "JPEG 编码失败").with_detail(e.to_string())
-            })?;
+            .map_err(|e| AppError::new(ErrorCode::DecodeFail, "JPEG 编码失败").with_detail(e))?;
+            std::fs::write(path, bytes)?;
         }
         other => {
+            let owned;
+            let img = if output_max_side > 0 && img.width().max(img.height()) > output_max_side {
+                let scale = f64::from(output_max_side) / f64::from(img.width().max(img.height()));
+                let nw = (f64::from(img.width()) * scale).round().max(1.0) as u32;
+                let nh = (f64::from(img.height()) * scale).round().max(1.0) as u32;
+                owned = img.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+                &owned
+            } else {
+                img
+            };
             img.save_with_format(path, other).map_err(|e| {
                 AppError::new(ErrorCode::DecodeFail, "图像编码失败").with_detail(e.to_string())
             })?;
@@ -281,6 +287,7 @@ pub fn save_export_bytes(
     jpeg_quality: u8,
     _webp_quality: u8,
     source_ext: Option<&str>,
+    output_max_side: u32,
 ) -> AppResult<Vec<u8>> {
     use std::io::Cursor;
 
@@ -297,24 +304,22 @@ pub fn save_export_bytes(
 
     match fmt {
         ImgFmt::Jpeg => {
-            let rgb = flatten_white(img).to_rgb8();
-            let mut buf = Vec::new();
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                &mut buf,
-                jpeg_quality.clamp(1, 100),
-            );
-            enc.encode(
-                rgb.as_raw(),
-                rgb.width(),
-                rgb.height(),
-                image::ExtendedColorType::Rgb8,
-            )
-            .map_err(|e| {
-                AppError::new(ErrorCode::DecodeFail, "JPEG 编码失败").with_detail(e.to_string())
-            })?;
-            Ok(buf)
+            let rgb = flatten_white(img).into_rgb8();
+            let rgb = comic_engines::fit_long_side(&rgb, output_max_side);
+            comic_engines::encode_comic_jpeg(rgb.as_raw(), rgb.width(), rgb.height(), jpeg_quality)
+                .map_err(|e| AppError::new(ErrorCode::DecodeFail, "JPEG 编码失败").with_detail(e))
         }
         other => {
+            let owned;
+            let img = if output_max_side > 0 && img.width().max(img.height()) > output_max_side {
+                let scale = f64::from(output_max_side) / f64::from(img.width().max(img.height()));
+                let nw = (f64::from(img.width()) * scale).round().max(1.0) as u32;
+                let nh = (f64::from(img.height()) * scale).round().max(1.0) as u32;
+                owned = img.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+                &owned
+            } else {
+                img
+            };
             let mut buf = Cursor::new(Vec::new());
             img.write_to(&mut buf, other).map_err(|e| {
                 AppError::new(ErrorCode::DecodeFail, "图像编码失败").with_detail(e.to_string())
@@ -405,8 +410,12 @@ mod tests {
             &jpg_path,
             Some("jpg")
         ));
-        let jpg = save_export_bytes(&dyn_img, ImageFormat::Jpeg, 80, 90, Some("png")).unwrap();
+        let jpg = save_export_bytes(&dyn_img, ImageFormat::Jpeg, 80, 90, Some("png"), 0).unwrap();
         assert!(jpg.len() > 20);
         assert_eq!(&jpg[0..2], &[0xFF, 0xD8]);
+        assert!(
+            jpg.windows(2).any(|w| w == [0xFF, 0xC2]),
+            "export jpeg is progressive"
+        );
     }
 }

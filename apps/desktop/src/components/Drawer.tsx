@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 
@@ -31,6 +32,18 @@ const EXIT_MS = 200;
 const UNMOUNT_SLACK_MS = 40;
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+
+/** 同时开着的抽屉数。关掉的那个在出场动画结束后会还焦点，
+ *  这时如果另一个抽屉已经开着，还焦点会把焦点从它身上抢走。 */
+let openDrawerCount = 0;
+
+function focusableIn(root: HTMLElement): HTMLElement[] {
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  );
+}
 
 /** 跟随系统的「减少动态效果」。
  *
@@ -128,13 +141,52 @@ export function Drawer({ open, onClose, label, closeLabel, children }: DrawerPro
     panel.focus({ preventScroll: true });
   }, [open, mounted]);
 
+  useEffect(() => {
+    if (!open) return;
+    openDrawerCount += 1;
+    return () => {
+      openDrawerCount -= 1;
+    };
+  }, [open]);
+
   // 关闭（且已经卸载干净）之后，把焦点还给当初打开它的那个按钮。
-  // 同样 preventScroll：还焦点不该让背后的页面跟着跳。
+  // 另一个抽屉还开着时不还：定时器会把焦点从那个抽屉里拉走。
   useEffect(() => {
     if (open || mounted) return;
-    prevFocusRef.current?.focus?.({ preventScroll: true });
+    const prev = prevFocusRef.current;
     prevFocusRef.current = null;
+    if (openDrawerCount > 0) return;
+    prev?.focus?.({ preventScroll: true });
   }, [open, mounted]);
+
+  const trapTab = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    // 陷阱只圈面板：scrim 按钮在 DOM 序里位于 panel 之前，若一起圈进来，
+    // 从面板最后控件 Tab 会先"落到面板外"的遮罩上再绕回
+    const panel = panelRef.current;
+    if (!panel) return;
+    const items = focusableIn(panel);
+    if (items.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    const inside = active instanceof HTMLElement && items.includes(active);
+    if (!inside) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus({ preventScroll: true });
+      return;
+    }
+    if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
+    }
+  };
 
   if (!mounted) return null;
 
@@ -146,6 +198,7 @@ export function Drawer({ open, onClose, label, closeLabel, children }: DrawerPro
     <div
       className="drawer fixed inset-0 z-40 flex justify-end overflow-clip"
       data-state={open ? "open" : "closed"}
+      onKeyDown={trapTab}
       style={
         {
           "--drawer-enter": `${ENTER_MS}ms`,

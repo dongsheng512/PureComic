@@ -1,6 +1,6 @@
 //! comic-core — import, job manifest, scheduling, export.
 //!
-//! No Tauri dependency: shared by desktop and CLI.
+//! No Tauri dependency: the desktop shell calls into this crate.
 
 pub mod archive;
 pub mod cache;

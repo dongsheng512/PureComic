@@ -954,11 +954,33 @@ html.dark .ai-seg-thumb {
 }
 
 /* 缓存面板的轴切换（按漫画 / 按存储类型）。
-   焦点沿用 .ai-seg-item 的**内嵌描边**：分段控件外面只剩 2px 轨道内边距，
-   外描边或 ring-offset 会溢到相邻分段上去。
-   蓝色按主题给：系统蓝 #007aff 对着深色药丸 #48484a 只有 2.27:1，够不着 1.4.11 的
-   3:1，所以深色换成提亮过的 #3f9cff（对药丸 3.22:1、对轨道 4.92:1）。
-   浅色 #007aff 对药丸白 4.02:1、对轨道 3.19:1，两边都够。 */
+   抽屉是纵向 flex，子项默认被拉成整行；两段各占一半，滑块铺满自己那一格，
+   避免选中底只包住文字、右边空出一截轨道。
+   焦点用内嵌描边：外面只剩 2px 内边距，外描边会溢到相邻分段。
+   深色系统蓝 #007aff 对药丸 #48484a 只有 2.27:1，换成 #3f9cff（对药丸 3.22:1）。
+   浅色 #007aff 对白药丸 4.02:1、对轨道 3.19:1。 */
+.cache-seg {
+  @apply relative mb-2 flex h-7 shrink-0 rounded-lg bg-ink-200 p-0.5 dark:bg-surface-panel;
+}
+
+.cache-seg-thumb {
+  @apply pointer-events-none absolute bottom-0.5 left-0.5 top-0.5 rounded-md bg-white shadow-sm dark:bg-surface-high dark:shadow-none;
+  width: calc(50% - 2px);
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.cache-seg-item {
+  @apply relative z-10 flex h-6 min-w-0 flex-1 items-center justify-center rounded-md px-2 text-xs text-ink-700 transition-colors dark:text-fg-muted;
+}
+
+.cache-seg-item:hover:not(.is-active) {
+  @apply text-ink-950 dark:text-fg;
+}
+
+.cache-seg-item.is-active {
+  @apply font-medium text-ink-950 dark:text-fg;
+}
+
 .cache-seg-item:focus-visible {
   outline: 2px solid #007aff;
   outline-offset: -2px;
@@ -1443,6 +1465,10 @@ html.dark .reader-range::-webkit-slider-thumb {
    （0,1,0）—— 光靠写在后面是赢不了的，这条 `animation: none` 会被静默吃掉，
    减动效就等于没做。带上属性凑成同级（0,3,0），再靠源码顺序压过去。 */
 @media (prefers-reduced-motion: reduce) {
+  .cache-seg-thumb {
+    transition: none;
+  }
+
   .drawer[data-state] .drawer-scrim,
   .drawer[data-state] .drawer-panel {
     animation: none;

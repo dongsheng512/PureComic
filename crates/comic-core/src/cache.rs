@@ -209,177 +209,56 @@ fn sum_bytes(files: &[(PathBuf, u64)]) -> u64 {
     files.iter().map(|f| f.1).sum()
 }
 
-/// 一个"每本书一个子目录"型缓存的通用统计：返回（目录数, 文件数, 字节数）。
-/// `keep` 用来筛目录名（例如只认 `mobi-*`，避开 `tmp-*` 构建残留）。
-fn weigh_book_dirs(root: &Path, keep: &dyn Fn(&str) -> bool) -> (u32, u64, u64) {
-    let mut dirs = 0u32;
-    let mut files = 0u64;
-    let mut bytes = 0u64;
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return (0, 0, 0);
-    };
-    for e in rd.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !keep(&name) || !e.path().is_dir() {
-            continue;
-        }
-        dirs += 1;
-        let mut found = Vec::new();
-        walk_files(&e.path(), &mut found);
-        files = files.saturating_add(found.len() as u64);
-        bytes = bytes.saturating_add(sum_bytes(&found));
-    }
-    (dirs, files, bytes)
-}
-
-fn group_mobi(cfg: &AppConfig) -> CacheGroupStats {
-    // `tmp-*` 是构建中的临时目录，不是缓存内容 —— 统计和回收都不算它。
-    let (dirs, files, bytes) = weigh_book_dirs(&cfg.mobi_cache_dir(), &|n| n.starts_with("mobi-"));
-    CacheGroupStats {
-        id: CacheGroupId::Mobi,
-        kind: CacheGroupKind::Pure,
-        bytes,
-        files,
-        entries: dirs,
-        reclaim_bytes: bytes,
-        reclaim_files: files,
-        cap_bytes: Some(crate::ebook::MAX_MOBI_CACHE_BYTES),
-        cap_entries: Some(crate::ebook::MAX_MOBI_CACHE_BOOKS as u32),
-        busy: false,
+fn group_caps(id: CacheGroupId) -> (Option<u64>, Option<u32>) {
+    match id {
+        CacheGroupId::Mobi => (
+            Some(crate::ebook::MAX_MOBI_CACHE_BYTES),
+            Some(crate::ebook::MAX_MOBI_CACHE_BOOKS as u32),
+        ),
+        CacheGroupId::Reader => (
+            Some(crate::reader::MAX_READER_CACHE_BYTES),
+            Some(crate::reader::MAX_READER_CACHE_BOOKS as u32),
+        ),
+        CacheGroupId::ReaderEnhance => (
+            Some(crate::reader_enhance::MAX_CACHE_BYTES),
+            Some(crate::reader_enhance::MAX_CACHE_FILES as u32),
+        ),
+        CacheGroupId::Covers | CacheGroupId::Jobs => (None, None),
     }
 }
 
-fn group_reader(cfg: &AppConfig) -> CacheGroupStats {
-    let (dirs, files, bytes) = weigh_book_dirs(&cfg.reader_dir(), &|_| true);
-    CacheGroupStats {
-        id: CacheGroupId::Reader,
-        kind: CacheGroupKind::Pure,
-        bytes,
-        files,
-        entries: dirs,
-        reclaim_bytes: bytes,
-        reclaim_files: files,
-        cap_bytes: Some(crate::reader::MAX_READER_CACHE_BYTES),
-        cap_entries: Some(crate::reader::MAX_READER_CACHE_BOOKS as u32),
-        busy: false,
-    }
-}
-
-fn group_reader_enhance(cfg: &AppConfig) -> CacheGroupStats {
-    let s = crate::reader_enhance::cache_stats(cfg);
-    CacheGroupStats {
-        id: CacheGroupId::ReaderEnhance,
-        kind: CacheGroupKind::Pure,
-        bytes: s.bytes,
-        files: s.files as u64,
-        entries: s.files,
-        reclaim_bytes: s.bytes,
-        reclaim_files: s.files as u64,
-        cap_bytes: Some(s.max_bytes),
-        cap_entries: Some(s.max_files),
-        busy: false,
-    }
-}
-
-fn group_covers(cfg: &AppConfig, referenced: &HashSet<String>) -> CacheGroupStats {
-    let root = cfg.library_covers_dir();
-    let mut all = Vec::new();
-    walk_files(&root, &mut all);
-    let orphans: Vec<&(PathBuf, u64)> = all
+fn stats_from_entries(
+    id: CacheGroupId,
+    entries: &[CacheEntry],
+    ctx: &CacheContext,
+) -> CacheGroupStats {
+    let bytes = entries.iter().map(|e| e.bytes).sum();
+    let files = entries.iter().map(|e| e.files).sum();
+    let reclaim_bytes = entries.iter().map(|e| e.reclaim_bytes).sum();
+    let reclaim_files = entries
         .iter()
-        .filter(|(p, _)| {
-            p.file_name()
-                .map(|n| !referenced.contains(&n.to_string_lossy().into_owned()))
-                .unwrap_or(false)
-        })
-        .collect();
-    CacheGroupStats {
-        id: CacheGroupId::Covers,
-        kind: CacheGroupKind::Mixed,
-        bytes: sum_bytes(&all),
-        files: all.len() as u64,
-        entries: all.len() as u32,
-        reclaim_bytes: orphans.iter().map(|f| f.1).sum(),
-        reclaim_files: orphans.len() as u64,
-        cap_bytes: None,
-        cap_entries: None,
-        busy: false,
-    }
-}
-
-fn group_jobs(cfg: &AppConfig, protected: &HashSet<String>) -> CacheGroupStats {
-    let root = cfg.jobs_dir();
-    let mut all = 0u64;
-    let mut all_files = 0u64;
-    let mut dirs = 0u32;
-    let mut reclaim = 0u64;
-    let mut reclaim_files = 0u64;
-    let Ok(rd) = std::fs::read_dir(&root) else {
-        return CacheGroupStats {
-            id: CacheGroupId::Jobs,
-            kind: CacheGroupKind::Mixed,
-            bytes: 0,
-            files: 0,
-            entries: 0,
-            reclaim_bytes: 0,
-            reclaim_files: 0,
-            cap_bytes: None,
-            cap_entries: None,
-            busy: false,
-        };
+        .map(|e| if e.reclaim_bytes == 0 { 0 } else { e.files })
+        .sum();
+    let (cap_bytes, cap_entries) = group_caps(id);
+    let kind = match id {
+        CacheGroupId::Covers | CacheGroupId::Jobs => CacheGroupKind::Mixed,
+        _ => CacheGroupKind::Pure,
     };
-    for e in rd.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !e.path().is_dir() {
-            continue;
-        }
-        dirs += 1;
-        let mut found = Vec::new();
-        walk_files(&e.path(), &mut found);
-        let b = sum_bytes(&found);
-        all = all.saturating_add(b);
-        all_files = all_files.saturating_add(found.len() as u64);
-        if !protected.contains(&name) {
-            reclaim = reclaim.saturating_add(b);
-            reclaim_files = reclaim_files.saturating_add(found.len() as u64);
-        }
-    }
+    // 整组 busy 只在「一个都清不掉」时亮。有已结束任务时，组按钮仍然清那些终态目录；
+    // clear_finished_jobs 会跳过活跃任务。以前只要有一个活跃任务就把整组禁用，
+    // 已结束的目录在类型视图里也点不了。
+    let busy = id == CacheGroupId::Jobs && !ctx.protected_jobs.is_empty() && reclaim_bytes == 0;
     CacheGroupStats {
-        id: CacheGroupId::Jobs,
-        kind: CacheGroupKind::Mixed,
-        bytes: all,
-        files: all_files,
-        entries: dirs,
-        reclaim_bytes: reclaim,
+        id,
+        kind,
+        bytes,
+        files,
+        entries: entries.len() as u32,
+        reclaim_bytes,
         reclaim_files,
-        cap_bytes: None,
-        cap_entries: None,
-        // jobs 有活跃任务时**整组**禁用：语义上"清理任务目录"这件事此刻不安全，
-        // 让用户先取消或等结束后再清。clear_finished_jobs 本身会跳过活跃任务，
-        // 但把按钮点亮会让人以为能清干净。
-        busy: !protected.is_empty(),
-    }
-}
-
-/// 统计全部缓存组。全树递归遍历，**必须**放在 blocking 线程里调用。
-pub fn collect_overview(cfg: &AppConfig, ctx: &CacheContext) -> CacheOverview {
-    let groups = vec![
-        group_mobi(cfg),
-        group_reader(cfg),
-        group_reader_enhance(cfg),
-        group_covers(cfg, &ctx.referenced_covers),
-        group_jobs(cfg, &ctx.protected_jobs),
-    ];
-    let total_bytes = groups.iter().map(|g| g.bytes).sum();
-    let reclaimable_bytes = groups.iter().map(|g| g.reclaim_bytes).sum();
-    let free_bytes = fs2::available_space(&cfg.work_root)
-        .ok()
-        .or_else(|| fs2::available_space(std::env::temp_dir()).ok());
-    CacheOverview {
-        groups,
-        total_bytes,
-        reclaimable_bytes,
-        free_bytes,
+        cap_bytes,
+        cap_entries,
+        busy,
     }
 }
 
@@ -454,7 +333,12 @@ pub fn clear_group(
                 .into_iter()
                 .filter(|p| {
                     p.file_name()
-                        .map(|n| !ctx.referenced_covers.contains(&n.to_string_lossy().into_owned()))
+                        .map(|n| {
+                            let name = n.to_string_lossy().into_owned();
+                            let id = name.split('.').next().unwrap_or("");
+                            // 和明细同一口径：`.DS_Store` 这类没有书 id 的文件不进可回收
+                            !id.is_empty() && !ctx.referenced_covers.contains(&name)
+                        })
                         .unwrap_or(false)
                 })
                 .collect();
@@ -567,8 +451,7 @@ fn entry_from(
 
 /// mobi / reader / reader-enhance 共同的形状：一级子目录就是"一本书"。
 ///
-/// 成员过滤必须与总览行的 `weigh_book_dirs` 过滤**逐字一致**，
-/// 否则明细之和会与上面那一行的数字对不上（页面会显得在骗人）。
+/// 总览行直接加总这里的结果，过滤必须只写在这一处。
 fn collect_book_dir_entries(root: &Path, id: CacheGroupId, index: &BookIndex) -> Vec<CacheEntry> {
     let Ok(rd) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -589,7 +472,15 @@ fn collect_book_dir_entries(root: &Path, id: CacheGroupId, index: &BookIndex) ->
         if !member {
             continue;
         }
-        let (mtime, bytes, files) = crate::reader::book_dir_weight_full(&e.path());
+        let (mtime, bytes, files) = if id == CacheGroupId::ReaderEnhance {
+            crate::reader_enhance::weigh_cache_dir(&e.path())
+        } else {
+            crate::reader::book_dir_weight_full(&e.path())
+        };
+        // 只有临时文件的目录不是一条可展示的缓存
+        if id == CacheGroupId::ReaderEnhance && files == 0 {
+            continue;
+        }
         // 先归属、再交出 key：`key` 传进 `entry_from` 会被移动
         let book = match id {
             CacheGroupId::Mobi => index.mobi(&key),
@@ -657,11 +548,7 @@ fn collect_cover_entries(
 }
 
 /// 任务分组：一级子目录名就是 job id。
-fn collect_job_entries(
-    cfg: &AppConfig,
-    ctx: &CacheContext,
-    index: &BookIndex,
-) -> Vec<CacheEntry> {
+fn collect_job_entries(cfg: &AppConfig, ctx: &CacheContext, index: &BookIndex) -> Vec<CacheEntry> {
     let root = cfg.jobs_dir();
     let Ok(rd) = std::fs::read_dir(&root) else {
         return Vec::new();
@@ -705,6 +592,32 @@ fn collect_one_group(
         }
         CacheGroupId::Covers => collect_cover_entries(cfg, ctx, index),
         CacheGroupId::Jobs => collect_job_entries(cfg, ctx, index),
+    }
+}
+
+/// 统计全部缓存组。数字来自 `collect_one_group`，和两个视图的行是同一次口径。
+/// 「可一键回收」不含任务目录：全部清理不会删 jobs。
+/// 全树递归遍历，**必须**放在 blocking 线程里调用。
+pub fn collect_overview(cfg: &AppConfig, ctx: &CacheContext) -> CacheOverview {
+    let index = BookIndex::build(Vec::new());
+    let groups: Vec<CacheGroupStats> = CACHE_GROUP_ORDER
+        .into_iter()
+        .map(|id| stats_from_entries(id, &collect_one_group(cfg, id, ctx, &index), ctx))
+        .collect();
+    let total_bytes = groups.iter().map(|g| g.bytes).sum();
+    let reclaimable_bytes = groups
+        .iter()
+        .filter(|g| g.id != CacheGroupId::Jobs)
+        .map(|g| g.reclaim_bytes)
+        .sum();
+    let free_bytes = fs2::available_space(&cfg.work_root)
+        .ok()
+        .or_else(|| fs2::available_space(std::env::temp_dir()).ok());
+    CacheOverview {
+        groups,
+        total_bytes,
+        reclaimable_bytes,
+        free_bytes,
     }
 }
 
@@ -880,8 +793,7 @@ pub fn clear_entry(
                     p.file_name()
                         .map(|n| {
                             let n = n.to_string_lossy().into_owned();
-                            n.split('.').next() == Some(key)
-                                && !ctx.referenced_covers.contains(&n)
+                            n.split('.').next() == Some(key) && !ctx.referenced_covers.contains(&n)
                         })
                         .unwrap_or(false)
                 })
@@ -915,10 +827,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = cfg_at(tmp.path());
 
-        write_file(&cfg.mobi_cache_dir().join("mobi-abc-1-2").join("00000.img"), 300);
-        write_file(&cfg.mobi_cache_dir().join("mobi-def-1-2").join("00000.img"), 100);
+        write_file(
+            &cfg.mobi_cache_dir().join("mobi-abc-1-2").join("00000.img"),
+            300,
+        );
+        write_file(
+            &cfg.mobi_cache_dir().join("mobi-def-1-2").join("00000.img"),
+            100,
+        );
         // 构建残留不得计入
-        write_file(&cfg.mobi_cache_dir().join("tmp-123-abc").join("00000.img"), 999);
+        write_file(
+            &cfg.mobi_cache_dir().join("tmp-123-abc").join("00000.img"),
+            999,
+        );
         write_file(&cfg.reader_dir().join("book01").join("0000.ab.jpg"), 50);
         write_file(&cfg.library_covers_dir().join("a.v7.jpg"), 10);
         std::fs::create_dir_all(cfg.jobs_dir()).unwrap();
@@ -990,7 +911,7 @@ mod tests {
         let mut protected = HashSet::new();
         protected.insert("running".to_string());
         let ctx = CacheContext {
-            protected_jobs: protected,
+            protected_jobs: protected.clone(),
             ..Default::default()
         };
         let jobs = collect_overview(&cfg, &ctx)
@@ -1001,7 +922,30 @@ mod tests {
 
         assert_eq!(jobs.bytes, 280, "总量含活跃任务");
         assert_eq!(jobs.reclaim_bytes, 80, "只回收非活跃的");
-        assert!(jobs.busy, "有活跃任务时整组禁用");
+        assert!(
+            !jobs.busy,
+            "还有可清的终态任务时，整组按钮不能因为另一本在跑而禁用"
+        );
+        let overview = collect_overview(&cfg, &ctx);
+        assert_eq!(
+            overview.reclaimable_bytes, 0,
+            "一键回收不含任务目录；这个夹具里没有其它缓存"
+        );
+        assert_eq!(overview.total_bytes, 280);
+
+        let only_running = CacheContext {
+            protected_jobs: protected,
+            ..Default::default()
+        };
+        // 删掉已结束的那本，只剩活跃任务
+        std::fs::remove_dir_all(cfg.jobs_dir().join("done")).unwrap();
+        let busy_jobs = collect_overview(&cfg, &only_running)
+            .groups
+            .into_iter()
+            .find(|g| g.id == CacheGroupId::Jobs)
+            .unwrap();
+        assert_eq!(busy_jobs.reclaim_bytes, 0);
+        assert!(busy_jobs.busy, "一个都清不掉时才标忙");
 
         // 空闲时应可清理
         let idle = collect_overview(&cfg, &CacheContext::default())
@@ -1010,14 +954,17 @@ mod tests {
             .find(|g| g.id == CacheGroupId::Jobs)
             .unwrap();
         assert!(!idle.busy);
-        assert_eq!(idle.reclaim_bytes, 280);
+        assert_eq!(idle.reclaim_bytes, 200, "done 目录已经删掉，只剩 running");
     }
 
     #[test]
     fn clear_mobi_keeps_tmp_and_reader_enhance_keeps_root() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = cfg_at(tmp.path());
-        write_file(&cfg.mobi_cache_dir().join("mobi-abc-1-2").join("00000.img"), 300);
+        write_file(
+            &cfg.mobi_cache_dir().join("mobi-abc-1-2").join("00000.img"),
+            300,
+        );
         write_file(&cfg.mobi_cache_dir().join("tmp-x").join("00000.img"), 20);
         let r = clear_group(&cfg, CacheGroupId::Mobi, &CacheContext::default()).unwrap();
         assert_eq!(r.bytes_freed, 300);
@@ -1068,12 +1015,18 @@ mod tests {
         // 故意让 id 与路径哈希毫无关系 —— 真实书库里 `id` 是历史值，
         // 实测 13 个真目录里有 2 个的前缀**不在任何 id 前 12 位里**。
         // 如果实现改去用 id 匹配，这条断言就会挂。
-        let b = book("ffffffffffffffff", "/Books/海街diary 卷01.mobi", "海街diary 卷01");
+        let b = book(
+            "ffffffffffffffff",
+            "/Books/海街diary 卷01.mobi",
+            "海街diary 卷01",
+        );
         let name = mobi_dir_name(&b.path, 1234, 5678);
         write_file(&cfg.mobi_cache_dir().join(&name).join("00000.img"), 700);
         // 形状合法但书库里找不到对应书的目录
         write_file(
-            &cfg.mobi_cache_dir().join("mobi-aaaaaaaabbbb-1-2").join("00000.img"),
+            &cfg.mobi_cache_dir()
+                .join("mobi-aaaaaaaabbbb-1-2")
+                .join("00000.img"),
             30,
         );
 
@@ -1098,8 +1051,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = cfg_at(tmp.path());
         let b = book("id1", "/Books/a.mobi", "a");
-        write_file(&cfg.mobi_cache_dir().join(&mobi_dir_name(&b.path, 1, 2)).join("p"), 400);
-        write_file(&cfg.mobi_cache_dir().join("mobi-1234567890ab-1-2").join("p"), 100);
+        write_file(
+            &cfg.mobi_cache_dir()
+                .join(mobi_dir_name(&b.path, 1, 2))
+                .join("p"),
+            400,
+        );
+        write_file(
+            &cfg.mobi_cache_dir().join("mobi-1234567890ab-1-2").join("p"),
+            100,
+        );
         // 构建残留：总览不算，明细也不该算
         write_file(&cfg.mobi_cache_dir().join("tmp-zzz").join("p"), 999);
 
@@ -1114,8 +1075,59 @@ mod tests {
             collect_group_entries(&cfg, CacheGroupId::Mobi, &CacheContext::default(), &[b]);
 
         let sum: u64 = entries.iter().map(|e| e.bytes).sum();
-        assert_eq!(sum, mobi.bytes, "明细之和必须等于总览行的体积，否则页面在骗人");
+        assert_eq!(
+            sum, mobi.bytes,
+            "明细之和必须等于总览行的体积，否则页面在骗人"
+        );
         assert_eq!(entries.len() as u32, mobi.entries);
+    }
+
+    #[test]
+    fn enhance_and_cover_overview_match_the_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_at(tmp.path());
+        write_file(&cfg.reader_enhance_dir().join("book").join("0001.jpg"), 40);
+        write_file(
+            &cfg.reader_enhance_dir().join("book").join("0002.tmp.jpg"),
+            15,
+        );
+        write_file(&cfg.reader_enhance_dir().join(".batch").join("x.jpg"), 9);
+        write_file(&cfg.library_covers_dir().join("book1.v7.jpg"), 10);
+        write_file(&cfg.library_covers_dir().join(".DS_Store"), 99);
+
+        let ctx = CacheContext::default();
+        let overview = collect_overview(&cfg, &ctx);
+        let enhance = overview
+            .groups
+            .iter()
+            .find(|g| g.id == CacheGroupId::ReaderEnhance)
+            .unwrap();
+        let enhance_rows = collect_group_entries(&cfg, CacheGroupId::ReaderEnhance, &ctx, &[]);
+        assert_eq!(enhance.bytes, 40, "临时图和 .batch 不进体积");
+        assert_eq!(
+            enhance_rows.iter().map(|e| e.bytes).sum::<u64>(),
+            enhance.bytes
+        );
+        assert_eq!(
+            crate::reader_enhance::cache_stats(&cfg).bytes,
+            enhance.bytes
+        );
+
+        let covers = overview
+            .groups
+            .iter()
+            .find(|g| g.id == CacheGroupId::Covers)
+            .unwrap();
+        let cover_rows = collect_group_entries(&cfg, CacheGroupId::Covers, &ctx, &[]);
+        assert_eq!(covers.bytes, 10, ".DS_Store 没有书 id，不进封面总量");
+        assert_eq!(
+            cover_rows.iter().map(|e| e.bytes).sum::<u64>(),
+            covers.bytes
+        );
+        assert_eq!(
+            cover_rows.iter().map(|e| e.reclaim_bytes).sum::<u64>(),
+            covers.reclaim_bytes
+        );
     }
 
     #[test]
@@ -1134,7 +1146,10 @@ mod tests {
         assert_eq!(r.bytes_freed, 700);
         assert!(!cfg.mobi_cache_dir().join(&target).exists());
         assert!(cfg.mobi_cache_dir().join(&keep).is_dir(), "不能连坐别的书");
-        assert!(cfg.mobi_cache_dir().join("tmp-build").is_dir(), "构建残留不受影响");
+        assert!(
+            cfg.mobi_cache_dir().join("tmp-build").is_dir(),
+            "构建残留不受影响"
+        );
     }
 
     #[test]
@@ -1144,7 +1159,13 @@ mod tests {
         write_file(&cfg.mobi_cache_dir().join("tmp-x").join("p"), 5);
 
         // 目录穿越：绝不能经 key 拼出 work_root 之外的路径
-        assert!(clear_entry(&cfg, CacheGroupId::Mobi, "../evil", &CacheContext::default()).is_err());
+        assert!(clear_entry(
+            &cfg,
+            CacheGroupId::Mobi,
+            "../evil",
+            &CacheContext::default()
+        )
+        .is_err());
         assert!(clear_entry(&cfg, CacheGroupId::Reader, "..", &CacheContext::default()).is_err());
         assert!(clear_entry(&cfg, CacheGroupId::Reader, "a/b", &CacheContext::default()).is_err());
         assert!(clear_entry(&cfg, CacheGroupId::Reader, "", &CacheContext::default()).is_err());
@@ -1182,7 +1203,10 @@ mod tests {
         let b1 = entries.iter().find(|e| e.key == "book1").unwrap();
         assert_eq!(b1.title.as_deref(), Some("某书"));
         assert_eq!(b1.bytes, 140, "名义体积含在用的那张");
-        assert_eq!(b1.reclaim_bytes, 40, "只有旧 tag 那张能回收 —— 在用封面删了会白删");
+        assert_eq!(
+            b1.reclaim_bytes, 40,
+            "只有旧 tag 那张能回收 —— 在用封面删了会白删"
+        );
 
         let orphan = entries.iter().find(|e| e.key == "gone").unwrap();
         assert_eq!(orphan.reclaim_bytes, 25);
@@ -1244,7 +1268,9 @@ mod tests {
         // 同一本书在 mobi / reader / covers 三类里都有缓存 —— 必须卷成一行
         let b = book("id1", "/Books/a.mobi", "a");
         write_file(
-            &cfg.mobi_cache_dir().join(&mobi_dir_name(&b.path, 1, 2)).join("p"),
+            &cfg.mobi_cache_dir()
+                .join(mobi_dir_name(&b.path, 1, 2))
+                .join("p"),
             400,
         );
         let rkey = crate::reader::source_cache_key(Path::new(&b.path));
@@ -1254,7 +1280,9 @@ mod tests {
 
         let c = book("id2", "/Books/c.mobi", "c");
         write_file(
-            &cfg.mobi_cache_dir().join(&mobi_dir_name(&c.path, 3, 4)).join("p"),
+            &cfg.mobi_cache_dir()
+                .join(mobi_dir_name(&c.path, 3, 4))
+                .join("p"),
             300,
         );
 
@@ -1292,9 +1320,16 @@ mod tests {
         let unknown = &rows[2];
         assert!(unknown.book_id.is_none(), "未归属必须排出，不能藏");
         assert!(unknown.title.is_none());
-        assert_eq!(unknown.key, "mobi:mobi-1234567890ab-1-2", "未归属的行标识由服务端给出");
+        assert_eq!(
+            unknown.key, "mobi:mobi-1234567890ab-1-2",
+            "未归属的行标识由服务端给出"
+        );
         assert_eq!(unknown.bytes, 70);
-        assert_eq!(unknown.parts.len(), 1, "未归属项之间没有共同的书 id，必须各自成行");
+        assert_eq!(
+            unknown.parts.len(),
+            1,
+            "未归属项之间没有共同的书 id，必须各自成行"
+        );
         assert_eq!(unknown.parts[0].group, CacheGroupId::Mobi);
         assert_eq!(unknown.parts[0].key, "mobi-1234567890ab-1-2");
 
@@ -1341,7 +1376,9 @@ mod tests {
         };
         write_file(&cfg.jobs_dir().join("job-live").join("out/p"), 500);
         write_file(
-            &cfg.mobi_cache_dir().join(&mobi_dir_name("/Books/a.mobi", 1, 2)).join("p"),
+            &cfg.mobi_cache_dir()
+                .join(mobi_dir_name("/Books/a.mobi", 1, 2))
+                .join("p"),
             100,
         );
 
@@ -1356,7 +1393,10 @@ mod tests {
             &[mk()],
         );
         assert_eq!(busy.len(), 1);
-        assert_eq!(busy[0].bytes, 600, "在途任务的占用仍要如实显示，不能瞒着用户");
+        assert_eq!(
+            busy[0].bytes, 600,
+            "在途任务的占用仍要如实显示，不能瞒着用户"
+        );
         assert!(busy[0].busy, "在途任务必须让整本清理禁用");
         assert_eq!(
             busy[0].reclaim_bytes, 100,

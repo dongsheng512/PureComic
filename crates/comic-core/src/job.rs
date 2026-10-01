@@ -105,6 +105,17 @@ pub enum ImageFormat {
     Same,
 }
 
+/// Parse the wire format id used by the UI / DTO ("jpeg" | "png" | "webp" | "same").
+pub fn parse_image_format(raw: &str) -> ImageFormat {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "png" => ImageFormat::Png,
+        "webp" => ImageFormat::Webp,
+        "same" => ImageFormat::Same,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        _ => ImageFormat::Jpeg,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputOptions {
     pub dir: PathBuf,
@@ -117,6 +128,9 @@ pub struct OutputOptions {
     /// default `{stem}_x{scale}`
     #[serde(default = "default_naming")]
     pub naming: String,
+    /// Long side written to the export. 0 keeps the engine resolution.
+    #[serde(default = "default_output_max_side")]
+    pub output_max_side: u32,
 }
 
 fn default_jpeg_q() -> u8 {
@@ -128,6 +142,9 @@ fn default_webp_q() -> u8 {
 fn default_naming() -> String {
     "{stem}_x{scale}".into()
 }
+fn default_output_max_side() -> u32 {
+    3200
+}
 
 impl Default for OutputOptions {
     fn default() -> Self {
@@ -138,6 +155,7 @@ impl Default for OutputOptions {
             jpeg_quality: 92,
             webp_quality: 90,
             naming: default_naming(),
+            output_max_side: default_output_max_side(),
         }
     }
 }
@@ -227,6 +245,8 @@ impl EnhanceOptions {
             tta: self.tta,
             jobs: None,
             output_format: None,
+            jpeg_quality: None,
+            output_max_side: None,
             cugan_model: if self.cugan_model.is_empty() {
                 None
             } else {
@@ -645,6 +665,8 @@ pub struct OutputOptionsDto {
     pub jpeg_quality: Option<u8>,
     pub webp_quality: Option<u8>,
     pub naming: Option<String>,
+    #[serde(default)]
+    pub output_max_side: Option<u32>,
 }
 
 fn default_container() -> String {
@@ -730,12 +752,7 @@ impl CreateJobRequest {
             "zip" => OutputContainer::Zip,
             _ => OutputContainer::Cbz,
         };
-        let image_format = match self.output.image_format.to_ascii_lowercase().as_str() {
-            "png" => ImageFormat::Png,
-            "webp" => ImageFormat::Webp,
-            "same" => ImageFormat::Same,
-            _ => ImageFormat::Jpeg,
-        };
+        let image_format = parse_image_format(&self.output.image_format);
         let output = OutputOptions {
             dir: PathBuf::from(&self.output.dir),
             container,
@@ -746,6 +763,7 @@ impl CreateJobRequest {
                 .output
                 .naming
                 .unwrap_or_else(|| "{stem}_x{scale}".into()),
+            output_max_side: self.output.output_max_side.unwrap_or(3200),
         };
 
         Ok((source, options, output))

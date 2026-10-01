@@ -1,28 +1,33 @@
 import type { Messages } from "../i18n";
 import { Field, SelectBox } from "./controls";
-import type { Container, ImgFmt } from "./enhanceViewModel";
+import { qualityAppliesTo } from "./enhanceViewModel";
+import type { Container, ExportQuality, ImgFmt } from "./enhanceViewModel";
 
 type Props = {
   i18n: Messages;
   outputDir: string | null;
   container: Container;
   imageFormat: ImgFmt;
+  quality: ExportQuality;
   onPickOutput: () => void;
   onContainerChange: (c: Container) => void;
   onImageFormatChange: (f: ImgFmt) => void;
+  onQualityChange: (q: ExportQuality) => void;
   /** 导入后填充剩余高度，与右侧方案卡对齐 */
   fill?: boolean;
 };
 
-/** 输出独立区块：输出位置 + 容器 + 图片格式 */
+/** 输出独立区块：输出位置 + 容器 + 图片格式 + 导出画质 */
 export function OutputSettings({
   i18n,
   outputDir,
   container,
   imageFormat,
+  quality,
   onPickOutput,
   onContainerChange,
   onImageFormatChange,
+  onQualityChange,
   fill,
 }: Props) {
   const formatHint =
@@ -33,6 +38,18 @@ export function OutputSettings({
         : imageFormat === "same"
           ? i18n.formatHintSame
           : i18n.formatHintJpeg;
+
+  // PNG / WebP 在本项目里都是无损编码，quality 不参与；`same` 取决于源图是否为 JPEG。
+  const qualityEnabled = qualityAppliesTo(imageFormat);
+  const qualityHint = !qualityEnabled
+    ? i18n.qualityHintLossless
+    : quality === "high"
+      ? i18n.qualityHintHigh
+      : quality === "compact"
+        ? i18n.qualityHintCompact
+        : quality === "minimal"
+          ? i18n.qualityHintMinimal
+          : i18n.qualityHintBalanced;
 
   return (
     <section className={`card p-5 ${fill ? "flex-1" : ""}`}>
@@ -62,7 +79,7 @@ export function OutputSettings({
           {i18n.chooseOutput}
         </button>
       </div>
-      <div className="mt-4 grid grid-cols-2 gap-4">
+      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
         <Field label={i18n.container} hint={i18n.containerHint}>
           <SelectBox
             value={container}
@@ -86,6 +103,19 @@ export function OutputSettings({
               { id: "png", label: i18n.formatPng },
               { id: "webp", label: i18n.formatWebp },
               { id: "same", label: i18n.formatSame },
+            ]}
+          />
+        </Field>
+        <Field label={i18n.exportQuality} hint={qualityHint}>
+          <SelectBox
+            value={quality}
+            onChange={onQualityChange}
+            disabled={!qualityEnabled}
+            options={[
+              { id: "high", label: i18n.qualityHigh },
+              { id: "balanced", label: i18n.qualityBalanced },
+              { id: "compact", label: i18n.qualityCompact },
+              { id: "minimal", label: i18n.qualityMinimal },
             ]}
           />
         </Field>

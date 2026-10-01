@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { formatBytes } from "../enhance/enhanceViewModel";
 import { t } from "../i18n";
 import type {
@@ -39,8 +40,8 @@ type Props = {
   /** 展开分组的明细；null = 还没加载出来 */
   entries: CacheEntry[] | null;
   entriesLoading: boolean;
-  /** 正在单清的那一行；null = 没有 */
-  busyEntryKey: string | null;
+  /** 正在单清的行（`${group}:${key}` 复合键集合）；空集 = 没有 */
+  busyEntryKeys: Set<string>;
   onClear: (id: CacheGroupId) => void;
   onToggleGroup: (id: CacheGroupId) => void;
   onClearEntry: (id: CacheGroupId, key: string) => void;
@@ -155,7 +156,7 @@ export function CachePanel({
   expandedId,
   entries,
   entriesLoading,
-  busyEntryKey,
+  busyEntryKeys,
   onClear,
   onToggleGroup,
   onClearEntry,
@@ -164,8 +165,21 @@ export function CachePanel({
   onClose,
 }: Props) {
   const groups = overview?.groups ?? [];
-  const anyBusy = busyId !== null || busyBookKey !== null;
+  // 单条清理也计入全局忙：进行中不允许再触发组级/整本/单条并发删除
+  const anyBusy =
+    busyId !== null || busyBookKey !== null || busyEntryKeys.size > 0;
   const canClearAll = !anyBusy && (overview?.reclaimableBytes ?? 0) > 0;
+  // 破坏性操作两段式确认：第一击进入待确认态，再击或失焦/超时复位
+  const [confirmAll, setConfirmAll] = useState(false);
+  const [confirmBookKey, setConfirmBookKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!confirmAll && confirmBookKey == null) return;
+    const timer = window.setTimeout(() => {
+      setConfirmAll(false);
+      setConfirmBookKey(null);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [confirmAll, confirmBookKey]);
   // 条形长度按"占本列表最大组"的比例 —— 绝对字节数在 0 和 1.4 GB 之间无法同屏比较
   const maxBytes = groups.reduce((m, g) => Math.max(m, g.bytes), 0);
 
@@ -180,12 +194,27 @@ export function CachePanel({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            className="rounded-lg border border-amber-500/40 px-2 py-1 text-xs text-amber-800 transition hover:bg-amber-500/10 disabled:pointer-events-none disabled:opacity-40 dark:border-warning-border dark:text-warning-fg dark:hover:bg-warning-soft"
-            onClick={onClearAll}
+            className={`rounded-lg px-2 py-1 text-xs transition disabled:pointer-events-none disabled:opacity-40 ${
+              confirmAll
+                ? "border border-rose-500/50 bg-rose-500/10 font-medium text-rose-700 dark:border-rose-400/50 dark:bg-rose-500/15 dark:text-rose-200"
+                : "border border-amber-500/40 text-amber-800 hover:bg-amber-500/10 dark:border-warning-border dark:text-warning-fg dark:hover:bg-warning-soft"
+            }`}
+            onClick={() => {
+              if (confirmAll) {
+                setConfirmAll(false);
+                onClearAll();
+              } else {
+                setConfirmAll(true);
+              }
+            }}
             disabled={!canClearAll}
             title={!canClearAll ? i18n.cacheNothingToClear : undefined}
           >
-            {busyId === "all" ? i18n.cacheScanning : i18n.cacheClearAll}
+            {busyId === "all"
+              ? i18n.cacheScanning
+              : confirmAll
+                ? i18n.cacheConfirmClear
+                : i18n.cacheClearAll}
           </button>
           <button
             type="button"
@@ -237,11 +266,12 @@ export function CachePanel({
           只定义在阅读器画布作用域里，拿到面板上会是空值。
           颜色是算过对比度的：浅色未选 ink-700 on ink-200 = 7.98:1（ink-500 只有 4.05:1，不够）；
           深色轨道若用 surface-high，fg-muted 只有 3.75:1，所以轨道下沉一档到 surface-panel。 */}
-      <div
-        className="mb-2 inline-flex h-7 shrink-0 items-center rounded-lg bg-ink-200 p-0.5 dark:bg-surface-panel"
-        role="group"
-        aria-label={i18n.cacheViewLabel}
-      >
+      <div className="cache-seg" role="group" aria-label={i18n.cacheViewLabel}>
+        <span
+          className="cache-seg-thumb"
+          aria-hidden="true"
+          style={{ transform: view === "type" ? "translateX(100%)" : "translateX(0)" }}
+        />
         {(
           [
             ["book", i18n.cacheByComic],
@@ -253,11 +283,7 @@ export function CachePanel({
             <button
               key={id}
               type="button"
-              className={`cache-seg-item inline-flex h-6 items-center justify-center rounded-md px-2 text-xs transition ${
-                active
-                  ? "bg-white font-medium text-ink-950 shadow-sm dark:bg-surface-high dark:text-fg dark:shadow-none"
-                  : "text-ink-700 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
-              }`}
+              className={`cache-seg-item ${active ? "is-active" : ""}`}
               onClick={() => onChangeView(id)}
               aria-pressed={active}
             >
@@ -341,8 +367,19 @@ export function CachePanel({
                           <span className="ml-auto">
                             <button
                               type="button"
-                              className="rounded-lg border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 transition hover:bg-ink-300 disabled:pointer-events-none disabled:opacity-40 dark:border-white/10 dark:bg-surface-high dark:text-fg"
-                              onClick={() => onClearBook(row)}
+                              className={`rounded-lg px-2.5 py-1 text-xs font-medium transition disabled:pointer-events-none disabled:opacity-40 ${
+                                confirmBookKey === row.key
+                                  ? "border border-rose-500/50 bg-rose-500/10 text-rose-700 dark:border-rose-400/50 dark:bg-rose-500/15 dark:text-rose-200"
+                                  : "border border-ink-300 bg-ink-200 text-ink-800 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-high dark:text-fg"
+                              }`}
+                              onClick={() => {
+                                if (confirmBookKey === row.key) {
+                                  setConfirmBookKey(null);
+                                  onClearBook(row);
+                                } else {
+                                  setConfirmBookKey(row.key);
+                                }
+                              }}
                               disabled={rowDisabled}
                               title={
                                 row.busy
@@ -352,7 +389,11 @@ export function CachePanel({
                                     : i18n.cacheClearBookTitle
                               }
                             >
-                              {busy ? i18n.cacheScanning : i18n.cacheClear}
+                              {busy
+                                ? i18n.cacheScanning
+                                : confirmBookKey === row.key
+                                  ? i18n.cacheConfirmClear
+                                  : i18n.cacheClear}
                             </button>
                           </span>
                         </div>
@@ -410,7 +451,7 @@ export function CachePanel({
                                           : undefined
                                     }
                                   >
-                                    {busyEntryKey === p.key
+                                    {busyEntryKeys.has(`${p.group}:${p.key}`)
                                       ? i18n.cacheScanning
                                       : i18n.cacheClear}
                                   </button>
@@ -568,7 +609,7 @@ export function CachePanel({
                                       : undefined
                                   }
                                 >
-                                  {busyEntryKey === e.key
+                                  {busyEntryKeys.has(`${g.id}:${e.key}`)
                                     ? i18n.cacheScanning
                                     : i18n.cacheClear}
                                 </button>

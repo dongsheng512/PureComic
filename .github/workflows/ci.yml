@@ -26,9 +26,9 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy -p comic-core -p comic-engines -p comic-cli --all-targets -- -D warnings
+        run: cargo clippy -p comic-core -p comic-engines --all-targets -- -D warnings
       - name: test
-        run: cargo test -p comic-core -p comic-engines -p comic-cli
+        run: cargo test -p comic-core -p comic-engines
 
   tauri-app:
     name: tauri app (macOS)

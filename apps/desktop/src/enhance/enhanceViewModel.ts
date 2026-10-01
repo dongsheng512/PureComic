@@ -11,6 +11,35 @@ import type {
 export type Preset = "fast" | "balanced" | "quality";
 export type Container = "cbz" | "folder" | "zip";
 export type ImgFmt = "jpeg" | "png" | "webp" | "same";
+export type ExportQuality = "high" | "balanced" | "compact" | "minimal";
+
+/**
+ * 导出 JPEG 画质档位 → libjpeg quality 值。
+ *
+ * 档位是实测定的，不是拍的：在真实 Real-CUGAN 输出上按阅读宽度（1600px）算 SSIM，
+ * quality 88 与 92 的差距在小数点后第 4～5 位（肉眼不可分辨），体积小约 13%。
+ */
+export const JPEG_QUALITY_OF: Record<ExportQuality, number> = {
+  high: 92,
+  balanced: 88,
+  compact: 82,
+  minimal: 75,
+};
+
+export const DEFAULT_EXPORT_QUALITY: ExportQuality = "balanced";
+
+export function jpegQualityOf(q: ExportQuality): number {
+  return JPEG_QUALITY_OF[q] ?? JPEG_QUALITY_OF[DEFAULT_EXPORT_QUALITY];
+}
+
+/**
+ * 画质档位是否对该格式生效。
+ * PNG 恒为无损；WebP 在本项目（image 0.25）只有无损编码，两者都不吃 quality。
+ * `same` 只在源图解析为 JPEG 时生效。
+ */
+export function qualityAppliesTo(fmt: ImgFmt): boolean {
+  return fmt === "jpeg" || fmt === "same";
+}
 
 export function formatBytes(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;

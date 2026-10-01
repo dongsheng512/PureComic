@@ -126,8 +126,25 @@ async fn estimate_disk_usage(
     state: State<'_, AppState>,
     path: String,
     scale: u8,
+    engine: Option<String>,
+    image_format: Option<String>,
+    output_dir: Option<String>,
 ) -> Result<comic_core::estimate::DiskEstimate, AppError> {
-    state.scheduler.estimate(&path, scale).await
+    // 引擎与格式决定中间页是 JPEG 还是 PNG，估算必须知道，
+    // 否则默认（Real-CUGAN + JPEG）路径会被高估数倍。
+    let engine = match engine.as_deref() {
+        Some(id) if !id.trim().is_empty() => comic_core::job::parse_engine_kind(id)?,
+        _ => comic_engines::EngineKind::RealCuganCoreMl,
+    };
+    let params = comic_core::estimate::EstimateParams {
+        scale,
+        engine,
+        image_format: comic_core::job::parse_image_format(
+            image_format.as_deref().unwrap_or("jpeg"),
+        ),
+    };
+    let out = output_dir.as_deref().map(std::path::Path::new);
+    state.scheduler.estimate(&path, params, out).await
 }
 
 #[tauri::command]

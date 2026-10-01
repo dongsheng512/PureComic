@@ -31,7 +31,10 @@ export type ValidateResult = {
 };
 
 export type DiskEstimate = {
+  /** 整本作业峰值占用（工作盘 in+out，加上导出物） */
   estimateBytes: number;
+  /** 预计最终导出物体积 */
+  outputBytes: number;
   freeBytes: number;
   ok: boolean;
   pageCount: number;

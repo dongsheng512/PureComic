@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { alignIndex, stepIndex } from "./readerNav";
+import { alignIndex, progressIndex, stepIndex } from "./readerNav";
+
+describe("progressIndex", () => {
+  it("maps the track onto pages and keeps the right edge on the last page", () => {
+    expect(progressIndex(0, 10)).toBe(0);
+    expect(progressIndex(0.099, 10)).toBe(0);
+    expect(progressIndex(0.1, 10)).toBe(1);
+    expect(progressIndex(0.99, 10)).toBe(9);
+    expect(progressIndex(1, 10)).toBe(9);
+    expect(progressIndex(-1, 10)).toBe(0);
+    expect(progressIndex(2, 10)).toBe(9);
+    expect(progressIndex(0.5, 0)).toBe(0);
+  });
+});
 
 describe("alignIndex", () => {
   it("clamps into range", () => {

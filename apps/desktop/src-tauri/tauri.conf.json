@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PureComic",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "identifier": "app.comic.enhance",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -14,7 +14,7 @@
       {
         "title": "PureComic",
         "width": 1100,
-        "height": 700,
+        "height": 720,
         "minWidth": 900,
         "minHeight": 640,
         "resizable": true,

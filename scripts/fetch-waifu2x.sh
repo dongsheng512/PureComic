@@ -288,8 +288,7 @@ main() {
   echo "  models: $MODELS_DEST"
   echo "  checksums: $CHECKSUMS"
   echo ""
-  echo "Run real engine:"
-  echo "  COMIC_USE_MOCK=0 cargo run -p comic-cli -- doctor"
+  echo "Run the desktop app. Force mock with COMIC_USE_MOCK=1."
 }
 
 main

@@ -34,9 +34,9 @@ import {
   restoreDefaultWindowMinSize,
   syncReaderBarHeightCss,
 } from "./smartFit";
-import { ProgressHud } from "./ProgressHud";
+import { ProgressHud, type ProgressPreview } from "./ProgressHud";
 import { ReaderToolbar } from "./ReaderToolbar";
-import { alignIndex, stepIndex, type LoadedPage } from "./readerNav";
+import { alignIndex, progressIndex, stepIndex, type LoadedPage } from "./readerNav";
 import { useKeyboardNav } from "./useKeyboardNav";
 import { useSwipePageTurn } from "./useSwipePageTurn";
 import { usePagePreload } from "./usePagePreload";
@@ -875,12 +875,29 @@ export function ReaderView({
   const progressPct = total > 0 ? Math.min(100, ((lastVisible + 1) / total) * 100) : 0;
   const sliderPage = Math.min(total, (visibleIndexes[0] ?? pageIndex) + 1);
 
-  const seekProgress = (clientX: number, rect: DOMRect) => {
-    if (total <= 0) return;
+  // 拖动只预览落点，松手才翻页，避免途经的每一页都去加载
+  const progressAt = (clientX: number, rect: DOMRect): ProgressPreview | null => {
+    if (total <= 0 || rect.width <= 0) return null;
     const t = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    const idx = Math.min(total - 1, Math.floor(t * total));
-    if (webtoon) requestScrollToPage(alignIndex(idx, effectiveSpread, total), "top");
-    else setPageIndex(alignIndex(idx, effectiveSpread, total));
+    const idx = alignIndex(progressIndex(t, total), effectiveSpread, total);
+    const end = effectiveSpread === "double" && idx + 1 < total ? idx + 1 : idx;
+    const chapter =
+      barCompact || !webtoon ? null : chapterIndexFromName(state?.pages[idx]?.name ?? "");
+    const chapterSuffix =
+      chapter == null ? "" : ` · ${i18n.readerChapter.replace("{n}", String(chapter + 1))}`;
+    const label =
+      end !== idx
+        ? `${idx + 1}–${end + 1} / ${total}${chapterSuffix}`
+        : `${idx + 1} / ${total}${chapterSuffix}`;
+    return { pct: t * 100, label, page: idx + 1 };
+  };
+
+  const seekProgress = (clientX: number, rect: DOMRect) => {
+    const hit = progressAt(clientX, rect);
+    if (!hit || hit.page - 1 === pageIndex) return;
+    skipProgressFlashRef.current = true;
+    if (webtoon) requestScrollToPage(hit.page - 1, "top");
+    else setPageIndex(hit.page - 1);
   };
 
   const commitPageJump = () => {
@@ -1085,12 +1102,15 @@ export function ReaderView({
         progressHud={progressHud}
         progressPct={progressPct}
         pageLabel={pageLabel}
+        pageNumber={sliderPage}
         showPageLabel={barHidden || fullscreen}
         onDark={canvasPreset.onDark}
         progressTimer={progressTimer}
         setProgressHud={setProgressHud}
         flashProgress={flashProgress}
+        previewProgress={progressAt}
         seekProgress={seekProgress}
+        go={go}
       />
 
       {enhance.clearToast && (

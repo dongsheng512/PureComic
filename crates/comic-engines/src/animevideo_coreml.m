@@ -3,6 +3,7 @@
 #import <Accelerate/Accelerate.h>
 #include <Availability.h>
 #include "animevideo_coreml.h"
+#include "coreml_cache.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -111,25 +112,23 @@ static void comic_avd_warmup(MLModel *model) {
 
 static MLModel *comic_avd_compile_load(NSString *path, NSError **err) {
     NSURL *url = [NSURL fileURLWithPath:path];
-    NSString *cached = [path hasSuffix:@".mlpackage"]
+    NSString *legacy = [path hasSuffix:@".mlpackage"]
         ? [NSString stringWithFormat:@"%@.i%d.mlmodelc",
                       [path stringByDeletingPathExtension], kAvdIn]
         : [NSString stringWithFormat:@"%@.i%d.c", path, kAvdIn];
-    BOOL cacheDir = NO;
+    NSString *parent = [[path stringByDeletingLastPathComponent] lastPathComponent];
+    NSString *leaf = [NSString stringWithFormat:@"%@_%@", parent, legacy.lastPathComponent];
+    BOOL ready = NO;
+    NSURL *dest = comic_coreml_cache_destination(legacy, leaf, &ready);
     NSURL *compiled = nil;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:cached isDirectory:&cacheDir] && cacheDir) {
-        compiled = [NSURL fileURLWithPath:cached isDirectory:YES];
+    if (ready) {
+        compiled = dest;
     } else {
         NSURL *tmp = [MLModel compileModelAtURL:url error:err];
-        if (tmp) {
-            [[NSFileManager defaultManager] removeItemAtPath:cached error:nil];
-            if ([[NSFileManager defaultManager] copyItemAtURL:tmp
-                                                       toURL:[NSURL fileURLWithPath:cached isDirectory:YES]
-                                                        error:nil]) {
-                compiled = [NSURL fileURLWithPath:cached isDirectory:YES];
-            } else {
-                compiled = tmp;
-            }
+        if (tmp && comic_coreml_store_compiled(tmp, dest)) {
+            compiled = dest;
+        } else if (tmp) {
+            compiled = tmp;
         } else {
             compiled = url;
         }
@@ -209,11 +208,23 @@ static unsigned char *comic_avd_pad_canvas(const unsigned char *rgb, int w, int 
     if (!canvas) {
         return NULL;
     }
+    const int x0 = kAvdPad;
+    const int x1 = kAvdPad + w;
     for (int y = 0; y < ch; y++) {
         const int sy = comic_avd_reflect(y - kAvdPad, h);
         const unsigned char *src = rgb + ((size_t)sy * (size_t)w) * 3;
         unsigned char *dst = canvas + ((size_t)y * (size_t)cw) * 3;
-        for (int x = 0; x < cw; x++) {
+        for (int x = 0; x < x0 && x < cw; x++) {
+            const int sx = comic_avd_reflect(x - kAvdPad, w);
+            memcpy(dst + (size_t)x * 3, src + (size_t)sx * 3, 3);
+        }
+        if (w > 0 && x0 < cw) {
+            const int n = (x1 < cw ? x1 : cw) - x0;
+            if (n > 0) {
+                memcpy(dst + (size_t)x0 * 3, src, (size_t)n * 3);
+            }
+        }
+        for (int x = x1; x < cw; x++) {
             const int sx = comic_avd_reflect(x - kAvdPad, w);
             memcpy(dst + (size_t)x * 3, src + (size_t)sx * 3, 3);
         }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseAccelInfo } from "./enhanceViewModel";
+import {
+  DEFAULT_EXPORT_QUALITY,
+  JPEG_QUALITY_OF,
+  jpegQualityOf,
+  parseAccelInfo,
+  qualityAppliesTo,
+} from "./enhanceViewModel";
 import type { EngineStatus } from "../types";
 
 describe("parseAccelInfo", () => {
@@ -27,5 +33,35 @@ describe("parseAccelInfo", () => {
     };
     const info = parseAccelInfo([], "mock", "", fallback);
     expect(info.gpu).toBe(false);
+  });
+});
+
+describe("export quality tiers", () => {
+  it("maps every tier to a valid libjpeg quality, ordered small to large", () => {
+    const values = Object.values(JPEG_QUALITY_OF);
+    for (const q of values) {
+      expect(q).toBeGreaterThanOrEqual(1);
+      expect(q).toBeLessThanOrEqual(100);
+    }
+    expect(JPEG_QUALITY_OF.minimal).toBeLessThan(JPEG_QUALITY_OF.compact);
+    expect(JPEG_QUALITY_OF.compact).toBeLessThan(JPEG_QUALITY_OF.balanced);
+    expect(JPEG_QUALITY_OF.balanced).toBeLessThan(JPEG_QUALITY_OF.high);
+  });
+
+  it("default tier is the one labelled recommended", () => {
+    expect(DEFAULT_EXPORT_QUALITY).toBe("balanced");
+    expect(jpegQualityOf(DEFAULT_EXPORT_QUALITY)).toBe(JPEG_QUALITY_OF.balanced);
+  });
+
+  it("falls back to the default for an unknown tier", () => {
+    expect(jpegQualityOf("nonsense" as never)).toBe(JPEG_QUALITY_OF[DEFAULT_EXPORT_QUALITY]);
+  });
+
+  it("quality only applies where the encoder is lossy", () => {
+    expect(qualityAppliesTo("jpeg")).toBe(true);
+    expect(qualityAppliesTo("same")).toBe(true);
+    // PNG is always lossless; WebP is lossless-only with image 0.25
+    expect(qualityAppliesTo("png")).toBe(false);
+    expect(qualityAppliesTo("webp")).toBe(false);
   });
 });

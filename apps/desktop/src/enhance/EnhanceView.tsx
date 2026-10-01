@@ -16,7 +16,7 @@ import { EnhanceSummaryBar } from "./EnhanceSummaryBar";
 import { OutputSettings } from "./OutputSettings";
 import { SourceDropCard } from "./SourceDropCard";
 import { Field } from "./controls";
-import type { Container, ImgFmt, Preset } from "./enhanceViewModel";
+import type { Container, ExportQuality, ImgFmt, Preset } from "./enhanceViewModel";
 
 export type EnhanceViewProps = {
   i18n: Messages;
@@ -33,6 +33,7 @@ export type EnhanceViewProps = {
   outputDir: string | null;
   container: Container;
   imageFormat: ImgFmt;
+  quality: ExportQuality;
   // 增强方案
   preset: Preset;
   engineId: string;
@@ -58,6 +59,7 @@ export type EnhanceViewProps = {
   onNoiseChange: (n: -1 | 0 | 1 | 2 | 3) => void;
   onContainerChange: (c: Container) => void;
   onImageFormatChange: (f: ImgFmt) => void;
+  onQualityChange: (q: ExportQuality) => void;
   onStart: () => void;
   onOpenQueue: () => void;
   onCancelJob: (id: string) => void;
@@ -93,9 +95,11 @@ export const EnhanceView = memo(function EnhanceView(props: EnhanceViewProps) {
             outputDir={props.outputDir}
             container={props.container}
             imageFormat={props.imageFormat}
+            quality={props.quality}
             onPickOutput={props.onPickOutput}
             onContainerChange={props.onContainerChange}
             onImageFormatChange={props.onImageFormatChange}
+            onQualityChange={props.onQualityChange}
             fill={!!props.source}
           />
         </div>
@@ -141,6 +145,7 @@ export const EnhanceView = memo(function EnhanceView(props: EnhanceViewProps) {
         outputDir={props.outputDir}
         container={props.container}
         imageFormat={props.imageFormat}
+        quality={props.quality}
         source={props.source}
         sourceLoading={props.sourceLoading}
         validation={props.validation}

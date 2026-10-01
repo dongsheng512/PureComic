@@ -4,6 +4,7 @@
 #import <Accelerate/Accelerate.h>
 #include <Availability.h>
 #include "realesrgan_coreml.h"
+#include "coreml_cache.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -141,10 +142,13 @@ int comic_esrgan_coreml_load(const char *model_path) {
         if (isDir || [path hasSuffix:@".mlmodelc"]) {
             compiled = [NSURL fileURLWithPath:path isDirectory:YES];
         } else {
-            NSString *cached = [path stringByAppendingString:@"c"];
-            BOOL cacheDir = NO;
-            if ([[NSFileManager defaultManager] fileExistsAtPath:cached isDirectory:&cacheDir] && cacheDir) {
-                compiled = [NSURL fileURLWithPath:cached isDirectory:YES];
+            NSString *legacy = [path stringByAppendingString:@"c"];
+            NSString *parent = [[path stringByDeletingLastPathComponent] lastPathComponent];
+            NSString *leaf = [NSString stringWithFormat:@"%@_%@", parent, legacy.lastPathComponent];
+            BOOL ready = NO;
+            NSURL *dest = comic_coreml_cache_destination(legacy, leaf, &ready);
+            if (ready) {
+                compiled = dest;
             } else {
                 NSURL *url = [NSURL fileURLWithPath:path isDirectory:NO];
                 NSURL *tmp = [MLModel compileModelAtURL:url error:&err];
@@ -152,14 +156,7 @@ int comic_esrgan_coreml_load(const char *model_path) {
                     [g_lock unlock];
                     return -2;
                 }
-                [[NSFileManager defaultManager] removeItemAtPath:cached error:nil];
-                if ([[NSFileManager defaultManager] copyItemAtURL:tmp
-                                                           toURL:[NSURL fileURLWithPath:cached isDirectory:YES]
-                                                           error:&err]) {
-                    compiled = [NSURL fileURLWithPath:cached isDirectory:YES];
-                } else {
-                    compiled = tmp;
-                }
+                compiled = comic_coreml_store_compiled(tmp, dest) ? dest : tmp;
             }
         }
         MLModelConfiguration *cfg = [[MLModelConfiguration alloc] init];

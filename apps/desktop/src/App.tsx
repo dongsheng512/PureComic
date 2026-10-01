@@ -37,9 +37,12 @@ import { stateLabel, t } from "./i18n";
 import { loadReaderBg, readerBgPreset } from "./reader/prefs";
 import { EnhanceView } from "./enhance/EnhanceView";
 import {
+  DEFAULT_EXPORT_QUALITY,
   formatBytes,
+  jpegQualityOf,
   migrateBatchEngineId,
   type Container,
+  type ExportQuality,
   type ImgFmt,
   type Preset,
 } from "./enhance/enhanceViewModel";
@@ -128,6 +131,7 @@ export default function App() {
   const [tta, setTta] = useState(false);
   const [container, setContainer] = useState<Container>("cbz");
   const [imageFormat, setImageFormat] = useState<ImgFmt>("jpeg");
+  const [exportQuality, setExportQuality] = useState<ExportQuality>(DEFAULT_EXPORT_QUALITY);
   const [validation, setValidation] = useState<ValidateResult | null>(null);
   const [estimate, setEstimate] = useState<DiskEstimate | null>(null);
   const [estimateLoading, setEstimateLoading] = useState(false);
@@ -155,7 +159,8 @@ export default function App() {
   const [cacheExpanded, setCacheExpanded] = useState<CacheGroupId | null>(null);
   const [cacheEntries, setCacheEntries] = useState<CacheEntry[] | null>(null);
   const [cacheEntriesLoading, setCacheEntriesLoading] = useState(false);
-  const [cacheBusyEntryKey, setCacheBusyEntryKey] = useState<string | null>(null);
+  /** 单条明细清理中：`${group}:${key}` 复合键集合——book 视图下不同组的 key 可能同名 */
+  const [cacheBusyEntryKeys, setCacheBusyEntryKeys] = useState<Set<string>>(new Set());
   const [theme, setTheme] = useState<Theme>(readTheme);
   /** 独立阅读器会话；非 null 时全屏展示 ComicReader，隐藏主导航 */
   const [readerSession, setReaderSession] = useState<ReaderSession | null>(null);
@@ -402,23 +407,28 @@ export default function App() {
   /** 清掉单本。`key` 是明细行上的标识（目录名 / 书 id / 任务 id）。 */
   const runClearCacheEntry = useCallback(
     async (id: CacheGroupId, key: string) => {
-      setCacheBusyEntryKey(key);
+      const busyKey = `${id}:${key}`;
+      setCacheBusyEntryKeys((prev) => new Set(prev).add(busyKey));
       setCacheLastFreed(null);
       try {
         const r = await clearCacheEntry(id, key);
         setCacheLastFreed(r.bytesFreed);
-        // 顺序重要：先刷新总览、再重拉明细。
-        // 反过来的话明细会先拿到新数字、总览还是旧的，用户会看到"清完了但体积没变"。
+        // 顺序重要：先刷新总览、再重拉明细。明细统一按 cacheExpanded 重拉，
+        // 不能按清理目标所在的组拉——面板可能正开在另一个视图/分组上。
         await refreshCache();
-        setCacheEntries(await cacheGroupEntries(id));
+        await reloadExpandedEntries();
         if (id === "jobs") await refreshJobs();
       } catch (e) {
         setError(errMsg(e));
       } finally {
-        setCacheBusyEntryKey(null);
+        setCacheBusyEntryKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(busyKey);
+          return next;
+        });
       }
     },
-    [refreshCache, refreshJobs],
+    [refreshCache, refreshJobs, reloadExpandedEntries],
   );
 
   /** 关闭缓存面板。
@@ -571,17 +581,28 @@ export default function App() {
     }
   }, [ingestPath]);
 
-  // 磁盘预估：源文件或倍率变化后（去抖）重新计算
+  // 磁盘预估：等校验出页数后再算。倍率 / 引擎 / 输出格式 / 输出目录变化只重算体积，
+  // 不再扫一遍书。引擎与格式会决定中间页是 JPEG 还是 PNG，估算结果差好几倍。
+  // 输出目录在另一块盘上时，可用空间取工作盘和输出盘里更小的那个，和真正开任务一致。
   useEffect(() => {
-    if (!source) {
-      setEstimate(null);
-      setEstimateLoading(false);
+    if (!source || !validation) {
+      if (!source) {
+        setEstimate(null);
+        setEstimateLoading(false);
+      }
       return;
     }
     let cancelled = false;
     setEstimateLoading(true);
     const timer = setTimeout(() => {
-      estimateDisk(source, scale)
+      // "auto" 传给后端会被解析成固定引擎，与开任务时 pick_engine 的可用性
+      // 选择可能不一致（中间页 JPEG/PNG 差 2 倍+）——按 catalog 里实际可用的
+      // 引擎传参，保证预估与实跑同口径
+      const effectiveEngine =
+        engineId === "auto"
+          ? (catalog.find((e) => e.available)?.id ?? engineId)
+          : engineId;
+      estimateDisk(source, scale, effectiveEngine, imageFormat, outputDir)
         .then((e) => {
           if (cancelled) return;
           setEstimate(e);
@@ -597,7 +618,7 @@ export default function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [source, scale]);
+  }, [source, scale, engineId, imageFormat, outputDir, validation, catalog]);
 
   /** Prefer CBZ/ZIP files over random paths; accept directories. */
   const pickDroppedPath = (paths: string[]): string | null => {
@@ -818,7 +839,7 @@ export default function App() {
           dir: outputDir,
           container,
           imageFormat,
-          jpegQuality: 92,
+          jpegQuality: jpegQualityOf(exportQuality),
         },
         enhance: { scale, noiseLevel: noise, tta, cuganModel },
       });
@@ -1201,6 +1222,7 @@ export default function App() {
             outputDir={outputDir}
             container={container}
             imageFormat={imageFormat}
+            quality={exportQuality}
             preset={preset}
             engineId={engineId}
             cuganModel={cuganModel}
@@ -1223,6 +1245,7 @@ export default function App() {
             onNoiseChange={setNoise}
             onContainerChange={setContainer}
             onImageFormatChange={setImageFormat}
+            onQualityChange={setExportQuality}
             onStart={start}
             onOpenQueue={() => setQueueOpen(true)}
             onCancelJob={onCancelJob}
@@ -1360,7 +1383,7 @@ export default function App() {
           expandedId={cacheExpanded}
           entries={cacheEntries}
           entriesLoading={cacheEntriesLoading}
-          busyEntryKey={cacheBusyEntryKey}
+          busyEntryKeys={cacheBusyEntryKeys}
           onToggleGroup={(id) => void toggleCacheGroup(id)}
           onClearEntry={(id, key) => void runClearCacheEntry(id, key)}
           onClose={closeCachePanel}
