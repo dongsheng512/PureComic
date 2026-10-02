@@ -44,13 +44,36 @@ jobs:
         run: |
           BIN=apps/desktop/src-tauri/binaries
           RES=apps/desktop/src-tauri/resources
-          mkdir -p "$BIN" \
-            "$RES/models-cunet" "$RES/models-se" "$RES/models-pro" "$RES/models-nose" \
-            "$RES/waifu2x-coreml" "$RES/realesrgan-coreml" "$RES/realcugan-coreml"
+          # ⚠️ 这两个目录都被 .gitignore，checkout 后**不存在**。
+          #    下面用 `: > file` 写 stub 前必须先建目录，否则重定向报
+          #    "No such file or directory" —— GH Actions 默认 `bash -e`，整个 job 直接挂。
+          mkdir -p "$BIN" "$RES"
+          # 动态解析 tauri.conf.json 的 resources 清单建 stub 目录：
+          # 清单里每个相对目录都要存在，否则 tauri-build 直接报
+          # "resource path doesn't exist"。此前三份手工清单三次不同步挂 CI，
+          # 改为单一事实来源后新增资源不再需要改这里。
+          #
+          # ⚠️ 清单条目是相对 **src-tauri/** 解析的（tauri-build 的口径），
+          #    不是相对 resources/。条目本身已带 "resources/" 前缀，
+          #    所以基准目录必须是 src-tauri —— 若按 $RES 拼接会得到
+          #    resources/resources/... 这种多一层的路径，目录照样不存在、CI 仍挂。
+          python3 - apps/desktop/src-tauri <<'PY'
+          import json, pathlib, sys
+          base = pathlib.Path(sys.argv[1])
+          conf = json.loads((base / "tauri.conf.json").read_text())
+          for entry in conf["bundle"]["resources"]:
+              p = base / entry
+              if entry.endswith("/"):
+                  p.mkdir(parents=True, exist_ok=True)
+              else:
+                  p.parent.mkdir(parents=True, exist_ok=True)
+                  p.touch()
+          PY
           for triple in aarch64-apple-darwin x86_64-apple-darwin; do
             : > "$BIN/waifu2x-ncnn-vulkan-$triple"
             : > "$BIN/realcugan-ncnn-vulkan-$triple"
           done
+          # 清单之外仍被 build 引用的散文件兜底（sidecar target 目录等）
           : > "$RES/NOTICE"
           : > "$RES/checksums.sha256"
       - name: clippy

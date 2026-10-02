@@ -354,8 +354,9 @@
   "readerBgSepia": "暖纸",
   "readerWebtoon": "竖读",
   "readerWebtoonHint": "宽度撑满，向下滚动",
-  "readerWebtoonNoDouble": "竖读时不可双页",
   "readerWebtoonNoRtl": "竖读固定从上到下",
   "readerWebtoonFitLocked": "竖读使用适应宽度，不改变窗口",
-  "readerChapter": "第 {n} 话"
+  "readerChapter": "第 {n} 话",
+  "readerPagePct": "已读 {pct}%",
+  "readerAiSettings": "AI 设置"
 }

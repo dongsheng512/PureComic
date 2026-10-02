@@ -98,14 +98,21 @@ pub fn write_comic_jpeg(path: &Path, image: &RgbImage, quality: u8) -> Result<()
 }
 
 fn page_is_gray(rgb: &[u8], width: u32, height: u32) -> bool {
-    if rgb.chunks_exact(3).all(|p| p[0] == p[1] && p[1] == p[2]) {
+    if rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .all(|p| p[0] == p[1] && p[1] == p[2])
+    {
         return true;
     }
     mean_de_from_gray(rgb, width, height) < COLOR_DE_MIN
 }
 
 fn rec601_luma(rgb: &[u8]) -> Vec<u8> {
-    rgb.chunks_exact(3)
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
         .map(|p| {
             ((19_595 * p[0] as u32 + 38_470 * p[1] as u32 + 7_471 * p[2] as u32 + 32_768) >> 16)
                 as u8

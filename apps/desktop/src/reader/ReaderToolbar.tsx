@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
 import { stateLabel, type Messages } from "../i18n";
 import type { EnhanceCacheStats, JobStatus, ReaderState } from "../types";
 import { setNativeWindowBg, startWindowDrag } from "../windowDrag";
@@ -27,7 +27,7 @@ import {
   type ReaderBgId,
   type SpreadMode,
 } from "./prefs";
-import { alignIndex, jobFileName, type LoadedPage } from "./readerNav";
+import { jobFileName, type LoadedPage, type ReadingModeChoice } from "./readerNav";
 import { fitWindowToPageUrls, restoreDefaultWindowMinSize } from "./smartFit";
 
 type EngineOption = { id: string; main: string; sub: string; noise?: boolean };
@@ -60,12 +60,12 @@ export type ReaderToolbarProps = {
   webtoon: boolean;
   effectiveSpread: SpreadMode;
   direction: ReadDirection;
-  setSpread: Dispatch<SetStateAction<SpreadMode>>;
   setDirection: Dispatch<SetStateAction<ReadDirection>>;
-  setPageIndex: Dispatch<SetStateAction<number>>;
   pageIndex: number;
   total: number;
   toggleView: () => void;
+  /** 版式三选一（单页 / 双页 / 竖读）的统一入口，三者两两可直切 */
+  selectReadingMode: (choice: ReadingModeChoice) => void;
   canPrev: boolean;
   canNext: boolean;
   requestScrollToPage: (index: number, where: "top" | "bottom") => void;
@@ -75,11 +75,10 @@ export type ReaderToolbarProps = {
   pageDraft: string;
   setPageDraft: Dispatch<SetStateAction<string>>;
   pageLabel: string;
+  /** 阅读进度百分比（0–100）；total 为 0 时 null，chip 尾注用 */
+  pagePct: number | null;
   commitPageJump: () => void;
   visibleIndexes: number[];
-  sliderDragValue: number | null;
-  setSliderDragValue: Dispatch<SetStateAction<number | null>>;
-  sliderPage: number;
   showingAi: boolean;
   enhanceOn: boolean;
   pageEnhancing: boolean;
@@ -257,12 +256,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     pageEditing,
     pageDraft,
     pageLabel,
+    pagePct,
     canPrev,
     canNext,
     pageIndex,
     visibleIndexes,
-    sliderDragValue,
-    sliderPage,
     showingAi,
     pageEnhancing,
     engineOptions,
@@ -416,37 +414,50 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
 
   const readingModeSeg = (
     <div className="reader-seg" role="group" aria-label={i18n.readerMode}>
+      {/* 单页 / 双页 / 竖读 = 三个**互斥版式**，两两都能直接切。
+          原先单页/双页在竖读下是 disabled（竖读时不可双页），
+          于是退出竖读只能靠再点一次竖读按钮 —— 现在三点互通：
+          竖读下点单页/双页会退出竖读并切到该版式。
+          ⚠️ 因此不再有 disabled={webtoon}，title 里那两句「竖读时不可…」
+            也不再适用（它们描述的是已废弃的限制）。 */}
       <button
         type="button"
-        className={`reader-seg-item ${effectiveSpread === "single" ? "is-active" : ""} disabled:opacity-35`}
+        className={`reader-seg-item ${effectiveSpread === "single" ? "is-active" : ""}`}
         aria-label={i18n.readerSingle}
         onMouseEnter={(e) => showTip(e, i18n.readerSingle)}
         onMouseLeave={hideTip}
         aria-pressed={effectiveSpread === "single"}
-        disabled={webtoon}
-        title={webtoon ? i18n.readerWebtoonHint : undefined}
-        onClick={() => {
-          p.setSpread("single");
-          p.setPageIndex((i) => alignIndex(i, "single", total));
-        }}
+        onClick={() => p.selectReadingMode("single")}
       >
         <IconSinglePage />
       </button>
       <button
         type="button"
-        className={`reader-seg-item ${effectiveSpread === "double" ? "is-active" : ""} disabled:opacity-35`}
+        className={`reader-seg-item ${effectiveSpread === "double" ? "is-active" : ""}`}
         aria-label={i18n.readerDouble}
         onMouseEnter={(e) => showTip(e, i18n.readerDouble)}
         onMouseLeave={hideTip}
         aria-pressed={effectiveSpread === "double"}
-        disabled={webtoon}
-        title={webtoon ? i18n.readerWebtoonNoDouble : undefined}
-        onClick={() => {
-          p.setSpread("double");
-          p.setPageIndex((i) => alignIndex(i, "double", total));
-        }}
+        onClick={() => p.selectReadingMode("double")}
       >
         <IconDoublePage />
+      </button>
+      {/* 顺序：单页 / 双页 / 竖读 / 方向 / 隐藏栏。
+          竖读与方向原为「方向在前、竖读在后」，用户要求对调 ——
+          换后「单页·双页·竖读」三个都是**版式**，方向是阅读顺序，
+          版式聚在一起、顺序单独在右，分组读起来更顺。
+          竖读按钮是**开关**语义（再点一次退回页模式）。 */}
+      <button
+        type="button"
+        className={`reader-seg-item ${webtoon ? "is-active" : ""}`}
+        aria-label={i18n.readerWebtoon}
+        aria-pressed={webtoon}
+        title={i18n.readerWebtoonHint}
+        onMouseEnter={(e) => showTip(e, i18n.readerWebtoonHint)}
+        onMouseLeave={hideTip}
+        onClick={p.toggleView}
+      >
+        <IconWebtoon />
       </button>
       <button
         type="button"
@@ -463,45 +474,23 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
       >
         {direction === "rtl" ? <IconRtl /> : <IconLtr />}
       </button>
-      <button
-        type="button"
-        className={`reader-seg-item ${webtoon ? "is-active" : ""}`}
-        aria-label={i18n.readerWebtoon}
-        aria-pressed={webtoon}
-        title={i18n.readerWebtoonHint}
-        onMouseEnter={(e) => showTip(e, i18n.readerWebtoonHint)}
-        onMouseLeave={hideTip}
-        onClick={p.toggleView}
-      >
-        <IconWebtoon />
-      </button>
-      <button
-        type="button"
-        className="reader-seg-item"
-        aria-label={i18n.readerHideBar}
-        onMouseEnter={(e) => showTip(e, i18n.readerHideBar)}
-        onMouseLeave={hideTip}
-        onClick={() => {
-          hideTip();
-          setMoreOpen(false);
-          setBar(true);
-        }}
-      >
-        <IconHideBar />
-      </button>
     </div>
   );
 
   const pagerControls = (
     <div className="pointer-events-auto group/pager flex flex-col items-center">
-      <div className="flex items-center gap-0.5">
+      {/* reader-pager-group：让「箭头 + 页码 + 箭头」的 hover 底连成一整块，
+          避免从箭头滑到页码时闪断（方案 B，只改 hover，不加常驻轨道）。 */}
+      <div className="reader-pager-group">
         {!barTiny && (
           <button
             type="button"
             className="reader-icon-btn"
             disabled={!canPrev}
             aria-label={i18n.readerPrevPage}
-            onMouseEnter={(e) => showTip(e, i18n.readerPrevPage)}
+            onMouseEnter={(e) =>
+              showTip(e, webtoon ? i18n.readerPrevPage : `${i18n.readerPrevPage} ←`)
+            }
             onMouseLeave={hideTip}
             onClick={() => {
               if (webtoon) p.requestScrollToPage(Math.max(0, pageIndex - 1), "top");
@@ -529,13 +518,22 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             className={`reader-page-chip-edit ${barTiny ? "reader-page-chip-sm" : ""}`}
             inputMode="numeric"
             aria-label={i18n.readerJumpHint}
+            /* 4 位页码对条漫也够用；超长输入提交时只会被 clamp 回有效范围 */
+            maxLength={4}
           />
         ) : (
           <button
             type="button"
             className={`reader-page-chip ${barTiny ? "reader-page-chip-sm" : ""}`}
-            aria-label={i18n.readerPageLabel}
-            onMouseEnter={(e) => showTip(e, i18n.readerPageLabel)}
+            aria-label={`${i18n.readerPageLabel} · ${pageLabel}`}
+            onMouseEnter={(e) =>
+              showTip(
+                e,
+                pagePct != null
+                  ? `${i18n.readerPageLabel} · ${i18n.readerPagePct.replace("{pct}", String(pagePct))}`
+                  : i18n.readerPageLabel,
+              )
+            }
             onMouseLeave={hideTip}
             disabled={total <= 0}
             onClick={() => {
@@ -545,6 +543,13 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             }}
           >
             {pageLabel}
+            {/* 进度尾注：仅悬停翻页组时显示——常驻会把双页页码挤到折行；
+                拖动/编辑态不显示（预览页码跳变时百分比跟着闪）。窄窗不显示。 */}
+            {!barTiny && pagePct != null && (
+              <span className="ml-1.5 hidden opacity-50 group-hover/pager:inline">
+                {pagePct}%
+              </span>
+            )}
           </button>
         )}
         {!barTiny && (
@@ -553,7 +558,9 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             className="reader-icon-btn"
             disabled={!canNext}
             aria-label={i18n.readerNextPage}
-            onMouseEnter={(e) => showTip(e, i18n.readerNextPage)}
+            onMouseEnter={(e) =>
+              showTip(e, webtoon ? i18n.readerNextPage : `${i18n.readerNextPage} →`)
+            }
             onMouseLeave={hideTip}
             onClick={() => {
               if (webtoon) p.requestScrollToPage(Math.min(Math.max(0, total - 1), pageIndex + 1), "top");
@@ -564,57 +571,10 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
           </button>
         )}
       </div>
-      {total > 0 && !barTiny && (
-        <div className="pointer-events-none absolute top-full z-20 pt-2 opacity-0 transition-opacity duration-150 group-hover/pager:pointer-events-auto group-hover/pager:opacity-100">
-          <div className="w-64 select-none rounded-xl border border-ink-200 bg-white px-3 py-2.5 shadow-panel dark:border-white/10 dark:bg-surface-raised">
-            <input
-              type="range"
-              min={1}
-              max={total}
-              value={sliderDragValue ?? sliderPage}
-              onPointerDown={() => p.setSliderDragValue(sliderPage)}
-              onChange={(e) => {
-                const n = Number(e.target.value);
-                p.setSliderDragValue(n);
-              }}
-              onPointerUp={() => {
-                if (sliderDragValue == null) return;
-                const idx = alignIndex(sliderDragValue - 1, effectiveSpread, total);
-                p.setSliderDragValue(null);
-                if (webtoon) p.requestScrollToPage(idx, "top");
-                else p.setPageIndex(idx);
-              }}
-              onBlur={() => {
-                if (sliderDragValue == null) return;
-                const idx = alignIndex(sliderDragValue - 1, effectiveSpread, total);
-                p.setSliderDragValue(null);
-                if (webtoon) p.requestScrollToPage(idx, "top");
-                else p.setPageIndex(idx);
-              }}
-              onKeyUp={(e) => {
-                if (sliderDragValue == null) return;
-                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") {
-                  return;
-                }
-                const idx = alignIndex(sliderDragValue - 1, effectiveSpread, total);
-                p.setSliderDragValue(null);
-                if (webtoon) p.requestScrollToPage(idx, "top");
-                else p.setPageIndex(idx);
-              }}
-              className="reader-range w-full"
-              style={
-                {
-                  "--range-pct":
-                    (total > 0
-                      ? ((sliderDragValue ?? sliderPage) / total) * 100
-                      : 0) + "%",
-                } as CSSProperties
-              }
-              aria-label="progress"
-            />
-          </div>
-        </div>
-      )}
+      {/* 这里原有「悬停页码 → 浮出进度滑杆」。已移除：与底部 ProgressHud 的
+          进度条功能完全重复（底部那条还能拖拽 seek、支持方向键/Home/End，
+          且带完整 role="slider" ARIA），把 seek 收敛到一处避免两套交互不一致。
+          见 docs/reader-toolbar-center.md。 */}
     </div>
   );
 
@@ -644,7 +604,15 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             className="absolute inset-0 z-0"
             onMouseDown={startWindowDrag}
           />
-          {/* pt-3：28px 控件顶在 12px，圆心落在 26px，与 y=20 的 12px 红绿灯对齐。栏高仍 44px。 */}
+          {/* pt-3：28px 控件顶在 12px，圆心落在 26px。
+              这个 26 是**本应用顶栏的内容线**：App 标签栏是 `h-[52px] + items-center`，
+              内容中心同样是 26。两边同线，进出阅读器时才不会跳。
+              ⚠️ 2026-10-01 更正：原注释写「与 y=20 的 12px 红绿灯对齐」是错的 ——
+              实测 macOS 把 trafficLightPosition.y 当作灯的大致**中心**，配置 y=20 时
+              灯心实际落在 17.5，比控件低约 8.5px。修法是调 tauri.conf.json 的
+              trafficLightPosition.y（已改 20→28），**不是**把这里的 pt 改小：
+              pt-1 虽能让控件中心落到 18，却会偏离 44px 栏的几何中心(22)、
+              并与标签栏(26)不一致。另见 docs/reader-toolbar-alignment.md。 */}
           <div className="relative z-10 flex h-full items-start gap-2 pt-3 pointer-events-none">
             {/* gap-2(8pt) 而不是 gap-1(4pt)：返回键现在有可见的底，
                 4pt 会让它的右边框紧贴书名（书名的首个字形是 [ ，视觉上更挤） */}
@@ -694,7 +662,23 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             {barCompact ? (
               <div className="relative z-10 mx-1 flex min-w-0 flex-1 justify-center">{pagerControls}</div>
             ) : (
-              <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center">
+              /* 居中基准 = **窗口中心**（不是内容盒中心）。
+                 `inset-x-0` 的定位基准是 .reader-bar 的 **padding box**，
+                 而该栏 padding 左右不对称（pl-88 给红绿灯让位 / pr-8）。
+                 原因是 .reader-bar 带着 `transform: translateZ(0)`（防逐帧重绘
+                 抖动而加的独立合成层）—— 带 transform 的元素会成为绝对定位后代的
+                 包含块，此时 inset 按 padding box 解析：几何 = x 88..1092、中心 590。
+                 实测（无头 Chrome + 构建产物）确认组心就在 590，比窗口中心 550
+                 右偏 **40px**，正是 (88-8)/2。
+
+                 用 `-translate-x-10` 平移 40px（transform 不动布局，数值精确）。
+                 ⚠️ 试过两种不行的写法：
+                    · `left-1/2 -translate-x-1/2` —— 在同一个 padding box 下解析，
+                      算出来仍是 590，等于没改；
+                    · `-ml-10` —— inset-x-0 同时设了 left/right，负 margin 会重算
+                      宽度、右缘仍锚在 1092，只移了 20px（实测 570）。
+                 ⚠️ 若改动 .reader-bar 的左右 padding，这里的 40 必须同步改。 */
+              <div className="pointer-events-none absolute inset-x-0 top-3 z-10 -translate-x-10 flex justify-center">
                 {pagerControls}
               </div>
             )}
@@ -726,9 +710,9 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                     <button
                       type="button"
                       className="reader-ai-more"
-                      aria-label={i18n.engine}
+                      aria-label={i18n.readerAiSettings}
                       aria-expanded={aiMenuOpen}
-                      onMouseEnter={(e) => showTip(e, i18n.engine)}
+                      onMouseEnter={(e) => showTip(e, i18n.readerAiSettings)}
                       onMouseLeave={hideTip}
                       onClick={() => {
                         setMoreOpen(false);
@@ -826,12 +810,33 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                   className={`reader-icon-btn ${fullscreen ? "is-active" : ""}`}
                   aria-label={`${fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen}`}
                   onMouseEnter={(e) =>
-                    showTip(e, fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen)
+                    showTip(
+                      e,
+                      `${fullscreen ? i18n.readerExitFullscreen : i18n.readerFullscreen} F`,
+                    )
                   }
                   onMouseLeave={hideTip}
                   onClick={() => void toggleFullscreen()}
                 >
                   {fullscreen ? <IconExitFullscreen /> : <IconFullscreen />}
+                </button>
+              )}
+
+              {/* 藏栏是窗口行为而非阅读版式，归到右侧行为组；H 键收起、Esc/重显栏恢复 */}
+              {!barTiny && (
+                <button
+                  type="button"
+                  className="reader-icon-btn"
+                  aria-label={i18n.readerHideBar}
+                  onMouseEnter={(e) => showTip(e, `${i18n.readerHideBar} H`)}
+                  onMouseLeave={hideTip}
+                  onClick={() => {
+                    hideTip();
+                    setMoreOpen(false);
+                    setBar(true);
+                  }}
+                >
+                  <IconHideBar />
                 </button>
               )}
 

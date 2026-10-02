@@ -122,6 +122,7 @@ async fn validate_source(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn estimate_disk_usage(
     state: State<'_, AppState>,
     path: String,

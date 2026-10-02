@@ -354,8 +354,9 @@
   "readerBgSepia": "Sepia",
   "readerWebtoon": "Vertical",
   "readerWebtoonHint": "Fit width and scroll down",
-  "readerWebtoonNoDouble": "Double page is off in vertical mode",
   "readerWebtoonNoRtl": "Vertical mode is top-to-bottom",
   "readerWebtoonFitLocked": "Vertical mode fits width and does not resize the window",
-  "readerChapter": "Ch. {n}"
+  "readerChapter": "Ch. {n}",
+  "readerPagePct": "{pct}% read",
+  "readerAiSettings": "AI settings"
 }

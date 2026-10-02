@@ -36,7 +36,14 @@ import {
 } from "./smartFit";
 import { ProgressHud, type ProgressPreview } from "./ProgressHud";
 import { ReaderToolbar } from "./ReaderToolbar";
-import { alignIndex, progressIndex, stepIndex, type LoadedPage } from "./readerNav";
+import {
+  alignIndex,
+  progressIndex,
+  readingModeTarget,
+  stepIndex,
+  type LoadedPage,
+  type ReadingModeChoice,
+} from "./readerNav";
 import { useKeyboardNav } from "./useKeyboardNav";
 import { useSwipePageTurn } from "./useSwipePageTurn";
 import { usePagePreload } from "./usePagePreload";
@@ -94,7 +101,6 @@ export function ReaderView({
   const [canvasBg, setCanvasBg] = useState<ReaderBgId>(loadReaderBg);
   const canvasPreset = readerBgPreset(canvasBg);
   const [progressHud, setProgressHud] = useState(false);
-  const [sliderDragValue, setSliderDragValue] = useState<number | null>(null);
   const [pageEditing, setPageEditing] = useState(false);
   const [pageDraft, setPageDraft] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
@@ -630,24 +636,47 @@ export function ReaderView({
     [go, webtoon],
   );
 
+  /* 版式三选一（单页 / 双页 / 竖读）的统一入口。
+     三者两两互通：竖读下点单页或双页会退出竖读并切到该版式，
+     单/双页下点竖读进入竖读。切到「页」时同时把页下标按目标 spread 对齐，
+     切到竖读时按单页对齐（用双页对齐会平白跳掉一页），且**不动 spread**，
+     这样退出竖读能回到用户原先选的单页/双页。 */
+  const selectReadingMode = useCallback(
+    (choice: ReadingModeChoice) => {
+      const target = readingModeTarget(choice, pageIndexRef.current, pageCount);
+      if (target.view === "webtoon") {
+        const seq = ++jumpSeqRef.current;
+        setJumpRequest({ seq, index: target.index, align: "start" });
+      } else {
+        setJumpRequest(null);
+      }
+      setView(target.view);
+      if (target.spread !== null) setSpread(target.spread);
+      setPageIndex(target.index);
+      const prefSource = state?.source ?? source;
+      if (prefSource) {
+        saveReaderPref(
+          prefSource,
+          {
+            pageIndex: target.index,
+            // target.spread 为 null 表示「保持当前 spread」（进竖读的情况）
+            spread: target.spread ?? spread,
+            direction,
+            fit,
+            view: target.view,
+          },
+          { persistView: true },
+        );
+      }
+    },
+    [direction, fit, pageCount, pageIndexRef, source, spread, state?.source],
+  );
+
+  /* 「竖读」按钮是**开关**语义：不在竖读时进入竖读，已在竖读时退回页模式。
+     退回时按用户记住的 spread 还原（而不是硬编码单页），与改版前一致。 */
   const toggleView = useCallback(() => {
-    const next = view === "webtoon" ? "page" : "webtoon";
-    if (next === "webtoon") {
-      const seq = ++jumpSeqRef.current;
-      setJumpRequest({ seq, index: pageIndexRef.current, align: "start" });
-    } else {
-      setJumpRequest(null);
-    }
-    setView(next);
-    const prefSource = state?.source ?? source;
-    if (prefSource) {
-      saveReaderPref(
-        prefSource,
-        { pageIndex, spread, direction, fit, view: next },
-        { persistView: true },
-      );
-    }
-  }, [direction, fit, pageIndex, pageIndexRef, source, spread, state?.source, view]);
+    selectReadingMode(webtoon ? spread : "webtoon");
+  }, [selectReadingMode, spread, webtoon]);
 
   useKeyboardNav({
     direction,
@@ -856,6 +885,17 @@ export function ReaderView({
     effectiveSpread === "double" && visibleIndexes.length === 2
       ? `${visibleIndexes[0] + 1}–${visibleIndexes[1] + 1} / ${total}${chapterLabel}`
       : `${(visibleIndexes[0] ?? 0) + 1} / ${total || "—"}${chapterLabel}`;
+  // header 页码 chip 的进度尾注（阅读进度一瞥即得，免去心算）
+  const pagePct =
+    total > 0
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            Math.round((((visibleIndexes[0] ?? pageIndex) + 1) / total) * 100),
+          ),
+        )
+      : null;
 
   const clickNavWebtoon = (clientY: number, rect: DOMRect) => {
     const y = (clientY - rect.top) / rect.height;
@@ -981,12 +1021,11 @@ export function ReaderView({
         webtoon={webtoon}
         effectiveSpread={effectiveSpread}
         direction={direction}
-        setSpread={setSpread}
         setDirection={setDirection}
-        setPageIndex={setPageIndex}
         pageIndex={pageIndex}
         total={total}
         toggleView={toggleView}
+        selectReadingMode={selectReadingMode}
         canPrev={canPrev}
         canNext={canNext}
         requestScrollToPage={requestScrollToPage}
@@ -996,11 +1035,9 @@ export function ReaderView({
         pageDraft={pageDraft}
         setPageDraft={setPageDraft}
         pageLabel={pageLabel}
+        pagePct={pagePct}
         commitPageJump={commitPageJump}
         visibleIndexes={visibleIndexes}
-        sliderDragValue={sliderDragValue}
-        setSliderDragValue={setSliderDragValue}
-        sliderPage={sliderPage}
         showingAi={showingAi}
         enhanceOn={enhance.enhanceOn}
         pageEnhancing={pageEnhancing}

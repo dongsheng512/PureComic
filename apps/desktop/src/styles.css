@@ -575,14 +575,12 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
   --rb-fg-faint: #6e6e6e;                    /* 占位文案 */
   --rb-title: #2f2f2f;                       /* 书名 */
   --rb-chip-fg: #2f2f2f;                     /* 页码 */
-  --rb-fill: rgba(0, 0, 0, 0.06);            /* 控件底：返回键 / AI 胶囊 */
-  --rb-fill-hover: rgba(0, 0, 0, 0.12);
-  --rb-track: rgba(229, 229, 229, 0.5);      /* 分段轨道（= ink-200/50） */
   --rb-pill: #ffffff;                        /* 分段选中药丸 */
   --rb-pill-fg: #2f2f2f;
-  --rb-pill-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --rb-active-bg: #2f2f2f;                   /* 图标按钮选中块 */
-  --rb-active-fg: #ffffff;
+  --rb-surface: rgba(0, 0, 0, 0.03);        /* 容器底：对齐书库 #F9F9F9（更浅） */
+  --rb-edge: rgba(0, 0, 0, 0.10);           /* 容器 1px 描边：对齐书库 #E5E5E5 */
+  --rb-active-bg: rgba(0, 0, 0, 0.12);      /* 选中块：淡灰（原 #2f2f2f 偏重） */
+  --rb-active-fg: #2f2f2f;                   /* 淡灰底上必须用深色字 */
   --rb-sep: rgba(217, 217, 224, 0.6);        /* 控件组分隔线（= ink-300/60） */
   --rb-hover-soft: rgba(229, 229, 229, 0.8); /* chip / 分段 hover（= ink-200/80） */
   --rb-ai-soft: rgba(69, 172, 134, 0.16);    /* AI 开启态：tint 底 */
@@ -597,14 +595,12 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
   --rb-fg-faint: rgba(255, 255, 255, 0.48);
   --rb-title: rgba(255, 255, 255, 0.9);
   --rb-chip-fg: rgba(255, 255, 255, 0.88);
-  --rb-fill: rgba(255, 255, 255, 0.12);
-  --rb-fill-hover: rgba(255, 255, 255, 0.19);
-  --rb-track: rgba(255, 255, 255, 0.08);
   --rb-pill: rgba(255, 255, 255, 0.16);
   --rb-pill-fg: #ffffff;
-  --rb-pill-shadow: none;
+  --rb-surface: rgba(255, 255, 255, 0.07); /* 深画布容器底：白玻璃（同比例调浅） */
+  --rb-edge: rgba(255, 255, 255, 0.16);     /* 深画布描边必须比底**更亮**才可见 */
   --rb-active-bg: rgba(255, 255, 255, 0.16);
-  --rb-active-fg: #ffffff;
+  --rb-active-fg: #ffffff;                   /* 深画布：亮底上仍用白字 */
   --rb-sep: rgba(255, 255, 255, 0.14);
   --rb-hover-soft: rgba(255, 255, 255, 0.1);
   --rb-ai-soft: rgba(122, 216, 172, 0.2);
@@ -624,14 +620,12 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
   --rb-fg-faint: #6e6e6e;
   --rb-title: #2f2f2f;
   --rb-chip-fg: #2f2f2f;
-  --rb-fill: rgba(0, 0, 0, 0.06);
-  --rb-fill-hover: rgba(0, 0, 0, 0.12);
-  --rb-track: rgba(229, 229, 229, 0.5);
   --rb-pill: #ffffff;
   --rb-pill-fg: #2f2f2f;
-  --rb-pill-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --rb-active-bg: #2f2f2f;
-  --rb-active-fg: #ffffff;
+  --rb-surface: rgba(0, 0, 0, 0.03);        /* 容器底：对齐书库 #F9F9F9（更浅） */
+  --rb-edge: rgba(0, 0, 0, 0.10);           /* 容器 1px 描边：对齐书库 #E5E5E5 */
+  --rb-active-bg: rgba(0, 0, 0, 0.12);      /* 选中块：淡灰（同 root） */
+  --rb-active-fg: #2f2f2f;                   /* 淡灰底上必须用深色字 */
   --rb-sep: rgba(217, 217, 224, 0.6);
   --rb-hover-soft: rgba(229, 229, 229, 0.8);
   --rb-ai-soft: rgba(69, 172, 134, 0.16);
@@ -646,12 +640,10 @@ html.dark .reader-menu {
   --rb-fg-faint: #a6a6a6;
   --rb-title: #ececec;
   --rb-chip-fg: #ececec;
-  --rb-fill: rgba(255, 255, 255, 0.06);
-  --rb-fill-hover: rgba(255, 255, 255, 0.12);
-  --rb-track: rgba(255, 255, 255, 0.06);
   --rb-pill: #48484a;
   --rb-pill-fg: #ececec;
-  --rb-pill-shadow: none;
+  --rb-surface: rgba(255, 255, 255, 0.07); /* 深画布容器底：白玻璃（同比例调浅） */
+  --rb-edge: rgba(255, 255, 255, 0.16);     /* 深画布描边必须比底**更亮**才可见 */
   --rb-active-bg: rgba(255, 255, 255, 0.15);
   --rb-active-fg: #ececec;
   --rb-sep: rgba(255, 255, 255, 0.1);
@@ -694,43 +686,99 @@ html.dark .reader-menu {
   color: var(--rb-active-fg);
 }
 
-/* —— 「返回书库」：28pt 实心方块（用户确认的样式）——
-   量用户给的参考图（76×68，按钮 56×56px）反推：
-     尺寸  56×56px @2x = **28×28pt**   ✅ 与顶栏其它控件齐平（.reader-icon-btn / .reader-seg 都是 h-7）
-     底色  纯平 **#F0F0F0**（240,240,240），**没有内层白药丸**、没有边框
-     字形  #2F2F2F，墨迹 11×20px = 5.5×10pt  ← 与 IconBack 在 16pt 下的 5.67×10.17pt 一致
-     阴影  下方约 6px 的柔影（≈ shadow-sm）
-   所以是把内层药丸去掉、改回**单一实心底**：视觉上更"实"，而不是之前那版"灰边+白面"的空心感。
-   ⚠️ 底色用**相对黑**而不是写死 #F0F0F0：阅读画布有 4 档，浅色的两档是
-     white #FFFFFF 和 sepia #F3E6C8。写死灰值在 sepia 上会塌到 1.09:1（底色消失）；
-     相对黑对任何浅底都给同一档：叠白底 → #F0F0F0（1.14:1），叠 sepia 也是 1.14:1。
-   ⚠️ 配色走上面的 --rb-* 画布调色板，**不要**再挂 `dark:`（那跟的是应用主题）——
-     见调色板注释里"深色应用主题 + 浅色画布"的实测数字。 */
-.reader-back-btn {
-  @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition
-    active:scale-[0.96] shadow-sm;
-  background: var(--rb-fill);
+/* —— 中间翻页组：灰容器，扁平（2026-10-01 第五版 / 10-02 调整）——
+   演进：v1 轨道+白药丸 → v2 去填充留投影 → v3 平面描边 → v4 亮面+底影
+        → v5 灰容器 + 白页码 → 10-02 用户把**页码改回透明**，只留灰容器描边。
+
+   分两层：
+     大按钮 = 容器  -> --rb-surface（阴影灰）+ --rb-edge（1px 内描边）
+     组内项          -> **全部透明**（箭头、页码同底），hover 才出 --rb-hover-soft；
+                        页码编辑框是唯一例外（必须不透明白底，见下）。
+
+   ⚠️ 容器底不能刷成 --rb-pill 白：纯白画布上「白 vs 白」差 0，
+      容器会整块消失 —— 所以容器取 --rb-surface 灰。
+   ⚠️ 全程无装饰 box-shadow（用户要扁平）；这里的 inset 环是**描边**不是投影。
+   ⚠️ 配色只走 --rb-*（跟随阅读画布），**不要**挂 dark:（那跟的是应用主题）。 */
+.reader-pager-group {
+  @apply inline-flex h-7 shrink-0 items-center rounded-lg p-0.5;
+  background: var(--rb-surface);
+  box-shadow: inset 0 0 0 1px var(--rb-edge);
+}
+
+/* 组内图标项：透明，收到 h-6 与页码同高 */
+.reader-pager-group .reader-icon-btn {
+  @apply h-6 w-6 rounded-md;
+  background: transparent;
+}
+.reader-pager-group .reader-icon-btn:hover:not(:disabled) {
+  background: var(--rb-hover-soft);
   color: var(--rb-fg-strong);
 }
 
-/* hover 与顶栏其它控件同量级：底深一档（叠白底 #F0F0F0 → #E0E0E0，Δ 6.1%） */
-.reader-back-btn:hover:not(:disabled) {
-  background: var(--rb-fill-hover);
-}
-
-.reader-back-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.35);
-}
-
-/* 深色画布：白玻璃。阴影只在浅色画布上有意义（深底上看不见，还多一圈脏边） */
-[data-reader-fg="light"] .reader-back-btn {
+/* 页码 = 组内的透明文字（2026-10-02：去掉白色填充，整体只显示灰色容器，
+   与两侧箭头同底；编辑态仍保留白底——见下方对比度注释） */
+.reader-pager-group .reader-page-chip {
+  @apply h-6 rounded-md;
+  background: transparent;
+  color: var(--rb-chip-fg);
   box-shadow: none;
 }
+.reader-pager-group .reader-page-chip:hover {
+  background: var(--rb-hover-soft);
+}
 
+/* ⚠️ 页码编辑框**例外**：它必须自带不透明底，否则「浅色应用主题 + 深色画布」下
+   会变成白底白字（见 .reader-page-chip-edit 上方的对比度注释，实测 1.00:1）。
+   这是唯一保留 --rb-pill 填充的组内元素，不能跟着一起去色。 */
+.reader-pager-group .reader-page-chip-edit {
+  @apply h-6 rounded-md;
+}
+
+/* —— 「返回书库」：灰面方块，扁平（2026-10-01 第五版）——
+   它没有外层容器，**自身就是「大按钮」**，所以取 --rb-surface（阴影灰），
+   与其他容器的底色一致；不投影、不描边。
+
+   历史（别再改回去）：
+     v1 灰边+白面空心感 → v2 实心底+shadow-sm → v3 无填充+1px 描边
+     → v4 亮面+底部投影 → v5 本轮灰面扁平。
+   ⚠️ 用 --rb-surface 而不是 --rb-pill：白面在白色画布上会整块消失
+      （差 0）。容器级控件在浅色画布上必须是灰的。
+   ⚠️ 文字色用 --rb-fg-strong（深灰），不要用 --rb-pill-fg ——
+      后者是给白面配的，这里底色是灰。
+   ⚠️ 配色只走 --rb-* 画布调色板，**不要**挂 `dark:`（那跟的是应用主题）——
+      见调色板注释里"深色应用主题 + 浅色画布"的实测数字。 */
+.reader-back-btn {
+  @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition
+    active:scale-[0.96];
+  background: var(--rb-surface);
+  box-shadow: inset 0 0 0 1px var(--rb-edge);
+  color: var(--rb-fg-strong);
+}
+
+/* hover：相对当前底深一档（与顶栏其它控件同量级） */
+.reader-back-btn:hover:not(:disabled) {
+  background: var(--rb-hover-soft);
+}
+
+/* ⚠️ focus-visible 会**整体替换** box-shadow —— 必须把描边一起写回来，
+   否则一聚焦按钮就"掉边"（与颜色改动前同一个坑）。 */
+.reader-back-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 1px var(--rb-edge),
+    0 0 0 2px rgba(0, 122, 255, 0.35);
+}
+
+/* —— 模式分段：灰容器 + 白选中项，扁平（2026-10-01 第五版）——
+   容器取 --rb-surface（阴影灰），选中项取 --rb-pill（白），全程无投影。
+
+   ⚠️ 选中项用白色而不是 --rb-active-bg：用户明确「小按钮是白色」。
+      白面坐灰容器上可见（差约 39）；若容器改回白，选中态会消失。
+   ⚠️ 未选中项保持透明，只靠文字色深浅区分。 */
 .reader-seg {
   @apply inline-flex h-7 shrink-0 items-center rounded-lg p-0.5;
-  background: var(--rb-track);
+  background: var(--rb-surface);
+  box-shadow: inset 0 0 0 1px var(--rb-edge);
 }
 
 .reader-seg-item {
@@ -749,7 +797,6 @@ html.dark .reader-menu {
 .reader-seg-item.is-active {
   background: var(--rb-pill);
   color: var(--rb-pill-fg);
-  box-shadow: var(--rb-pill-shadow);
 }
 
 /* 固定宽度（非 min-w）：页码位数变化时不改变居中翻页组宽度，避免按钮/悬停面板横移。
@@ -842,12 +889,18 @@ html.dark .ai-section + .ai-section {
 
 /* AI 胶囊同样坐在画布上：认 `--rb-*` 画布调色板，不认 html.dark。
    （原先浅色画布下是 rgba(0,0,0,.06) + ink-muted，深色画布下是 overlay-1 + fg-muted，
-   两条线各自按"应用主题"分叉，dark-app + light-canvas 时图标只剩 2.43:1。） */
+   两条线各自按"应用主题"分叉，dark-app + light-canvas 时图标只剩 2.43:1。）
+   v5：未开启态取 --rb-surface（阴影灰），与返回键/翻页组/模式分段一致，**无投影**。
+   「已开启」是**状态**不是装饰，保留绿色 tint + 绿环（--rb-ai-soft / --rb-ai-ring）。 */
 .reader-ai-capsule {
   @apply relative inline-flex h-7 items-center rounded-full transition;
-  background: var(--rb-fill);
+  background: var(--rb-surface);
+  box-shadow: inset 0 0 0 1px var(--rb-edge);
 }
 
+/* 开启态：绿 tint 填充 + 绿环 */
+/* 开启态：绿 tint + 绿环。绿环替代灰描边（它才是这个状态该有的边界），
+   所以这里**不**叠加 --rb-edge，否则两种描边色会在同一像素上打架。 */
 .reader-ai-capsule.is-on {
   background: var(--rb-ai-soft);
   box-shadow: inset 0 0 0 1px var(--rb-ai-ring);
@@ -1151,56 +1204,6 @@ html.dark .ai-switch.is-on .ai-switch-knob {
   border-radius: 999px;
   background: var(--ai-accent);
   transition: width 300ms ease;
-}
-
-/* 顶栏页码悬停跳转：WebKit 自绘滑杆（appearance none + 定制 track/thumb），
-   填充比例由 JS 内联 --range-pct 驱动 */
-.reader-range {
-  --range-fill: #424245; /* ink-700 */
-  --range-track: rgba(120, 120, 128, 0.25);
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 16px; /* 命中区；track 视觉 4px 居中 */
-  background: transparent;
-  cursor: pointer;
-}
-.reader-range::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    var(--range-fill) 0%,
-    var(--range-fill) var(--range-pct, 0%),
-    var(--range-track) var(--range-pct, 0%),
-    var(--range-track) 100%
-  );
-}
-.reader-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  margin-top: -5px; /* (输入 16 - track 4)/2 = 6，再上移 5 使 14px thumb 居中 */
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-}
-.reader-range:focus-visible {
-  outline: none;
-}
-.reader-range:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.35);
-}
-html.dark .reader-range {
-  --range-fill: var(--ink-soft);
-  --range-track: var(--hairline);
-}
-html.dark .reader-range::-webkit-slider-thumb {
-  background: var(--ink-soft);
-  border-color: var(--overlay-4);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 /* 清除缓存：次级文本 → 悬停红 → 行内二次确认（红） */
