@@ -36,5 +36,17 @@ echo "done. artifacts:"
 echo "  $OUT"
 ls -lh "$OUT/macos" 2>/dev/null || true
 ls -lh "$OUT/dmg" 2>/dev/null || true
+
+# ── 防启动台图标堆积 ─────────────────────────────────────────────
+# tauri build 生成的 .app 会被 LaunchServices 自动注册，启动台随之多一个图标；
+# 构建产物每打一次就多一份，用户侧会看到多个 PureComic。这里在打包结束后把
+# target 下的那份反注册掉——它只是中间产物，正式分发走 DMG 挂载安装。
+# （若曾把构建产物 .app 拖进 /Applications 安装过，那条注册不受影响。）
+LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -d "$OUT/macos/PureComic.app" ]]; then
+  "$LSREG" -u "$OUT/macos/PureComic.app" >/dev/null 2>&1 || true
+  echo "(unregistered build-product app from LaunchServices)"
+fi
+
 echo
 echo "Not notarized. First open: right-click Open, or System Settings > Privacy & Security."
