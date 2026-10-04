@@ -269,7 +269,10 @@ describe("useReaderEnhance", () => {
     await waitFor(() => expect(result.current.engineId).toBe("waifu2x-coreml"));
     await waitFor(() => expect(result.current.noiseLevel).toBe(2));
     await waitFor(() => expect(api.preheatReaderEngine.mock.calls.length).toBeGreaterThan(0));
-    for (const call of api.preheatReaderEngine.mock.calls) {
+    const preheats = api.preheatReaderEngine.mock.calls as unknown as Array<
+      [{ engine?: string; noiseLevel?: number }]
+    >;
+    for (const call of preheats) {
       expect(call[0]?.engine).toBe("waifu2x-coreml");
       expect(call[0]?.noiseLevel).toBe(2);
     }
