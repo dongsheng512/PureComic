@@ -343,6 +343,14 @@ fn cancel_reader_enhance(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
+async fn preheat_reader_engine(
+    state: State<'_, AppState>,
+    options: Option<EnhanceOptionsDto>,
+) -> Result<(), AppError> {
+    state.scheduler.preheat_reader_engine(options).await
+}
+
+#[tauri::command]
 async fn list_library(
     state: State<'_, AppState>,
 ) -> Result<comic_core::library::LibraryIndex, AppError> {
@@ -728,6 +736,7 @@ pub fn run() {
             reader_enhance_cache_stats,
             clear_reader_enhance_cache,
             cancel_reader_enhance,
+            preheat_reader_engine,
             list_library,
             create_library_collection,
             add_library_collection_entries,

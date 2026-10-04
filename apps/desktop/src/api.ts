@@ -233,6 +233,13 @@ export async function cancelReaderEnhance(): Promise<void> {
   return invoke("cancel_reader_enhance");
 }
 
+/** Best-effort model load. Busy GPU or a missing model must not surface here. */
+export async function preheatReaderEngine(options?: ReaderEnhanceOptions): Promise<void> {
+  return invoke("preheat_reader_engine", {
+    options: enhanceOptsPayload(options),
+  });
+}
+
 export async function listLibrary(): Promise<LibraryIndex> {
   return invoke("list_library");
 }

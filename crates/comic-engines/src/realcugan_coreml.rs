@@ -348,6 +348,18 @@ impl UpscaleEngine for RealCuganCoreMlEngine {
         }])
     }
 
+    async fn preheat(&self, noise: i8) -> Result<(), EngineError> {
+        let engine = self.clone();
+        crate::preheat_coreml(
+            &COREML_BATCH_LOCK,
+            &COREML_POISONED,
+            MODEL_LOAD_TIMEOUT,
+            "realcugan-coreml",
+            move || engine.load_for_noise(noise),
+        )
+        .await
+    }
+
     async fn enhance_batch(
         &self,
         req: EnhanceBatchRequest,

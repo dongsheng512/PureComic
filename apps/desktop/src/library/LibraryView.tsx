@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { comicFileFilter } from "../formats";
 import type { Messages } from "../i18n";
 import type { LibraryCollection, LibraryEntry, LibraryScanPreview } from "../types";
@@ -235,6 +235,25 @@ function LibraryView({
   const [sheetId, setSheetId] = useState<string | null>(null);
   const [menuEntryId, setMenuEntryId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+
+  /* Esc 关闭顺序：菜单类最浅、弹窗类在其上（menuEntryId 挂在合集卡上，
+     sheetId 打开的是合集详情）。一次只关最上面一层，与阅读器的 Esc 语义一致。 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (menuEntryId) {
+        e.preventDefault();
+        setMenuEntryId(null);
+        return;
+      }
+      if (sheetId) {
+        e.preventDefault();
+        setSheetId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuEntryId, sheetId]);
   const shelf = useMemo(
     () =>
       buildShelf({
@@ -263,12 +282,13 @@ function LibraryView({
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       {/* 与顶栏同一页眉：左添加 · 中搜索 · 右排序/过滤/视图 */}
-      <div className="app-page-toolbar flex flex-wrap items-center gap-2 pb-3 pt-2">
+      <div className="app-page-toolbar flex items-center gap-2 pb-3 pt-2">
         <div className="relative shrink-0" ref={addRef}>
           <div className="btn-add-books-group">
             <button
               type="button"
               className="btn-add-books"
+              aria-describedby={addTip ? "library-add-tip" : undefined}
               onMouseEnter={showAddTip}
               onMouseLeave={hideAddTip}
               onFocus={showAddTip}
@@ -301,7 +321,7 @@ function LibraryView({
           {addOpen && (
             <div className="absolute left-0 z-40 mt-1.5 min-w-[15rem] overflow-hidden rounded-xl border border-ink-200 bg-white py-1 shadow-panel dark:border-white/10 dark:bg-surface-raised" role="menu">
               <MenuItem
-                icon="📄"
+                icon={<IconFile />}
                 label={i18n.libraryAddFile}
                 onClick={() => {
                   setAddOpen(false);
@@ -309,7 +329,7 @@ function LibraryView({
                 }}
               />
               <MenuItem
-                icon="📁"
+                icon={<IconFolder />}
                 label={i18n.libraryAddFolder}
                 onClick={() => {
                   setAddOpen(false);
@@ -317,7 +337,7 @@ function LibraryView({
                 }}
               />
               <MenuItem
-                icon="🔄"
+                icon={<IconScan />}
                 label={scanning ? i18n.libraryScanning : i18n.libraryScan}
                 disabled={scanning}
                 onClick={() => {
@@ -326,7 +346,7 @@ function LibraryView({
                 }}
               />
               <MenuItem
-                icon="👁"
+                icon={<IconWatch />}
                 label={i18n.libraryScanWatch}
                 disabled={scanning}
                 onClick={() => {
@@ -336,7 +356,7 @@ function LibraryView({
               />
               <div className="my-1 border-t border-ink-100 dark:border-white/10" />
               <MenuItem
-                icon="⚙️"
+                icon={<IconGear />}
                 label={i18n.libraryImportSettings}
                 onClick={() => setSettingsOpen((v) => !v)}
               />
@@ -382,25 +402,28 @@ function LibraryView({
         </div>
 
 
-        <div className="relative mx-auto w-full max-w-[360px] min-w-[12rem] flex-1 sm:flex-none sm:w-[320px]">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-400" aria-hidden="true">
-            ⌕
-          </span>
-          <input
-            ref={searchRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={i18n.librarySearch}
-            className="field h-9 w-full pl-8 pr-14 text-sm placeholder:text-ink-400 dark:placeholder:text-fg-muted"
-          />
-          <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-ink-200 px-1.5 py-0.5 text-[10px] text-ink-400 dark:border-white/10 dark:text-fg-muted">
-            ⌘K
-          </span>
-        </div>
+        {hasBooks && (
+          <>
+            <div className="relative min-w-0 max-w-[360px] flex-1">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-400" aria-hidden="true">
+                ⌕
+              </span>
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={i18n.librarySearch}
+                className="field h-9 w-full pl-8 pr-14 text-sm placeholder:text-ink-400 dark:placeholder:text-fg-muted"
+              />
+              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-ink-200 px-1.5 py-0.5 text-[10px] text-ink-400 dark:border-white/10 dark:text-fg-muted">
+                ⌘K
+              </span>
+            </div>
 
-        <div className="ml-auto flex shrink-0 flex-wrap items-center gap-2">
+            <div className="hidden h-6 w-px shrink-0 bg-ink-200 sm:block dark:bg-white/10" aria-hidden="true" />
+            <div className="ml-auto flex min-w-0 items-center gap-2">
           {/* 排序：自定义下拉，避免系统 select 蓝框与双箭头 */}
-          <div className="relative" ref={sortRef}>
+          <div className="relative shrink-0" ref={sortRef}>
             <button
               type="button"
               className="lib-toolbar-chip"
@@ -466,13 +489,16 @@ function LibraryView({
           </div>
 
           {/* 过滤：浅底分段，选中为白片而非纯黑 */}
-          <div className="lib-toolbar-seg" role="group" aria-label={i18n.libraryFilterAll}>
+          <div className="lib-toolbar-seg min-w-0 overflow-x-auto" role="group" aria-label={i18n.libraryFilterAll}>
             {(
               [
                 { id: "all" as const, label: i18n.libraryFilterAll },
                 { id: "reading" as const, label: i18n.libraryFilterReading },
                 { id: "unread" as const, label: i18n.libraryFilterUnread },
                 { id: "finished" as const, label: i18n.libraryFinished },
+                /* 丢失：文件失效的书只能靠 opacity-70 混在列表里找，
+                   prefs/collections 的数据层本来就支持 "missing"（keep() 有分支）。 */
+                { id: "missing" as const, label: i18n.libraryFilterMissing },
               ] as const
             ).map((f) => (
               <button
@@ -488,7 +514,7 @@ function LibraryView({
           </div>
 
           {/* 视图：同风格分段，选中不抢眼 */}
-          <div className="lib-toolbar-seg" role="group" aria-label={i18n.libraryViewGrid}>
+          <div className="lib-toolbar-seg shrink-0" role="group" aria-label={i18n.libraryViewGrid}>
             <button
               type="button"
               className={`lib-toolbar-seg-item lib-toolbar-seg-item-icon ${view === "grid" ? "is-active" : ""}`}
@@ -508,7 +534,9 @@ function LibraryView({
               <IconList />
             </button>
           </div>
-        </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* 扫描 / 导入轻量进度 */}
@@ -537,20 +565,49 @@ function LibraryView({
       )}
 
       {emptyFiltered ? (
-        <button
-          type="button"
-          onClick={onAddFile}
-          className={`mt-3 flex min-h-[18rem] flex-1 flex-col items-center justify-center rounded-2xl border border-dashed px-6 text-center transition ${
-            dragOver
-              ? "border-accent bg-accent/5"
-              : "border-ink-300 bg-white shadow-panel hover:border-ink-500 dark:border-white/10 dark:bg-surface-panel dark:shadow-none"
-          }`}
-        >
-          <p className="text-sm font-medium text-ink-900 dark:text-fg">
-            {hasBooks ? i18n.libraryNoMatch : i18n.libraryEmpty}
-          </p>
-          <p className="mt-2 max-w-md text-xs text-ink-500 dark:text-fg-muted">{i18n.libraryHint}</p>
-        </button>
+        hasBooks ? (
+          /* 有书但被搜索/筛掉：**不能**复用"整块 = 添加文件按钮"的空态。
+             旧写法把「没有符合条件的书籍」做成 onAddFile 大按钮，用户想清
+             筛选时点下去却弹文件选择器；界面上也没有任何清除筛选的入口。 */
+          <div className="mt-3 flex min-h-[18rem] flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-ink-300 px-6 text-center dark:border-white/10">
+            <p className="text-sm font-medium text-ink-900 dark:text-fg">{i18n.libraryNoMatch}</p>
+            <p className="mt-2 max-w-md text-xs text-ink-500 dark:text-fg-muted">{i18n.libraryHint}</p>
+            <button
+              type="button"
+              className="btn-soft mt-4 px-3 py-1.5 text-xs"
+              onClick={() => {
+                setQuery("");
+                setFilter("all");
+              }}
+            >
+              {i18n.libraryClearFilters}
+            </button>
+          </div>
+        ) : (
+          /* 空库引导：一个入口不够用——文件夹/扫描才是批量导入的主路径；
+             工具栏此时隐藏（搜索/筛选没有可作用的对象），引导集中在这里。 */
+          <div
+            className={`mt-3 flex min-h-[18rem] flex-1 flex-col items-center justify-center rounded-2xl border border-dashed px-6 text-center transition ${
+              dragOver
+                ? "border-accent bg-accent/5"
+                : "border-ink-300 bg-white shadow-panel hover:border-ink-500 dark:border-white/10 dark:bg-surface-panel dark:shadow-none"
+            }`}
+          >
+            <p className="text-sm font-medium text-ink-900 dark:text-fg">{i18n.libraryEmpty}</p>
+            <p className="mt-2 max-w-md text-xs text-ink-500 dark:text-fg-muted">{i18n.libraryHint}</p>
+            <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+              <button type="button" className="btn-primary px-3.5 py-1.5 text-xs" onClick={onAddFile}>
+                {i18n.libraryAdd}
+              </button>
+              <button type="button" className="btn-soft px-3.5 py-1.5 text-xs" onClick={onAddFolder}>
+                {i18n.libraryAddFolder}
+              </button>
+              <button type="button" className="btn-soft px-3.5 py-1.5 text-xs" onClick={() => onScan()}>
+                {i18n.libraryScan}
+              </button>
+            </div>
+          </div>
+        )
       ) : view === "list" ? (
         <ul className="lib-scroll mt-3 min-h-0 flex-1 space-y-1 pb-4">
           {shelf.map((item) => {
@@ -594,7 +651,8 @@ function LibraryView({
             return (
               <li key={e.id}>
                 <div
-                  className={`card flex items-center gap-3 p-2 ${e.missing ? "opacity-70" : ""}`}
+                  /* group：card-action-bar 的 hover 浮出依赖 `.group:hover`（与网格卡片一致） */
+                  className={`card group relative flex items-center gap-3 p-2 ${e.missing ? "opacity-70" : ""}`}
                 >
                   <button
                     type="button"
@@ -623,6 +681,7 @@ function LibraryView({
                       </p>
                       <p className="truncate text-[11px] text-ink-500 dark:text-fg-muted">
                         <span className="lib-badge">{kindLabel(e.kind)}</span>
+                        {isEnhanced(e) && <span className="lib-badge lib-badge-enhanced">{i18n.libraryEnhancedBadge}</span>}
                         {e.pageCount > 0 ? ` · ${e.pageCount} ${i18n.libraryPages}` : ""}
                         {page > 0 ? ` · ${page + 1}/${e.pageCount || "?"}` : ""}
                         {e.missing ? ` · ${i18n.libraryMissing}` : ""}
@@ -632,28 +691,39 @@ function LibraryView({
                       )}
                     </div>
                   </button>
-                  <button
-                    type="button"
-                    className="btn-card-enhance !opacity-100"
-                    onClick={() => {
-                      setDraftName("");
-                      setMenuEntryId((id) => (id === e.id ? null : e.id));
-                    }}
-                  >
-                    {i18n.libraryCollection}
-                  </button>
-                  <button type="button" className="btn-card-enhance !opacity-100" disabled={e.missing} onClick={() => onEnhance(e)}>
-                    {i18n.libraryEnhance}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-card-remove !opacity-100"
-                    title={i18n.libraryRemoveHint}
-                    aria-label={i18n.libraryRemove}
-                    onClick={() => onRemove(e)}
-                  >
-                    <TrashIcon />
-                  </button>
+                  {/* 悬浮操作：与网格卡片同一套 hover 浮出（card-action-bar），不再常驻。
+                      常驻三个胶囊既吵又挤压标题宽度，且「合集」文案语义不明（实际是加入）。 */}
+                  <div className="card-action-bar relative left-0 top-0">
+                    <button
+                      type="button"
+                      className="btn-card-enhance"
+                      title={i18n.libraryCollectionAddMenu}
+                      onClick={() => {
+                        setDraftName("");
+                        setMenuEntryId((id) => (id === e.id ? null : e.id));
+                      }}
+                    >
+                      {i18n.libraryCollectionAddTo}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-card-enhance"
+                      title={i18n.libraryEnhance}
+                      disabled={e.missing}
+                      onClick={() => onEnhance(e)}
+                    >
+                      {i18n.libraryEnhance}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-card-remove"
+                      title={i18n.libraryRemoveHint}
+                      aria-label={i18n.libraryRemove}
+                      onClick={() => onRemove(e)}
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
                 </div>
               </li>
             );
@@ -732,22 +802,28 @@ function LibraryView({
                         <div className="grid h-full place-items-center text-[10px] text-ink-400">{kindLabel(e.kind)}</div>
                       )}
                       <div className="cover-scrim">
-                        <p className="truncate text-[11px] font-medium leading-tight text-ink-900 dark:text-fg" title={e.title}>
-                          {splitTitle(e.title)}
-                        </p>
                         <p className="truncate text-[9px] leading-tight text-ink-500 dark:text-fg-muted">
                           <span className="lib-badge">{kindLabel(e.kind)}</span>
                           {isEnhanced(e) && <span className="lib-badge lib-badge-enhanced">{i18n.libraryEnhancedBadge}</span>}
-                          {e.pageCount > 0 ? ` · ${e.pageCount} ${i18n.libraryPages}` : ""}
-                          {page > 0 ? ` · ${page + 1}/${e.pageCount || "?"}` : ""}
                           {e.missing ? ` · ${i18n.libraryMissing}` : ""}
                         </p>
-                        {page > 0 && !e.missing && e.pageCount > 0 && (
-                          <ProgressBar value={page} total={e.pageCount} />
-                        )}
                       </div>
                     </div>
                   </button>
+                  {/* 标题/进度移出遮罩：封面窄时遮罩文字会截断到不可读，
+                      固定在封面下方不受图片密度影响 */}
+                  <div className="px-1.5 pb-2 pt-1.5">
+                    <p className="truncate text-[11px] font-medium leading-tight text-ink-900 dark:text-fg" title={e.title}>
+                      {splitTitle(e.title)}
+                    </p>
+                    <p className="truncate text-[9px] leading-tight text-ink-500 dark:text-fg-muted">
+                      {e.pageCount > 0 ? `${e.pageCount} ${i18n.libraryPages}` : ""}
+                      {page > 0 ? ` · ${page + 1}/${e.pageCount || "?"}` : ""}
+                    </p>
+                    {page > 0 && !e.missing && e.pageCount > 0 && (
+                      <ProgressBar value={page} total={e.pageCount} />
+                    )}
+                  </div>
                   {/* 悬浮操作：左上角黑玻璃组，hover 展开 */}
                   <div className="card-action-bar">
                     <button
@@ -859,8 +935,16 @@ function LibraryView({
               <input
                 defaultValue={openCollection.title}
                 key={openCollection.id}
-                className="min-w-0 flex-1 bg-transparent text-base font-medium outline-none"
+                className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 py-1 -mx-1.5 text-base font-medium outline-none transition hover:border-ink-200 hover:bg-ink-50 focus:border-accent focus:bg-white dark:hover:border-white/10 dark:hover:bg-surface-high dark:focus:bg-surface-raised"
                 aria-label={i18n.libraryCollectionRename}
+                /* Enter 直接提交：只挂 onBlur 时，输入框内按 Enter 什么都不发生
+                   （输入框不会因此失焦），用户只能去点别处才能保存。 */
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter") {
+                    ev.preventDefault();
+                    ev.currentTarget.blur();
+                  }
+                }}
                 onBlur={(ev) => {
                   const title = ev.target.value.trim();
                   if (title && title !== openCollection.title) {
@@ -895,17 +979,6 @@ function LibraryView({
                         : `${volume.pageCount || "?"} ${i18n.libraryPages}`}
                     </p>
                   </div>
-                  <button type="button" className="text-xs" onClick={() => void onMoveInCollection(openCollection.id, volume.id, -1)} disabled={index === 0}>
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs"
-                    onClick={() => void onMoveInCollection(openCollection.id, volume.id, 1)}
-                    disabled={index === openVolumes.length - 1}
-                  >
-                    ↓
-                  </button>
                   <button
                     type="button"
                     className="text-xs"
@@ -917,37 +990,66 @@ function LibraryView({
                   >
                     {i18n.libraryCollectionOpen}
                   </button>
-                  <button
-                    type="button"
-                    className="text-xs"
-                    disabled={volume.missing}
-                    onClick={() => {
-                      setSheetId(null);
-                      onEnhance(volume);
-                    }}
-                  >
-                    {i18n.libraryEnhance}
-                  </button>
-                  <button
-                    type="button"
-                    className="text-xs text-rose-700"
-                    onClick={() => void onRemoveFromCollection(openCollection.id, volume.id)}
-                  >
-                    {i18n.libraryCollectionRemoveVolume}
-                  </button>
+                  <details className="relative">
+                    <summary
+                      className="grid h-6 w-6 cursor-pointer list-none place-items-center rounded-md text-sm leading-none text-ink-500 hover:bg-ink-100 hover:text-ink-900 dark:text-fg-muted dark:hover:bg-surface-high dark:hover:text-fg"
+                      title={i18n.libraryVolumeActions}
+                      aria-label={`${splitTitle(volume.title)} · ${i18n.libraryVolumeActions}`}
+                    >
+                      ⋯
+                    </summary>
+                    <div className="absolute right-0 top-full z-20 mt-1 flex min-w-36 flex-col rounded-lg border border-ink-200 bg-white p-1 shadow-panel dark:border-white/10 dark:bg-surface-raised">
+                      <button
+                        type="button"
+                        className="rounded-md px-2.5 py-1.5 text-left text-xs text-ink-700 hover:bg-ink-100 dark:text-fg dark:hover:bg-surface-high"
+                        disabled={index === 0}
+                        onClick={() => void onMoveInCollection(openCollection.id, volume.id, -1)}
+                      >
+                        ↑ {i18n.libraryCollectionMoveUp}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md px-2.5 py-1.5 text-left text-xs text-ink-700 hover:bg-ink-100 dark:text-fg dark:hover:bg-surface-high"
+                        disabled={index === openVolumes.length - 1}
+                        onClick={() => void onMoveInCollection(openCollection.id, volume.id, 1)}
+                      >
+                        ↓ {i18n.libraryCollectionMoveDown}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md px-2.5 py-1.5 text-left text-xs text-ink-700 hover:bg-ink-100 disabled:opacity-40 dark:text-fg dark:hover:bg-surface-high"
+                        disabled={volume.missing}
+                        onClick={() => {
+                          setSheetId(null);
+                          onEnhance(volume);
+                        }}
+                      >
+                        {i18n.libraryEnhance}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md px-2.5 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-500/10 dark:text-danger-fg"
+                        onClick={() => void onRemoveFromCollection(openCollection.id, volume.id)}
+                      >
+                        {i18n.libraryCollectionRemoveVolume}
+                      </button>
+                    </div>
+                  </details>
                 </li>
               ))}
             </ul>
-            <button
-              type="button"
-              className="mt-3 text-sm text-ink-500"
-              onClick={() => {
-                void onDissolveCollection(openCollection.id);
-                setSheetId(null);
-              }}
-            >
-              {i18n.libraryCollectionDissolve}
-            </button>
+            <div className="mt-3 flex justify-end border-t border-ink-100 pt-2.5 dark:border-white/10">
+              <button
+                type="button"
+                className="text-xs text-rose-700 hover:text-rose-800 dark:text-danger-fg"
+                onClick={() => {
+                  void onDissolveCollection(openCollection.id);
+                  setSheetId(null);
+                }}
+              >
+                {i18n.libraryCollectionDissolve}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -965,6 +1067,7 @@ function LibraryView({
       {addTip && (
         <div
           className="reader-tip library-tip"
+          id="library-add-tip"
           role="tooltip"
           style={{ left: addTip.x, top: addTip.y }}
         >
@@ -991,7 +1094,9 @@ function MenuItem({
   onClick,
   disabled,
 }: {
-  icon: string;
+  /* 与全局图标语言一致的单色 SVG（16px 视框），替代 emoji：彩色、跨平台渲染
+     不一致，且与应用其它工具栏图标风格脱节。 */
+  icon: ReactNode;
   label: string;
   onClick: () => void;
   disabled?: boolean;
@@ -1004,7 +1109,7 @@ function MenuItem({
       className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-ink-800 hover:bg-ink-50 disabled:opacity-40 dark:text-fg dark:hover:bg-white/[0.06]"
       onClick={onClick}
     >
-      <span className="w-5 text-center" aria-hidden="true">
+      <span className="flex h-4 w-4 items-center justify-center text-ink-400" aria-hidden="true">
         {icon}
       </span>
       {label}
@@ -1045,6 +1150,66 @@ function IconList() {
   );
 }
 
+/* 「添加」菜单的四个动作图标：单色 1.5 线宽，与顶栏/工具栏图标语言一致 */
+function IconFile() {
+  return (
+    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" aria-hidden="true">
+      <path
+        d="M6 2.5h5l4 4v9.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 5 16V4a1.5 1.5 0 0 1 1-1.42Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M11 2.5V7h4" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconFolder() {
+  return (
+    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" aria-hidden="true">
+      <path
+        d="M2.5 5A1.5 1.5 0 0 1 4 3.5h3.6l2 2.5H16A1.5 1.5 0 0 1 17.5 7.5V15A1.5 1.5 0 0 1 16 16.5H4A1.5 1.5 0 0 1 2.5 15V5Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function IconScan() {
+  return (
+    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" aria-hidden="true">
+      <path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8m4 0h2.5A1.5 1.5 0 0 1 16 5.5V8m0 4v2.5a1.5 1.5 0 0 1-1.5 1.5H12M8 16H5.5A1.5 1.5 0 0 1 4 14.5V12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M3.5 10h13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconWatch() {
+  return (
+    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" aria-hidden="true">
+      <path d="M2.5 10S5 5.5 10 5.5 17.5 10 17.5 10 15 14.5 10 14.5 2.5 10 2.5 10Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      <circle cx="10" cy="10" r="2" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function IconGear() {
+  return (
+    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" aria-hidden="true">
+      <circle cx="10" cy="10" r="2.4" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M10 3v1.6M10 15.4V17M4.1 6.5l1.4.8m8.9-.8-1.4.8M4.1 13.5l1.4-.8m8.9.8 1.4-.8"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function ScanPicker({
   preview,
   importing,
@@ -1073,6 +1238,14 @@ function ScanPicker({
 
   const fresh = candidates.filter((c) => !c.alreadyInLibrary);
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
 
   const toggle = (path: string) => {
     setPicked((prev) => {

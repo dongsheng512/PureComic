@@ -864,6 +864,28 @@ impl Scheduler {
         }
     }
 
+    /// 打开 AI，或开着 AI 时换引擎/降噪，把模型加载和 warmup 提前做掉。
+    /// GPU 正被导出或另一次增强占用时直接跳过：下一次增强仍会 load。
+    /// 预热失败只记日志，不打断阅读。
+    pub async fn preheat_reader_engine(
+        &self,
+        options: Option<crate::preview::EnhanceOptionsDto>,
+    ) -> AppResult<()> {
+        let requested_engine = options.as_ref().and_then(|o| o.engine.as_deref());
+        let kind = crate::job::parse_engine_kind(requested_engine.unwrap_or("realcugan-coreml"))?;
+        self.ensure_engine_ready(kind, requested_engine.is_some())?;
+        // 持锁直到预热结束，避免和正在排队的增强交错加载同一个模型槽。
+        let Ok(_gpu) = self.gpu.try_lock() else {
+            return Ok(());
+        };
+        let engine = self.pick_engine(kind)?;
+        let noise = options.as_ref().and_then(|o| o.noise_level).unwrap_or(0);
+        if let Err(e) = engine.preheat(noise).await {
+            warn!(error = %e, "reader engine preheat failed");
+        }
+        Ok(())
+    }
+
     /// 只取消这一本书的在途增强。槽位留给任务自己的 Drop 摘掉，
     /// 避免把别的书的取消令牌一起排空。
     fn cancel_reader_enhance_keys(&self, keys: &[String]) {
@@ -1740,6 +1762,23 @@ mod tests {
         assert_eq!(err.code, crate::error::ErrorCode::PathTraversal);
         // 穿越目标目录必须原样存在（未被触碰）
         assert!(tmp.path().exists());
+    }
+
+    #[tokio::test]
+    async fn preheat_reader_engine_skips_when_gpu_busy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig {
+            work_root: tmp.path().join("work"),
+            use_mock_engine: true,
+            ..Default::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        let sched = Scheduler::new(cfg).unwrap();
+        let gpu = sched.gpu.clone();
+        let _hold = gpu.lock().await;
+        let started = std::time::Instant::now();
+        sched.preheat_reader_engine(None).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[tokio::test]

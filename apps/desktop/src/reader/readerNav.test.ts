@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { alignIndex, progressIndex, readingModeTarget, stepIndex } from "./readerNav";
+import {
+  aiStatusText,
+  alignIndex,
+  progressIndex,
+  readingModeActive,
+  readingModeTarget,
+  stepIndex,
+} from "./readerNav";
 
 describe("progressIndex", () => {
   it("maps the track onto pages and keeps the right edge on the last page", () => {
@@ -112,5 +119,90 @@ describe("readingModeTarget", () => {
     expect(readingModeTarget("webtoon", 0, 0).index).toBe(0);
     expect(readingModeTarget("single", 3, 0).index).toBe(0);
     expect(readingModeTarget("double", 3, 0).index).toBe(0);
+  });
+});
+
+describe("readingModeActive", () => {
+  // 版式分段的高亮判定。回归的是线上 bug：竖读时「单页」和「竖读」同时高亮。
+  // 根因是拿渲染用的 effectiveSpread（竖读时被强制成 single）当高亮依据，
+  // 把"按单页排版"误当成"用户选了单页"。
+  it("页模式：单/双页各亮一格", () => {
+    expect(readingModeActive(false, "single")).toEqual({
+      single: true,
+      double: false,
+      webtoon: false,
+    });
+    expect(readingModeActive(false, "double")).toEqual({
+      single: false,
+      double: true,
+      webtoon: false,
+    });
+  });
+
+  it("竖读：单页/双页都不亮，只有竖读亮（不论底层 spread 存的是什么）", () => {
+    // 这两个断言就是那个 bug 的护栏：
+    expect(readingModeActive(true, "single")).toEqual({
+      single: false,
+      double: false,
+      webtoon: true,
+    });
+    // 用户在双页模式下进竖读（spread 仍记得 double），单页不能被点亮
+    expect(readingModeActive(true, "double")).toEqual({
+      single: false,
+      double: false,
+      webtoon: true,
+    });
+  });
+
+  it("任何组合下最多只有一个为真（互斥）", () => {
+    const combos: Array<[boolean, "single" | "double"]> = [
+      [false, "single"],
+      [false, "double"],
+      [true, "single"],
+      [true, "double"],
+    ];
+    for (const [webtoon, spread] of combos) {
+      const a = readingModeActive(webtoon, spread);
+      const count = [a.single, a.double, a.webtoon].filter(Boolean).length;
+      expect(count, `webtoon=${webtoon} spread=${spread}`).toBe(1);
+    }
+  });
+});
+
+describe("aiStatusText", () => {
+  // AI 面板右上角状态。回归的是"AI 开着但当前页还在处理"时显示「未开启」、
+  // 与面板内高亮选中的引擎行自相矛盾的问题。
+  const base = {
+    engineMain: "Real-CUGAN",
+    offLabel: "未开启",
+    busyLabel: "优化中...",
+  };
+
+  it("关掉 AI：显示未开启，且标记为非开启态（用弱化色）", () => {
+    expect(aiStatusText({ ...base, enhanceOn: false, pageEnhancing: false })).toEqual({
+      text: "未开启",
+      on: false,
+    });
+  });
+
+  it("AI 开着：即使当前页还没出图，也不能显示「未开启」", () => {
+    // 这就是那个 bug 的护栏：enhanceOn=true 时 text 必须是引擎名，on 必须为 true
+    const r = aiStatusText({ ...base, enhanceOn: true, pageEnhancing: false });
+    expect(r).toEqual({ text: "Real-CUGAN", on: true });
+    expect(r.text).not.toBe("未开启");
+  });
+
+  it("AI 开着且当前页处理中：补上忙态后缀", () => {
+    expect(aiStatusText({ ...base, enhanceOn: true, pageEnhancing: true })).toEqual({
+      text: "Real-CUGAN · 优化中...",
+      on: true,
+    });
+  });
+
+  it("开关状态只由 enhanceOn 决定，与 pageEnhancing 无关", () => {
+    for (const pageEnhancing of [true, false]) {
+      expect(aiStatusText({ ...base, enhanceOn: false, pageEnhancing }).on).toBe(false);
+      expect(aiStatusText({ ...base, enhanceOn: true, pageEnhancing }).on).toBe(true);
+    }
   });
 });

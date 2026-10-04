@@ -1019,7 +1019,6 @@ export function ReaderView({
         setBar={setBar}
         toggleFullscreen={toggleFullscreen}
         webtoon={webtoon}
-        effectiveSpread={effectiveSpread}
         direction={direction}
         setDirection={setDirection}
         pageIndex={pageIndex}

@@ -3,6 +3,7 @@ import {
   cancelReaderEnhance,
   clearReaderEnhanceCache,
   enhanceReaderPages,
+  preheatReaderEngine,
   errorMessage,
   isCancelledError,
   listEngines,
@@ -24,6 +25,18 @@ import {
   saveReaderEngine,
 } from "./prefs";
 import { fileUrl, type LoadedPage } from "./readerNav";
+
+
+function readerEnhanceOpts(engine: string, noise: 0 | 1 | 2 | 3): ReaderEnhanceOptions {
+  const fourX = engine === "realesrgan-coreml" || engine === "animevideo-coreml";
+  return {
+    engine,
+    preset: "quality",
+    scale: fourX ? 4 : 2,
+    noiseLevel: fourX ? 0 : noise,
+    tta: false,
+  };
+}
 
 type Args = {
   i18n: Messages;
@@ -73,16 +86,39 @@ export function useReaderEnhance(args: Args) {
   const runGenRef = useRef(0);
   const aiPagesRef = useRef(aiPages);
   aiPagesRef.current = aiPages;
+  /** 已提交、尚未返回的增强页。跳页只在和新可见页不相交时取消。 */
+  const inflightRef = useRef<{ id: number; pages: number[] }[]>([]);
+  const inflightSeqRef = useRef(0);
+  const switchTailRef = useRef(Promise.resolve());
+  /** 跳页 / 切引擎的取消 IPC 串行。后一次提交必须等前一次取消返回。 */
+  const cancelTailRef = useRef(Promise.resolve());
+  const enhanceOnRef = useRef(enhanceOn);
+  enhanceOnRef.current = enhanceOn;
+  const engineIdRef = useRef(engineId);
+  const noiseLevelRef = useRef(noiseLevel);
+  const seenEngineRef = useRef(engineId);
+  const seenNoiseRef = useRef(noiseLevel);
+  // 只在 ref 还停在上一版 state 时跟随。点击已经把 ref 拨到新值时，不能被旧 state 盖回去。
+  useEffect(() => {
+    if (engineIdRef.current === seenEngineRef.current) engineIdRef.current = engineId;
+    seenEngineRef.current = engineId;
+  }, [engineId]);
+  useEffect(() => {
+    if (noiseLevelRef.current === seenNoiseRef.current) noiseLevelRef.current = noiseLevel;
+    seenNoiseRef.current = noiseLevel;
+  }, [noiseLevel]);
 
-  const enhanceOpts = useMemo<ReaderEnhanceOptions>(
-    () => ({
-      engine: engineId,
-      preset: "quality",
-      scale: engineId === "realesrgan-coreml" || engineId === "animevideo-coreml" ? 4 : 2,
-      noiseLevel:
-        engineId === "realesrgan-coreml" || engineId === "animevideo-coreml" ? 0 : noiseLevel,
-      tta: false,
-    }),
+  const settleCancelTail = useCallback((task: () => Promise<void>) => {
+    const run = cancelTailRef.current.catch(() => undefined).then(task);
+    cancelTailRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }, []);
+
+  const enhanceOpts = useMemo(
+    () => readerEnhanceOpts(engineId, noiseLevel),
     [engineId, noiseLevel],
   );
 
@@ -94,8 +130,9 @@ export function useReaderEnhance(args: Args) {
         next[file.index] = { ...file, url: fileUrl(file.path, file.kind) };
       }
       const keys = Object.keys(next).map(Number);
-      const aiLimit = webtoon ? 8 : 80;
-      const aiHalf = webtoon ? 4 : 40;
+      // 条漫快滑会马上回到刚离开的几页；8 页窗口会把它们清掉再重跑。
+      const aiLimit = webtoon ? 12 : 80;
+      const aiHalf = webtoon ? 6 : 40;
       if (keys.length > aiLimit) {
         for (const k of keys) {
           if (Math.abs(k - pageIndex) > aiHalf) delete next[k];
@@ -195,8 +232,69 @@ export function useReaderEnhance(args: Args) {
     let cancelled = false;
     const stillThis = () => !cancelled && epoch === enhanceEpochRef.current;
 
+    const trackInflight = (pages: number[]) => {
+      if (pages.length === 0) return () => {};
+      const id = ++inflightSeqRef.current;
+      inflightRef.current = [...inflightRef.current, { id, pages }];
+      return () => {
+        inflightRef.current = inflightRef.current.filter((batch) => batch.id !== id);
+      };
+    };
+
+    const runEnhance = async (pages: number[], reportError: boolean) => {
+      if (pages.length === 0 || !stillThis()) return;
+      const release = trackInflight(pages);
+      try {
+        // 更早一次跳页的取消可能在本请求注册之后才到达。当前效果还在就再交一次。
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (!stillThis()) return;
+          try {
+            const files = await enhanceReaderPages({
+              source: src,
+              jobId: stateJobId ?? jobId,
+              pageIndexes: pages,
+              options: enhanceOpts,
+            });
+            if (epoch === enhanceEpochRef.current) applyAiRef.current(files);
+            return;
+          } catch (e) {
+            if (isCancelledError(e) && stillThis() && attempt < 2) continue;
+            if (reportError && stillThis() && !isCancelledError(e)) onError(errorMessage(e));
+            return;
+          }
+        }
+      } finally {
+        release();
+      }
+    };
+
     (async () => {
       try {
+        // 翻页不取消仍覆盖新可见页的批次（下一页往往已在预取里）。
+        // 完全不相交才取消，并且必须等取消 IPC 返回再提交，否则全局取消
+        // 会把刚注册的新请求一起清掉。当前这一页的推理停不掉，省的是后面几页。
+        const overlapsInflight = visibleIndexes.some((index) =>
+          inflightRef.current.some((batch) => batch.pages.includes(index)),
+        );
+        if (inflightRef.current.length > 0 && !overlapsInflight) {
+          const staleIds = inflightRef.current.map((batch) => batch.id);
+          try {
+            await settleCancelTail(async () => {
+              await cancelReaderEnhance();
+              // 只摘掉这次取消的批次。等待期间新 effect 可能已经登记了自己的页。
+              inflightRef.current = inflightRef.current.filter(
+                (batch) => !staleIds.includes(batch.id),
+              );
+            });
+          } catch {
+            // 取消失败仍继续提交当前页，避免这次翻页被丢掉。
+          }
+          if (!stillThis()) return;
+        } else {
+          // 重叠页也要等前一次取消落地，否则全局取消会清掉刚注册的新请求。
+          await cancelTailRef.current;
+          if (!stillThis()) return;
+        }
         const needLookup = visibleIndexes.filter((i) => !aiPagesRef.current[i]);
         if (needLookup.length > 0) {
           const hits = await lookupReaderEnhancePages({
@@ -212,17 +310,7 @@ export function useReaderEnhance(args: Args) {
         if (miss.length > 0) {
           setEnhanceBusy(true);
           try {
-            const files = await enhanceReaderPages({
-              source: src,
-              jobId: stateJobId ?? jobId,
-              pageIndexes: miss,
-              options: enhanceOpts,
-            });
-            if (epoch === enhanceEpochRef.current) applyAiRef.current(files);
-          } catch (e) {
-            if (stillThis() && !isCancelledError(e)) {
-              onError(errorMessage(e));
-            }
+            await runEnhance(miss, true);
           } finally {
             // 运行代际守卫:翻页后旧任务 resolve 晚于新任务置 busy 时不清零
             if (isCurrentGen()) setEnhanceBusy(false);
@@ -242,24 +330,15 @@ export function useReaderEnhance(args: Args) {
           pageIndexes: prefNeed,
           options: enhanceOpts,
         });
-        if (epoch !== enhanceEpochRef.current) return;
+        // 翻页不 bump epoch。lookup 在飞时离开本页，不能再把旧预取交出去。
+        if (!stillThis()) return;
         applyAiRef.current(prefHits);
         const prefMiss = prefNeed.filter((i) => !aiPagesRef.current[i]);
         if (prefMiss.length === 0) {
           refreshCacheStats();
           return;
         }
-        try {
-          const files = await enhanceReaderPages({
-            source: src,
-            jobId: stateJobId ?? jobId,
-            pageIndexes: prefMiss,
-            options: enhanceOpts,
-          });
-          if (epoch === enhanceEpochRef.current) applyAiRef.current(files);
-        } catch (e) {
-          if (isCancelledError(e) || epoch !== enhanceEpochRef.current) return;
-        }
+        await runEnhance(prefMiss, false);
         if (stillThis()) refreshCacheStats();
       } catch (e) {
         if (stillThis() && !isCancelledError(e)) {
@@ -288,6 +367,7 @@ export function useReaderEnhance(args: Args) {
     onError,
     refreshCacheStats,
     webtoon,
+    settleCancelTail,
   ]);
 
   const toggleAi = useCallback(() => {
@@ -295,19 +375,26 @@ export function useReaderEnhance(args: Args) {
       enhanceEpochRef.current += 1;
       setEnhanceOn(false);
       setEnhanceBusy(false);
-      void cancelReaderEnhance();
+      void settleCancelTail(async () => {
+        await cancelReaderEnhance();
+        inflightRef.current = [];
+      });
       return;
     }
     if (visibleIndexes.length === 0) return;
+    void preheatReaderEngine(enhanceOpts).catch(() => undefined);
     setEnhanceOn(true);
-  }, [enhanceOn, visibleIndexes]);
+  }, [enhanceOn, enhanceOpts, settleCancelTail, visibleIndexes]);
 
   const resetForNewBook = () => {
     setEnhanceOn(false);
     setAiPages({});
     setEnhanceBusy(false);
     enhanceEpochRef.current += 1;
-    void cancelReaderEnhance();
+    void settleCancelTail(async () => {
+      await cancelReaderEnhance();
+      inflightRef.current = [];
+    });
   };
 
   const cacheSizeText = (stats: EnhanceCacheStats | null): string => {
@@ -389,27 +476,76 @@ export function useReaderEnhance(args: Args) {
   // 拆除重挂、漏事件
   const persistEngine = useCallback(
     (id: string) => {
-      if (!isReaderEngine(id) || id === engineId) return;
+      if (!isReaderEngine(id) || id === engineIdRef.current) return;
+      engineIdRef.current = id;
       enhanceEpochRef.current += 1;
-      void cancelReaderEnhance();
-      setEngineId(id);
-      saveReaderEngine(id);
-      setAiPages({});
-      if (cacheStats && cacheStats.bytes > 0) setEngineSwitchHint(true);
+      const hint = Boolean(cacheStats && cacheStats.bytes > 0);
+      // 串行：上一次切换的取消返回之后才改状态、发预热。
+      // 预热读 ref，不读点击当时的降噪；后面紧接着改的降噪不会暖错模型。
+      switchTailRef.current = switchTailRef.current.catch(() => undefined).then(async () => {
+        if (engineIdRef.current !== id) return;
+        try {
+          await settleCancelTail(async () => {
+            await cancelReaderEnhance();
+            inflightRef.current = [];
+          });
+        } catch {
+          // 取消失败也落下选择，否则这次点击被吞掉。
+        }
+        if (engineIdRef.current !== id) return;
+        setEngineId(id);
+        saveReaderEngine(id);
+        setAiPages({});
+        if (hint) setEngineSwitchHint(true);
+        if (enhanceOnRef.current) {
+          void preheatReaderEngine(
+            readerEnhanceOpts(engineIdRef.current, noiseLevelRef.current),
+          ).catch(() => undefined);
+        }
+      }).catch(() => undefined);
     },
-    [engineId, cacheStats],
+    [cacheStats, settleCancelTail],
   );
+
+  /* 引擎切换提示的**自动复位**：它只在"切换后还没重新出图"这段时间里有意义。
+     旧实现只在点「清除缓存」时才 setEngineSwitchHint(false)，于是用户切一次引擎、
+     缓存早已按新引擎重建完毕，那行 10pt 小字仍永久挂在面板里 —— 变成噪音。
+
+     判据用 aiPages 是否已产出：applyAiFiles（拿到增强结果时）会把 aiPages 填上，
+     只要存在任意一页结果，就说明新引擎已经跑起来了，提示可以撤。 */
+  useEffect(() => {
+    if (!engineSwitchHint) return;
+    if (Object.keys(aiPages).length === 0) return;
+    setEngineSwitchHint(false);
+  }, [engineSwitchHint, aiPages]);
 
   const persistNoise = useCallback(
     (n: 0 | 1 | 2 | 3) => {
-      if (n === noiseLevel) return;
+      if (n === noiseLevelRef.current) return;
+      noiseLevelRef.current = n;
       enhanceEpochRef.current += 1;
-      void cancelReaderEnhance();
-      setNoiseLevel(n);
-      saveEnhanceNoise(n);
-      setAiPages({});
+      switchTailRef.current = switchTailRef.current.catch(() => undefined).then(async () => {
+        if (noiseLevelRef.current !== n) return;
+        try {
+          await settleCancelTail(async () => {
+            await cancelReaderEnhance();
+            inflightRef.current = [];
+          });
+        } catch {
+          // 取消失败也落下选择，否则这次点击被吞掉。
+        }
+        if (noiseLevelRef.current !== n) return;
+        setNoiseLevel(n);
+        saveEnhanceNoise(n);
+        setAiPages({});
+        if (enhanceOnRef.current) {
+          void preheatReaderEngine(
+            readerEnhanceOpts(engineIdRef.current, noiseLevelRef.current),
+          ).catch(() => undefined);
+        }
+      }).catch(() => undefined);
     },
-    [noiseLevel],
+    [settleCancelTail],
   );
 
   const handleClearClick = async () => {

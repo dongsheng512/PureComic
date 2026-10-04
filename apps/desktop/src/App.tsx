@@ -48,7 +48,7 @@ import {
 } from "./enhance/enhanceViewModel";
 import { LibraryView } from "./library/LibraryView";
 import { CachePanel, type CacheView } from "./components/CachePanel";
-import { Drawer, PanelCloseButton } from "./components/Drawer";
+import { Drawer, PanelCloseButton, PanelFeedback } from "./components/Drawer";
 import { ComicReader, type ReaderSession } from "./reader/ComicReader";
 import { ACTIVE_JOB_STATES, jobsEqual, useJobs } from "./useJobs";
 import { useLibrary } from "./useLibrary";
@@ -136,10 +136,16 @@ export default function App() {
   const [estimate, setEstimate] = useState<DiskEstimate | null>(null);
   const [estimateLoading, setEstimateLoading] = useState(false);
   const [resumeHint, setResumeHint] = useState<ResumeHint | null>(null);
-  const { jobs, refreshJobs } = useJobs();
+  const {
+    jobs,
+    refreshJobs,
+    loading: jobsLoading,
+    error: jobsLoadError,
+  } = useJobs();
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [drawerError, setDrawerError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [cacheOpen, setCacheOpen] = useState(false);
@@ -183,7 +189,7 @@ export default function App() {
     readerSessionRef.current = session;
     setError(null);
     setImportPrompt(null);
-  }, []);
+  }, [setReaderSession, setError, setImportPrompt]);
 
   const [readerPrefsRev, setReaderPrefsRev] = useState(0);
 
@@ -194,7 +200,7 @@ export default function App() {
     setImportRemember(false);
     setReaderPrefsRev((n) => n + 1);
     void restoreMainWindowGeometry();
-  }, []);
+  }, [setReaderSession, setImportPrompt, setImportRemember, setReaderPrefsRev]);
 
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [diagPath, setDiagPath] = useState<string | null>(null);
@@ -263,7 +269,7 @@ export default function App() {
       return;
     }
     setImportPrompt({ path, title: session.title || titleFromPath(path) });
-  }, [finishCloseReader, pathInLibrary, refreshLibrary]);
+  }, [finishCloseReader, pathInLibrary, refreshLibrary, setError]);
 
   const refreshDoctor = useCallback(async () => {
     try {
@@ -272,7 +278,7 @@ export default function App() {
     } catch (e) {
       setError(errMsg(e));
     }
-  }, []);
+  }, [setDoctorReport, setEngine, setError]);
 
   /**
    * 缓存总览 + 按漫画列表。两者都是全树遍历，比 listJobs 慢得多，所以只在需要时主动调。
@@ -282,6 +288,7 @@ export default function App() {
    * 两条命令各自在 blocking 线程里跑，并发发出。
    */
   const refreshCache = useCallback(async () => {
+    setDrawerError(null);
     setCacheScanning(true);
     try {
       const [overviewData, books] = await Promise.all([
@@ -291,11 +298,11 @@ export default function App() {
       setCacheOverviewData(overviewData);
       setCacheBooks(books);
     } catch (e) {
-      setError(errMsg(e));
+      setDrawerError(errMsg(e));
     } finally {
       setCacheScanning(false);
     }
-  }, []);
+  }, [setDrawerError]);
 
   /** 重拉当前展开分组的明细。
    *
@@ -307,12 +314,13 @@ export default function App() {
     try {
       setCacheEntries(await cacheGroupEntries(cacheExpanded));
     } catch (e) {
-      setError(errMsg(e));
+      setDrawerError(errMsg(e));
     }
-  }, [cacheExpanded]);
+  }, [cacheExpanded, setDrawerError]);
 
   const runClearCache = useCallback(
     async (id: CacheGroupId | "all") => {
+      setDrawerError(null);
       setCacheBusyId(id);
       setCacheLastFreed(null);
       try {
@@ -335,12 +343,12 @@ export default function App() {
         // 清掉的那一组若正展开着，明细必须跟着更新，否则还挂着已消失的书
         await reloadExpandedEntries();
       } catch (e) {
-        setError(errMsg(e));
+        setDrawerError(errMsg(e));
       } finally {
         setCacheBusyId(null);
       }
     },
-    [refreshCache, refreshJobs, reloadExpandedEntries],
+    [refreshCache, refreshJobs, reloadExpandedEntries, setDrawerError],
   );
 
   /** 展开/收起主视图里那一本漫画的**按类型拆分**。
@@ -360,6 +368,7 @@ export default function App() {
    */
   const runClearCacheBook = useCallback(
     async (row: BookCacheEntry) => {
+      setDrawerError(null);
       setCacheBusyBookKey(row.key);
       setCacheLastFreed(null);
       try {
@@ -373,17 +382,18 @@ export default function App() {
         await reloadExpandedEntries();
         if (row.parts.some((p) => p.group === "jobs")) await refreshJobs();
       } catch (e) {
-        setError(errMsg(e));
+        setDrawerError(errMsg(e));
       } finally {
         setCacheBusyBookKey(null);
       }
     },
-    [refreshCache, refreshJobs, reloadExpandedEntries],
+    [refreshCache, refreshJobs, reloadExpandedEntries, setDrawerError],
   );
 
   /** 展开/收起「按存储类型」这一层里的某个分组。展开时才去读磁盘。 */
   const toggleCacheGroup = useCallback(
     async (id: CacheGroupId) => {
+      setDrawerError(null);
       setCacheLastFreed(null);
       if (cacheExpanded === id) {
         setCacheExpanded(null);
@@ -396,22 +406,25 @@ export default function App() {
       try {
         setCacheEntries(await cacheGroupEntries(id));
       } catch (e) {
-        setError(errMsg(e));
+        setDrawerError(errMsg(e));
       } finally {
         setCacheEntriesLoading(false);
       }
     },
-    [cacheExpanded],
+    [cacheExpanded, setDrawerError],
   );
 
   /** 清掉单本。`key` 是明细行上的标识（目录名 / 书 id / 任务 id）。 */
   const runClearCacheEntry = useCallback(
     async (id: CacheGroupId, key: string) => {
+      setDrawerError(null);
       const busyKey = `${id}:${key}`;
       setCacheBusyEntryKeys((prev) => new Set(prev).add(busyKey));
       setCacheLastFreed(null);
       try {
-        const r = await clearCacheEntry(id, key);
+        const r = id === "jobs"
+          ? await clearBookCache([{ group: id, key }])
+          : await clearCacheEntry(id, key);
         setCacheLastFreed(r.bytesFreed);
         // 顺序重要：先刷新总览、再重拉明细。明细统一按 cacheExpanded 重拉，
         // 不能按清理目标所在的组拉——面板可能正开在另一个视图/分组上。
@@ -419,7 +432,7 @@ export default function App() {
         await reloadExpandedEntries();
         if (id === "jobs") await refreshJobs();
       } catch (e) {
-        setError(errMsg(e));
+        setDrawerError(errMsg(e));
       } finally {
         setCacheBusyEntryKeys((prev) => {
           const next = new Set(prev);
@@ -428,7 +441,7 @@ export default function App() {
         });
       }
     },
-    [refreshCache, refreshJobs, reloadExpandedEntries],
+    [refreshCache, refreshJobs, reloadExpandedEntries, setDrawerError],
   );
 
   /** 关闭缓存面板。
@@ -438,11 +451,24 @@ export default function App() {
    */
   const closeCachePanel = useCallback(() => {
     setCacheOpen(false);
+    setDrawerError(null);
     setCacheExpanded(null);
     setCacheEntries(null);
     setCacheExpandedBook(null);
     setCacheView("book");
-  }, []);
+  }, [
+    setCacheOpen,
+    setCacheExpanded,
+    setCacheEntries,
+    setCacheExpandedBook,
+    setCacheView,
+    setDrawerError,
+  ]);
+
+  const closeQueuePanel = useCallback(() => {
+    setQueueOpen(false);
+    setDrawerError(null);
+  }, [setQueueOpen, setDrawerError]);
 
   const openExternalPath = useCallback(
     async (raw: string) => {
@@ -461,7 +487,7 @@ export default function App() {
         setError(errMsg(e));
       }
     },
-    [openReader],
+    [openReader, setSource, setTab, setError],
   );
 
   // 外部打开：启动参数 + 运行中二次打开
@@ -537,7 +563,10 @@ export default function App() {
   useEffect(() => {
     if (!queueOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setQueueOpen(false);
+      if (e.key === "Escape") {
+        setQueueOpen(false);
+        setDrawerError(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -579,7 +608,7 @@ export default function App() {
     } finally {
       if (requestId === sourceRequestRef.current) setSourceLoading(false);
     }
-  }, [ingestPath]);
+  }, [ingestPath, setSource, setError]);
 
   // 磁盘预估：等校验出页数后再算。倍率 / 引擎 / 输出格式 / 输出目录变化只重算体积，
   // 不再扫一遍书。引擎与格式会决定中间页是 JPEG 还是 PNG，估算结果差好几倍。
@@ -798,7 +827,7 @@ export default function App() {
       setNoise(1);
       setTta(false);
     }
-  }, []);
+  }, [setNoise]);
 
   const onEngineChange = useCallback(
     (id: string) => {
@@ -814,7 +843,7 @@ export default function App() {
         scales.includes(prev) ? prev : scales.includes(2) ? 2 : scales[0] ?? 2,
       );
     },
-    [catalog],
+    [catalog, setScale],
   );
 
   const openSourceReader = useCallback(() => {
@@ -832,7 +861,7 @@ export default function App() {
         .then(refreshJobs)
         .catch((e) => setError(`取消失败: ${errMsg(e)}`));
     },
-    [refreshJobs],
+    [refreshJobs, setError],
   );
 
   const start = async () => {
@@ -897,7 +926,7 @@ export default function App() {
     { id: "library", label: i18n.tabLibrary },
     { id: "enhance", label: i18n.tabEnhance },
   ];
-  const runningJobCount = jobs.filter((j) => canShowCancel(j.state)).length;
+  const activeJobCount = jobs.filter((j) => canShowCancel(j.state)).length;
 
   const onLibOpen = useCallback(
     (e: LibraryEntry) => {
@@ -914,7 +943,7 @@ export default function App() {
         from: "library",
       });
     },
-    [openReader, refreshLibrary],
+    [openReader, refreshLibrary, setSource],
   );
 
   const onLibEnhance = useCallback(
@@ -938,7 +967,7 @@ export default function App() {
     } finally {
       setImportBusy(false);
     }
-  }, [importPrompt, importRemember, refreshLibrary, finishCloseReader]);
+  }, [importPrompt, importRemember, refreshLibrary, finishCloseReader, setError]);
 
   const onExternalImportDiscard = useCallback(() => {
     if (importRemember) saveExternalOpenRemember("discard");
@@ -948,7 +977,7 @@ export default function App() {
   const onExternalImportCancel = useCallback(() => {
     setImportPrompt(null);
     setImportRemember(false);
-  }, []);
+  }, [setImportPrompt, setImportRemember]);
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -1035,6 +1064,7 @@ export default function App() {
               type="button"
               onClick={() => {
                 setQueueOpen(false);
+                setDrawerError(null);
                 setCacheOpen(true);
               }}
               title={i18n.cacheShow}
@@ -1054,12 +1084,14 @@ export default function App() {
               type="button"
               onClick={() => {
                 closeCachePanel();
+                setDrawerError(null);
                 setQueueOpen(true);
               }}
               title={i18n.showQueue}
-              aria-label={i18n.showQueue}
+              aria-label={`${i18n.showQueue} · ${i18n.queueActiveCount.replace("{n}", String(activeJobCount))}`}
+              aria-pressed={queueOpen}
               className={`btn-soft relative !h-[34px] !w-[34px] !p-0 ${
-                runningJobCount > 0
+                activeJobCount > 0
                   ? "!border-amber-400/70 !bg-amber-50 !text-amber-700 dark:!border-warning-border dark:!bg-warning-soft dark:!text-warning-fg"
                   : queueOpen
                     ? "!bg-ink-200 !text-ink-800 dark:!bg-surface-high dark:!text-fg"
@@ -1072,15 +1104,15 @@ export default function App() {
                   d="M4 5.2A1.2 1.2 0 0 1 5.2 4h9.6A1.2 1.2 0 0 1 16 5.2v9.6a1.2 1.2 0 0 1-1.2 1.2H5.2A1.2 1.2 0 0 1 4 14.8V5.2Zm2.4 1.3a.7.7 0 1 0 0 1.4h7.2a.7.7 0 1 0 0-1.4H6.4Zm0 3a.7.7 0 1 0 0 1.4h7.2a.7.7 0 1 0 0-1.4H6.4Zm0 3a.7.7 0 1 0 0 1.4h4.6a.7.7 0 1 0 0-1.4H6.4Z"
                 />
               </svg>
-              {jobs.length > 0 && (
+              {activeJobCount > 0 && (
                 <span
                   className={`absolute -right-1 -top-1 inline-flex min-h-[17px] min-w-[17px] items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none ${
-                    runningJobCount > 0
+                    activeJobCount > 0
                       ? "bg-amber-500 text-white"
                       : "bg-ink-300 text-ink-800 dark:bg-surface-high dark:text-fg"
                   }`}
                 >
-                  {runningJobCount || jobs.length}
+                  {activeJobCount}
                 </span>
               )}
             </button>
@@ -1178,7 +1210,7 @@ export default function App() {
         {!reading && tab === "library" && (
           <div className="flex min-h-0 flex-1 flex-col">
             {libraryNotice && (
-              <div className="mb-3 flex items-start gap-2 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg">
+              <div className="lib-notice mb-3 flex items-start gap-2 rounded-xl border border-success/25 bg-success/10 px-3 py-2 text-sm text-success dark:border-ok-border dark:bg-ok-soft dark:text-ok-fg">
                 <p className="min-w-0 flex-1">{libraryNotice}</p>
                 <button
                   type="button"
@@ -1373,6 +1405,8 @@ export default function App() {
       >
         <CachePanel
           i18n={i18n}
+          errorMessage={drawerError}
+          onDismissError={() => setDrawerError(null)}
           overview={cacheOverviewData}
           scanning={cacheScanning}
           busyId={cacheBusyId}
@@ -1402,34 +1436,38 @@ export default function App() {
 
       <Drawer
         open={queueOpen}
-        onClose={() => setQueueOpen(false)}
+        onClose={closeQueuePanel}
         label={i18n.queue}
         closeLabel={i18n.hideQueue}
       >
         <JobQueue
           jobs={jobs}
+          loading={jobsLoading}
+          loadError={jobsLoadError}
+          errorMessage={drawerError}
+          onDismissError={() => setDrawerError(null)}
           i18n={i18n}
-          onClose={() => setQueueOpen(false)}
+          onClose={closeQueuePanel}
           onRefresh={refreshJobs}
           onCancel={(id) =>
             cancelJob(id)
               .then(refreshJobs)
-              .catch((e) => setError(`取消失败: ${errMsg(e)}`))
+              .catch((e) => setDrawerError(`取消失败: ${errMsg(e)}`))
           }
           onRemove={(id) =>
             removeJob(id)
               .then(refreshJobs)
-              .catch((e) => setError(`删除失败: ${errMsg(e)}`))
+              .catch((e) => setDrawerError(`删除失败: ${errMsg(e)}`))
           }
           onClearFinished={() =>
             clearFinishedJobs()
               .then(() => {
-                setError(null);
+                setDrawerError(null);
                 void refreshJobs();
               })
-              .catch((e) => setError(`清理失败: ${errMsg(e)}`))
+              .catch((e) => setDrawerError(`清理失败: ${errMsg(e)}`))
           }
-          onOpen={(id) => openOutputFolder(id).catch((e) => setError(errMsg(e)))}
+          onOpen={(id) => openOutputFolder(id).catch((e) => setDrawerError(errMsg(e)))}
           onRead={(id) => {
             const job = jobs.find((j) => j.jobId === id);
             openReader({
@@ -1437,7 +1475,7 @@ export default function App() {
               jobId: id,
               from: "queue",
             });
-            setQueueOpen(false);
+            closeQueuePanel();
           }}
         />
       </Drawer>
@@ -1559,8 +1597,41 @@ function canShowCancel(state: unknown): boolean {
   return !isTerminalState(state);
 }
 
+function stageLabel(stage: string, i18n: ReturnType<typeof t>): string {
+  switch (stage.toLowerCase()) {
+    case "validate":
+      return i18n.jobStageValidate;
+    case "extract":
+      return i18n.jobStageExtract;
+    case "enhance":
+      return i18n.jobStageEnhance;
+    case "repack":
+      return i18n.jobStageRepack;
+    case "cancelling":
+      return stateLabel("cancelling");
+    default:
+      return stage;
+  }
+}
+
+function etaLabel(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.round(seconds));
+  if (safeSeconds >= 3600) {
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const remainder = safeSeconds % 60;
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  }
+  const minutes = Math.floor(safeSeconds / 60);
+  return `${minutes}:${String(safeSeconds % 60).padStart(2, "0")}`;
+}
+
 function JobQueue({
   jobs,
+  loading,
+  loadError,
+  errorMessage,
+  onDismissError,
   i18n,
   onRefresh,
   onCancel,
@@ -1571,6 +1642,10 @@ function JobQueue({
   onClose,
 }: {
   jobs: JobStatus[];
+  loading: boolean;
+  loadError: string | null;
+  errorMessage: string | null;
+  onDismissError: () => void;
   i18n: ReturnType<typeof t>;
   onRefresh: () => void;
   onCancel: (id: string) => void;
@@ -1580,22 +1655,177 @@ function JobQueue({
   onRead: (id: string) => void;
   onClose?: () => void;
 }) {
+  const [confirmClearFinished, setConfirmClearFinished] = useState(false);
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const finishedCount = jobs.filter((j) => isTerminalState(j.state)).length;
+  const activeJobs = jobs.filter((j) => !isTerminalState(j.state));
+  const finishedJobs = jobs.filter((j) => isTerminalState(j.state));
+  useEffect(() => {
+    if (!confirmClearFinished && confirmRemoveId == null) return;
+    const timer = window.setTimeout(() => {
+      setConfirmClearFinished(false);
+      setConfirmRemoveId(null);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [confirmClearFinished, confirmRemoveId]);
+
+  const renderJob = (j: JobStatus) => {
+    const id = j.jobId || (j as { job_id?: string }).job_id || "";
+    const raw = j as JobStatus & { pages_done?: number; pages_total?: number };
+    const pagesDone = j.pagesDone ?? raw.pages_done ?? 0;
+    const pagesTotal = j.pagesTotal ?? raw.pages_total ?? 0;
+    const hasProgress = pagesTotal > 0;
+    const indeterminate = !hasProgress && !isTerminalState(j.state);
+    const pct = hasProgress
+      ? Math.min(100, Math.round((pagesDone / pagesTotal) * 100))
+      : 0;
+    const terminal = isTerminalState(j.state);
+    const cancelling = isCancellingState(j.state);
+    const barColor = normalizeJobState(j.state) === "failed"
+      ? "bg-rose-500"
+      : normalizeJobState(j.state) === "completed"
+        ? "bg-success dark:bg-ok"
+        : "bg-accent dark:bg-accent-fg";
+
+    return (
+      <li
+        key={id || j.source}
+        className="border-b border-ink-200 py-3.5 first:pt-1 last:border-b-0 dark:border-white/10"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-ink-900 dark:text-fg" title={j.source}>
+              {j.source.split(/[/\\]/).pop()}
+            </p>
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span
+                className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold ${stateBadgeClass(j.state)}`}
+              >
+                {stateLabel(normalizeJobState(j.state) || j.state)}
+              </span>
+              {hasProgress ? (
+                <span className="text-sm font-semibold tabular-nums text-ink-800 dark:text-fg">
+                  {pct}%
+                </span>
+              ) : !terminal ? (
+                <span className="text-xs text-ink-500 dark:text-fg-muted">
+                  {i18n.queuePreparing}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {id && (
+              <button
+                type="button"
+                className="rounded-lg border border-ink-300 bg-ink-200 px-2.5 py-1.5 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-high dark:text-fg"
+                onClick={() => onRead(id)}
+              >
+                {i18n.readerRead}
+              </button>
+            )}
+            <details className="relative">
+              <summary
+                className="grid h-8 w-8 cursor-pointer list-none place-items-center rounded-lg text-lg leading-none text-ink-500 hover:bg-ink-100 hover:text-ink-900 dark:text-fg-muted dark:hover:bg-surface-high dark:hover:text-fg"
+                aria-label={i18n.queueMoreActions}
+                title={i18n.queueMoreActions}
+              >
+                ···
+              </summary>
+              <div className="absolute right-0 top-full z-20 mt-1 flex min-w-36 flex-col rounded-lg border border-ink-200 bg-white p-1 shadow-lg dark:border-white/10 dark:bg-surface-raised">
+                {!terminal && (
+                  <button
+                    type="button"
+                    disabled={cancelling || !id}
+                    className="rounded-md px-2.5 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-500/10 disabled:pointer-events-none disabled:opacity-40 dark:text-danger-fg"
+                    onClick={(event) => {
+                      event.currentTarget.closest("details")?.removeAttribute("open");
+                      if (id) onCancel(id);
+                    }}
+                  >
+                    {cancelling ? stateLabel("cancelling") : i18n.cancel}
+                  </button>
+                )}
+                {terminal && id && (
+                  <button
+                    type="button"
+                    className="rounded-md px-2.5 py-1.5 text-left text-xs text-ink-700 hover:bg-ink-100 dark:text-fg dark:hover:bg-surface-high"
+                    onClick={(event) => {
+                      event.currentTarget.closest("details")?.removeAttribute("open");
+                      if (confirmRemoveId === id) {
+                        setConfirmRemoveId(null);
+                        onRemove(id);
+                      } else {
+                        setConfirmRemoveId(id);
+                      }
+                    }}
+                  >
+                    {confirmRemoveId === id ? i18n.queueConfirmRemove : i18n.remove}
+                  </button>
+                )}
+                {j.outputPath && id && (
+                  <button
+                    type="button"
+                    className="rounded-md px-2.5 py-1.5 text-left text-xs text-ink-700 hover:bg-ink-100 dark:text-fg dark:hover:bg-surface-high"
+                    onClick={(event) => {
+                      event.currentTarget.closest("details")?.removeAttribute("open");
+                      onOpen(id);
+                    }}
+                  >
+                    {i18n.openOut}
+                  </button>
+                )}
+              </div>
+            </details>
+          </div>
+        </div>
+        {(hasProgress || indeterminate) && <div
+          className="job-progress mt-2.5 h-1.5 overflow-hidden rounded-full bg-ink-200 dark:bg-surface-high"
+          role="progressbar"
+          aria-label={j.source.split(/[/\\]/).pop()}
+          aria-valuemin={hasProgress ? 0 : undefined}
+          aria-valuemax={hasProgress ? 100 : undefined}
+          aria-valuenow={hasProgress ? pct : undefined}
+          aria-valuetext={hasProgress ? `${pct}%` : i18n.queuePreparing}
+        >
+          <div
+            className={`h-full rounded-full ${barColor} ${hasProgress ? "transition-all" : "job-progress-indeterminate"}`}
+            style={hasProgress ? { width: `${pct}%` } : undefined}
+          />
+        </div>}
+        <p className="mt-1.5 text-xs text-ink-600 dark:text-fg-muted">
+          {hasProgress
+            ? `${pagesDone}/${pagesTotal} ${i18n.pages}`
+            : indeterminate
+              ? i18n.queuePreparing
+              : ""}
+          {j.stage ? ` · ${stageLabel(j.stage, i18n)}` : ""}
+          {!terminal && j.etaSec != null && j.etaSec > 0
+            ? ` · ${i18n.queueEta.replace("{time}", etaLabel(j.etaSec))}`
+            : ""}
+        </p>
+        {j.message && (
+          <p className="mt-1 text-xs text-success dark:text-ok-fg">{j.message}</p>
+        )}
+        {j.error && (
+          <p className="mt-1 text-xs text-rose-700 dark:text-danger-fg">
+            {j.error.message}
+          </p>
+        )}
+        {j.outputPath && (
+          <p className="mt-1 truncate text-[11px] font-mono text-ink-500 dark:text-fg-muted" title={j.outputPath}>
+            {j.outputPath}
+          </p>
+        )}
+      </li>
+    );
+  };
+
   return (
     <div className="h-full min-h-0 flex flex-col p-4">
-      <div className="flex items-center justify-between mb-4 gap-2">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <p className="label">{i18n.queue}</p>
         <div className="flex items-center gap-2">
-          {finishedCount > 0 && (
-            <button
-              type="button"
-              className="text-xs text-amber-800 hover:text-amber-950 border border-amber-500/40 rounded-lg px-2 py-1 transition dark:border-warning-border dark:text-warning-fg dark:hover:bg-warning-soft"
-              onClick={onClearFinished}
-              title={i18n.clearFinishedTitle.replace("{n}", String(finishedCount))}
-            >
-              {i18n.clearFinished}
-            </button>
-          )}
           <button
             type="button"
             className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
@@ -1606,110 +1836,79 @@ function JobQueue({
           {onClose && <PanelCloseButton onClick={onClose} label={i18n.hideQueue} />}
         </div>
       </div>
-      {jobs.length === 0 ? (
-        <div className="flex-1 grid place-items-center text-ink-500 text-sm">{i18n.emptyQueue}</div>
+      <PanelFeedback
+        message={errorMessage}
+        dismissLabel={i18n.dismiss}
+        onDismiss={onDismissError}
+      />
+      {loading && jobs.length === 0 ? (
+        <div className="flex-1 grid place-items-center text-sm text-ink-500 dark:text-fg-muted">
+          {i18n.queueLoading}
+        </div>
+      ) : loadError && jobs.length === 0 ? (
+        <div className="flex-1 grid place-items-center text-sm text-rose-700 dark:text-danger-fg">
+          <div className="text-center">
+            <p>{loadError}</p>
+            <button type="button" className="mt-2 text-xs underline" onClick={onRefresh}>
+              {i18n.refresh}
+            </button>
+          </div>
+        </div>
+      ) : jobs.length === 0 ? (
+        <div className="flex-1 grid place-items-center text-sm text-ink-500 dark:text-fg-muted">
+          {i18n.emptyQueue}
+        </div>
       ) : (
-        <ul className="space-y-3 overflow-auto flex-1 min-h-0 pr-1">
-          {jobs.map((j) => {
-            const id = j.jobId || (j as { job_id?: string }).job_id || "";
-            // Defend against snake_case payloads if IPC ever skips rename
-            const raw = j as JobStatus & {
-              pages_done?: number;
-              pages_total?: number;
-            };
-            const pagesDone = j.pagesDone ?? raw.pages_done ?? 0;
-            const pagesTotal = j.pagesTotal ?? raw.pages_total ?? 0;
-            const pct =
-              pagesTotal > 0 ? Math.round((pagesDone / pagesTotal) * 100) : 0;
-            const showCancel = canShowCancel(j.state);
-            const cancelling = isCancellingState(j.state);
-            return (
-              <li key={id || j.source} className="rounded-xl border border-ink-200 bg-ink-50 p-3.5 dark:border-white/10 dark:bg-surface-panel">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-ink-900 truncate dark:text-fg">
-                      {j.source.split(/[/\\]/).pop()}
-                    </p>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                      <span
-                        className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold tracking-wide ${stateBadgeClass(j.state)}`}
-                      >
-                        {stateLabel(normalizeJobState(j.state) || j.state)}
-                      </span>
-                      <span className="text-xl font-semibold tabular-nums text-ink-950 leading-none dark:text-fg">
-                        {pct}%
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-1.5 items-end shrink-0">
-                    {id && (
-                      <button
-                        type="button"
-                        className="rounded-full border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-high dark:text-fg"
-                        onClick={() => onRead(id)}
-                      >
-                        {i18n.readerRead}
-                      </button>
-                    )}
-                    {showCancel && (
-                      <button
-                        type="button"
-                        disabled={cancelling || !id}
-                        className="rounded-lg border border-rose-400/40 bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-500/25 disabled:opacity-40 disabled:pointer-events-none dark:border-danger-border dark:bg-danger-soft dark:text-danger-fg"
-                        onClick={() => id && onCancel(id)}
-                      >
-                        {cancelling ? "取消中…" : i18n.cancel}
-                      </button>
-                    )}
-                    {isTerminalState(j.state) && (
-                      <button
-                        type="button"
-                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
-                        onClick={() => id && onRemove(id)}
-                      >
-                        {i18n.remove}
-                      </button>
-                    )}
-                    {j.outputPath && (
-                      <button
-                        type="button"
-                        className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
-                        onClick={() => id && onOpen(id)}
-                      >
-                        {i18n.openOut}
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div className="job-progress mt-3 h-2.5 rounded-full bg-ink-200 overflow-hidden">
-                  <div
-                    className={`h-full transition-all ${
-                      normalizeJobState(j.state) === "failed"
-                        ? "bg-rose-400"
-                        : normalizeJobState(j.state) === "completed"
-                          ? "bg-success dark:bg-ok"
-                          : "bg-accent dark:bg-accent-fg"
-                    }`}
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-                <p className="mt-1.5 text-sm font-medium text-ink-800 dark:text-fg">
-                  {pagesDone}/{pagesTotal} {i18n.pages}
-                  {j.stage ? ` · ${j.stage}` : ""}
-                </p>
-                {j.message && (
-                  <p className="mt-0.5 text-xs text-success dark:text-ok-fg">{j.message}</p>
-                )}
-                {j.error && <p className="mt-1 text-xs text-rose-300">{j.error.message}</p>}
-                {j.outputPath && (
-                  <p className="mt-1 text-[11px] text-success/90 dark:text-ok-fg font-mono truncate">
-                    {j.outputPath}
-                  </p>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        <div className="min-h-0 flex-1 overflow-auto pr-1">
+          {loadError && (
+            <p className="mb-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-800 dark:text-warning-fg">
+              {loadError}
+            </p>
+          )}
+          <p className="mb-2 text-xs font-medium text-ink-500 dark:text-fg-muted">
+            {i18n.queueActiveCount.replace("{n}", String(activeJobs.length))}
+          </p>
+          {activeJobs.length > 0 ? (
+            <ul className="divide-y-0">
+              {activeJobs.map(renderJob)}
+            </ul>
+          ) : (
+            <p className="border-b border-ink-200 pb-3 text-xs text-ink-500 dark:border-white/10 dark:text-fg-muted">
+              {i18n.queueNoActive}
+            </p>
+          )}
+          {finishedJobs.length > 0 && (
+            <details className="mt-3" open={activeJobs.length === 0}>
+              <summary className="cursor-pointer list-none py-2 text-xs font-medium text-ink-600 dark:text-fg-muted">
+                {i18n.queueFinishedCount.replace("{n}", String(finishedCount))}
+              </summary>
+              <div className="pb-2">
+                <button
+                  type="button"
+                  className={`mb-2 rounded-md px-2 py-1 text-xs transition ${
+                    confirmClearFinished
+                      ? "bg-rose-500/10 text-rose-700 dark:text-danger-fg"
+                      : "text-ink-500 hover:bg-ink-100 hover:text-ink-900 dark:text-fg-muted dark:hover:bg-surface-high dark:hover:text-fg"
+                  }`}
+                  onClick={() => {
+                    if (confirmClearFinished) {
+                      setConfirmClearFinished(false);
+                      onClearFinished();
+                    } else {
+                      setConfirmClearFinished(true);
+                    }
+                  }}
+                  title={i18n.clearFinishedTitle.replace("{n}", String(finishedCount))}
+                >
+                  {confirmClearFinished
+                    ? i18n.queueConfirmClearFinished.replace("{n}", String(finishedCount))
+                    : i18n.clearFinished}
+                </button>
+                <ul>{finishedJobs.map(renderJob)}</ul>
+              </div>
+            </details>
+          )}
+        </div>
       )}
     </div>
   );

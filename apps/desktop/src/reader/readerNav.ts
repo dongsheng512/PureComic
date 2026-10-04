@@ -52,6 +52,47 @@ export function readingModeTarget(
   return { view: "page", spread: choice, index: alignIndex(currentIndex, choice, total) };
 }
 
+/** 版式分段里「哪一格该高亮」。三格互斥，**最多只有一个**为真。
+ *
+ *  ⚠️ 这里必须用用户选的 `spread`，不能用渲染用的 `effectiveSpread`。
+ *  `effectiveSpread` 在竖读下会被强制成 `"single"`（竖读就是单列滚动），
+ *  但那是"按单页排版"而不是"用户选了单页"。拿它当高亮依据会让竖读时
+ *  「单页」和「竖读」两格同时亮起 —— 这是修过的 bug，别再合并这两个概念。
+ *
+ *  `spread` 只在页模式下参与判定：竖读时单页/双页两格都不亮。 */
+export function readingModeActive(
+  webtoon: boolean,
+  spread: SpreadMode,
+): { single: boolean; double: boolean; webtoon: boolean } {
+  return {
+    single: !webtoon && spread === "single",
+    double: !webtoon && spread === "double",
+    webtoon,
+  };
+}
+
+/** AI 面板右上角的状态文案（三态）。
+ *
+ *  ⚠️ 开关本身**只认 `enhanceOn`**。`showingAi`（当前可见页是否都已增强）
+ *  是"渲染就绪"，不是"功能开关"：拿它当开关会得到"AI 开着、当前页还在处理"
+ *  时显示「未开启」，而同一面板里引擎行却是高亮选中的自相矛盾状态。
+ *  这和「单页/竖读同时高亮」是同一类错误，别再合并这两个概念。
+ *
+ *  返回 `on: false` 表示该用弱化色（未开启）。 */
+export function aiStatusText(args: {
+  enhanceOn: boolean;
+  pageEnhancing: boolean;
+  engineMain: string;
+  offLabel: string;
+  busyLabel: string;
+}): { text: string; on: boolean } {
+  if (!args.enhanceOn) return { text: args.offLabel, on: false };
+  if (args.pageEnhancing) {
+    return { text: `${args.engineMain} · ${args.busyLabel}`, on: true };
+  }
+  return { text: args.engineMain, on: true };
+}
+
 export function jobFileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
 }

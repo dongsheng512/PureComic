@@ -578,11 +578,11 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
   --rb-pill: #ffffff;                        /* 分段选中药丸 */
   --rb-pill-fg: #2f2f2f;
   --rb-surface: rgba(0, 0, 0, 0.03);        /* 容器底：对齐书库 #F9F9F9（更浅） */
-  --rb-edge: rgba(0, 0, 0, 0.10);           /* 容器 1px 描边：对齐书库 #E5E5E5 */
+  --rb-edge: rgba(0, 0, 0, 0.10);           /* 预留：容器描边（v6 起顶栏不再使用，勿随手加回） */
   --rb-active-bg: rgba(0, 0, 0, 0.12);      /* 选中块：淡灰（原 #2f2f2f 偏重） */
   --rb-active-fg: #2f2f2f;                   /* 淡灰底上必须用深色字 */
   --rb-sep: rgba(217, 217, 224, 0.6);        /* 控件组分隔线（= ink-300/60） */
-  --rb-hover-soft: rgba(229, 229, 229, 0.8); /* chip / 分段 hover（= ink-200/80） */
+  --rb-hover-soft: rgba(229, 229, 229, 0.8); /* 图标按钮 hover / 分段 hover（= ink-200/80）；页码已不用 */
   --rb-ai-soft: rgba(69, 172, 134, 0.16);    /* AI 开启态：tint 底 */
   --rb-ai-accent: #1f7d57;                   /* AI 开启态：图标 */
   --rb-ai-ring: rgba(69, 172, 134, 0.35);
@@ -598,7 +598,7 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
   --rb-pill: rgba(255, 255, 255, 0.16);
   --rb-pill-fg: #ffffff;
   --rb-surface: rgba(255, 255, 255, 0.07); /* 深画布容器底：白玻璃（同比例调浅） */
-  --rb-edge: rgba(255, 255, 255, 0.16);     /* 深画布描边必须比底**更亮**才可见 */
+  --rb-edge: rgba(255, 255, 255, 0.16);     /* 预留：深画布容器描边（同 v6 起未用） */
   --rb-active-bg: rgba(255, 255, 255, 0.16);
   --rb-active-fg: #ffffff;                   /* 深画布：亮底上仍用白字 */
   --rb-sep: rgba(255, 255, 255, 0.14);
@@ -623,7 +623,7 @@ html.dark .btn-card-remove:focus-visible:not(:disabled) {
   --rb-pill: #ffffff;
   --rb-pill-fg: #2f2f2f;
   --rb-surface: rgba(0, 0, 0, 0.03);        /* 容器底：对齐书库 #F9F9F9（更浅） */
-  --rb-edge: rgba(0, 0, 0, 0.10);           /* 容器 1px 描边：对齐书库 #E5E5E5 */
+  --rb-edge: rgba(0, 0, 0, 0.10);           /* 预留：容器描边（v6 起顶栏不再使用，勿随手加回） */
   --rb-active-bg: rgba(0, 0, 0, 0.12);      /* 选中块：淡灰（同 root） */
   --rb-active-fg: #2f2f2f;                   /* 淡灰底上必须用深色字 */
   --rb-sep: rgba(217, 217, 224, 0.6);
@@ -643,7 +643,7 @@ html.dark .reader-menu {
   --rb-pill: #48484a;
   --rb-pill-fg: #ececec;
   --rb-surface: rgba(255, 255, 255, 0.07); /* 深画布容器底：白玻璃（同比例调浅） */
-  --rb-edge: rgba(255, 255, 255, 0.16);     /* 深画布描边必须比底**更亮**才可见 */
+  --rb-edge: rgba(255, 255, 255, 0.16);     /* 预留：深画布容器描边（同 v6 起未用） */
   --rb-active-bg: rgba(255, 255, 255, 0.15);
   --rb-active-fg: #ececec;
   --rb-sep: rgba(255, 255, 255, 0.1);
@@ -691,18 +691,20 @@ html.dark .reader-menu {
         → v5 灰容器 + 白页码 → 10-02 用户把**页码改回透明**，只留灰容器描边。
 
    分两层：
-     大按钮 = 容器  -> --rb-surface（阴影灰）+ --rb-edge（1px 内描边）
-     组内项          -> **全部透明**（箭头、页码同底），hover 才出 --rb-hover-soft；
+     大按钮 = 容器  -> 只靠 --rb-surface（阴影灰）**自身的明度差**成形
+     组内项          -> **全部透明**（箭头、页码同底）；箭头 hover 出 --rb-hover-soft，
+                        页码 hover **不出底**（2026-10-03，见下方页码规则）；
                         页码编辑框是唯一例外（必须不透明白底，见下）。
 
    ⚠️ 容器底不能刷成 --rb-pill 白：纯白画布上「白 vs 白」差 0，
       容器会整块消失 —— 所以容器取 --rb-surface 灰。
-   ⚠️ 全程无装饰 box-shadow（用户要扁平）；这里的 inset 环是**描边**不是投影。
-   ⚠️ 配色只走 --rb-*（跟随阅读画布），**不要**挂 dark:（那跟的是应用主题）。 */
+   ⚠️ 2026-10-03 第六版：**删掉 --rb-edge 那圈 inset 描边**。它与五个裸图标
+      （全屏 / 收起栏 / 更多等）并存时是两套语汇：灰面本身已与画布拉开，
+      再勾一圈线就是"平面里混进线框"的突兀感来源。需要更强边界时加深
+      --rb-surface，**不要**描线。 */
 .reader-pager-group {
   @apply inline-flex h-7 shrink-0 items-center rounded-lg p-0.5;
   background: var(--rb-surface);
-  box-shadow: inset 0 0 0 1px var(--rb-edge);
 }
 
 /* 组内图标项：透明，收到 h-6 与页码同高 */
@@ -716,15 +718,16 @@ html.dark .reader-menu {
 }
 
 /* 页码 = 组内的透明文字（2026-10-02：去掉白色填充，整体只显示灰色容器，
-   与两侧箭头同底；编辑态仍保留白底——见下方对比度注释） */
+   与两侧箭头同底；编辑态仍保留白底——见下方对比度注释）
+   2026-10-03：**去掉 hover 灰底**。页码本身可点（进入跳页输入），但它是这一组里
+   唯一的"文字"而不是"图标"，再给它补一块方块会打断"箭头 + 页码同一底"的读法——
+   悬停时只让百分比尾注浮出来（`group-hover/pager:inline`，见 ReaderToolbar.tsx），
+   反馈交给那行字，不再加底色。 */
 .reader-pager-group .reader-page-chip {
   @apply h-6 rounded-md;
   background: transparent;
   color: var(--rb-chip-fg);
   box-shadow: none;
-}
-.reader-pager-group .reader-page-chip:hover {
-  background: var(--rb-hover-soft);
 }
 
 /* ⚠️ 页码编辑框**例外**：它必须自带不透明底，否则「浅色应用主题 + 深色画布」下
@@ -751,7 +754,6 @@ html.dark .reader-menu {
   @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition
     active:scale-[0.96];
   background: var(--rb-surface);
-  box-shadow: inset 0 0 0 1px var(--rb-edge);
   color: var(--rb-fg-strong);
 }
 
@@ -760,13 +762,11 @@ html.dark .reader-menu {
   background: var(--rb-hover-soft);
 }
 
-/* ⚠️ focus-visible 会**整体替换** box-shadow —— 必须把描边一起写回来，
-   否则一聚焦按钮就"掉边"（与颜色改动前同一个坑）。 */
+/* 聚焦环改用 outline：outline 不吃容器的 box-shadow，所以"常态无描边"
+   与"聚焦有指示"不再共用同一个属性（旧写法删描边会连聚焦环一起删掉）。 */
 .reader-back-btn:focus-visible {
-  outline: none;
-  box-shadow:
-    inset 0 0 0 1px var(--rb-edge),
-    0 0 0 2px rgba(0, 122, 255, 0.35);
+  outline: 2px solid rgba(0, 122, 255, 0.55);
+  outline-offset: 1px;
 }
 
 /* —— 模式分段：灰容器 + 白选中项，扁平（2026-10-01 第五版）——
@@ -774,11 +774,12 @@ html.dark .reader-menu {
 
    ⚠️ 选中项用白色而不是 --rb-active-bg：用户明确「小按钮是白色」。
       白面坐灰容器上可见（差约 39）；若容器改回白，选中态会消失。
-   ⚠️ 未选中项保持透明，只靠文字色深浅区分。 */
+   ⚠️ 未选中项保持透明，只靠文字色深浅区分。
+   ⚠️ 2026-10-03 第六版：与翻页组一致删掉 --rb-edge 内描边。
+      选中白药丸本身已经给出"轨道里有一格"的层次，再描一圈属于重复。 */
 .reader-seg {
   @apply inline-flex h-7 shrink-0 items-center rounded-lg p-0.5;
   background: var(--rb-surface);
-  box-shadow: inset 0 0 0 1px var(--rb-edge);
 }
 
 .reader-seg-item {
@@ -807,8 +808,10 @@ html.dark .reader-menu {
   color: var(--rb-chip-fg);
 }
 
+/* ⚠️ 这里**刻意不写 hover 底色**：组内那条已显式去掉（见上方 .reader-pager-group
+   的注释），两条选择器指向同一个元素，谁也别偷偷把它加回来。 */
 .reader-page-chip:hover {
-  background: var(--rb-hover-soft);
+  background: transparent;
 }
 
 /* 页码编辑输入框：**自带不透明底**，所以不能复用 .reader-page-chip ——
@@ -858,13 +861,27 @@ html.dark {
 /* 默认使用与 reader-seg 相同的浅灰底，避免白色按钮显得发虚 */
 /* AI 开关连体胶囊 [✨|▾]:左=增强开关,发丝线分隔,右=快速设置。
    关 = 幽灵灰;开 = 淡绿 tint 底 + 发丝描边 + 深绿图标(纯淡绿底配白图标对比度不足);
-   忙 = 外圈 conic 进度环(纯 transform 旋转,替代旧 box-shadow 呼吸)。 */
-/* AI 快速设置弹层:分区自带留白,覆盖菜单默认 py-1 */
+   忙 = 图标位换成 spinner(见 .reader-ai-spin)。 */
+/* AI 快速设置弹层:分区自带留白,覆盖菜单默认 py-1。
+
+   ⚠️ 高度上限是**必须**的,不是保险丝。`.reader-menu` 自带 `overflow:hidden`,
+   面板一旦高于可视区,超出部分会被**裁掉且无法滚动**(连"应用"按钮都点不到)。
+   实测按真实 CSS 量:4 引擎 + 有未应用改动的面板高 545px,而 tauri.conf.json 的
+   minHeight=640 只给出 553px 可视区 —— 余量仅 2px;竖读下窗口还能缩到
+   SMART_MIN.height=320(smartFit.ts),那时 507px 的面板会被裁掉 318px。
+
+   所以这里做两件事:
+     1. `max-height` + `overflow-y:auto`:面板本身可滚,不再被裁;
+     2. 下面的 .ai-apply-bar 用 sticky 钉在底部 —— 否则用户滚到中段时
+        看不见"应用/放弃",而这两个按钮是本面板唯一的提交入口。
+   `100vh - 60px` 的 60 = 顶栏高(44) + 上下留白与菜单 mt-1.5(约 16)。 */
 .reader-menu-ai {
   display: flex;
   flex-direction: column;
   width: 260px;
   max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
   padding-top: 0;
   padding-bottom: 0;
 }
@@ -891,11 +908,12 @@ html.dark .ai-section + .ai-section {
    （原先浅色画布下是 rgba(0,0,0,.06) + ink-muted，深色画布下是 overlay-1 + fg-muted，
    两条线各自按"应用主题"分叉，dark-app + light-canvas 时图标只剩 2.43:1。）
    v5：未开启态取 --rb-surface（阴影灰），与返回键/翻页组/模式分段一致，**无投影**。
-   「已开启」是**状态**不是装饰，保留绿色 tint + 绿环（--rb-ai-soft / --rb-ai-ring）。 */
+   「已开启」是**状态**不是装饰，保留绿色 tint + 绿环（--rb-ai-soft / --rb-ai-ring）。
+   v6（2026-10-03）：未开启态同样删掉 --rb-edge 描边，与同排其它容器拉齐。
+   开启态的绿环**保留** —— 那是状态指示，不是装饰。 */
 .reader-ai-capsule {
   @apply relative inline-flex h-7 items-center rounded-full transition;
   background: var(--rb-surface);
-  box-shadow: inset 0 0 0 1px var(--rb-edge);
 }
 
 /* 开启态：绿 tint 填充 + 绿环 */
@@ -969,6 +987,12 @@ html.dark .ai-section + .ai-section {
 /* 区块标题：12pt secondary */
 .ai-block-title {
   @apply text-[12px] font-medium text-ink-500 dark:text-fg-muted;
+}
+
+/* 标题行右侧的补充说明（如「该引擎不支持降噪」）。
+   ⚠️ 必须与标题**同行**：另起一行会改变区块高度，切换引擎时面板跟着跳。 */
+.ai-block-note {
+  @apply shrink-0 text-[10px] text-ink-400 dark:text-fg-muted;
 }
 
 /* 分段控件：gray 12% 容器 + 白色滑动 thumb（暗色 14% 白） */
@@ -1050,8 +1074,13 @@ html.dark .cache-seg-item:focus-visible {
   background: rgba(120, 120, 128, 0.12);
 }
 
+/* ⚠️ 布局是「主名 + 副标签」靠左成组，勾选靠右（.ai-check 用 margin-left:auto 推过去），
+   **不要**改回 `justify-between`：那样三个元素会被摊平到两端，
+   主名与「Core ML」之间隔着一整个空档、中间还夹着对勾，读不出是一个整体。
+   另外 DOM 顺序必须是 main → sub → check：对勾放中间时，选中/未选中会让
+   主名与副标签的间距跳变（多一个元素就多一段 gap）。 */
 .ai-engine-item {
-  @apply flex min-h-9 w-full items-center justify-between gap-2 rounded-[7px] px-2.5 text-left transition;
+  @apply flex min-h-9 w-full items-center gap-2 rounded-[7px] px-2.5 text-left transition;
   color: var(--ink-muted);
   cursor: pointer;
 }
@@ -1073,6 +1102,8 @@ html.dark .cache-seg-item:focus-visible {
 .ai-engine-item .ai-check {
   @apply shrink-0 text-[11px] font-semibold leading-none;
   color: var(--ai-accent);
+  /* 选中标记钉在行尾，与「主名 + 副标签」这一组拉开 */
+  margin-left: auto;
 }
 
 .ai-engine-item:focus-visible {
@@ -1090,9 +1121,13 @@ html.dark .ai-engine-item:hover:not(.is-active) {
 }
 
 html.dark .ai-engine-item.is-active {
-  background: rgba(255, 255, 255, 0.14);
+  /* ⚠️ 深色下也要用 AI 绿 tint，**不要**退回中性灰（原为 rgba(255,255,255,.14)）。
+     AI 专属色是这套面板的身份标识：浅色下选中行是绿 tint，深色下变灰 tint
+     就等于"换个主题换一套配色逻辑"，用户认不出这是同一类状态。
+     用 --ai-accent-soft（深色档 = rgba(122,216,172,.2)，见上面 :root/html.dark）。
+     不叠 box-shadow：浅色档也没有投影，两端保持一致的扁平观感。 */
+  background: var(--ai-accent-soft);
   color: var(--ink-soft);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 
 .ai-engine-main {
@@ -1120,24 +1155,57 @@ html.dark .ai-engine-item.is-active {
   @apply font-medium text-ink-900 dark:text-fg;
 }
 
+/* 不支持降噪的引擎：分段控件整块置灰（而非隐藏）。
+   ⚠️ 用 is-locked 而不是 :has() 之类，是因为 disable 状态由数据决定（eng.noise=false），
+   类名由 JSX 直接给出更直白。thumb 由 JSX 设 visibility:hidden —— 不能在 CSS 里
+   隐藏它，否则"锁定态"和"选中态"的规则会互相覆盖（两者都可能命中同一元素）。 */
+.ai-seg.is-locked {
+  opacity: 0.45;
+}
+
+.ai-seg.is-locked .ai-seg-item {
+  cursor: default;
+}
+
 /* 引擎切换提示：10pt */
 .ai-hint {
   @apply mt-1.5 text-[10px] text-ink-500 dark:text-fg-muted;
 }
 
 /* 草稿未应用提示条：引擎/降噪与当前不一致时出现；紧邻 ai-section，
-   继承其 border-top 分隔线，底色用 AI 淡绿 tint 强化"待应用"状态 */
+   继承其 border-top 分隔线，底色用 AI 淡绿 tint 强化"待应用"状态。
+
+   ⚠️ sticky 是配合 .reader-menu-ai 的 max-height 用的：面板可滚之后，
+   「应用 / 放弃」必须在任何滚动位置都看得见 —— 它是本面板唯一的提交入口，
+   滚上去就够不着了（旧版没有滚动，这条无所谓；加了滚动就必须钉住）。
+
+   ⚠️ 底色必须**不透明白底 + tint 叠加**，不能只留半透明 tint：
+   sticky 之后下面的分区会从这条底下滚过，纯 tint 会把滚过的文字透出来。
+   浅色菜单底 = #fff；深色菜单底 = --surface-raised（与 .reader-menu 的
+   `dark:bg-surface-raised` 对齐，那个是工具类，这里只能手写同一个值）。 */
 .ai-apply-bar {
-  @apply flex items-center gap-3;
-  background: var(--ai-accent-soft);
+  @apply flex flex-col gap-2;
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background-color: #fff;
+  background-image: linear-gradient(var(--ai-accent-soft), var(--ai-accent-soft));
 }
 
+html.dark .ai-apply-bar {
+  background-color: var(--surface-raised);
+}
+
+/* ⚠️ 这两行**不要**加 `truncate`。应用条现在竖排、文字独占整行宽度，
+   而它们承载的是"要切到哪个引擎""会不会重跑缓存"这类决策信息 ——
+   截断会把引擎名吃掉（旧布局实测显示成「将应用：Real-ESR...」）。
+   真遇到超长引擎名宁可换行，也不要截。 */
 .ai-apply-summary {
-  @apply truncate text-[12px] font-medium text-ink-800 dark:text-fg;
+  @apply text-[12px] font-medium leading-snug text-ink-800 dark:text-fg;
 }
 
 .ai-apply-note {
-  @apply mt-0.5 truncate text-[10px] text-ink-500 dark:text-fg-muted;
+  @apply mt-0.5 text-[10px] leading-snug text-ink-500 dark:text-fg-muted;
 }
 
 .ai-btn-discard {
@@ -1244,6 +1312,29 @@ html.dark .ai-switch.is-on .ai-switch-knob {
   to {
     opacity: 1;
     transform: translate(-50%, 0);
+  }
+}
+
+/* 书库导入完成通知条（App.tsx）：与 .reader-toast 同族的淡入+上移入场。
+   只动 transform/opacity（合成层），不重排下方书架。 */
+.lib-notice {
+  animation: lib-notice-in 180ms ease-out;
+}
+
+@keyframes lib-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lib-notice {
+    animation: none;
   }
 }
 
@@ -1483,5 +1574,24 @@ html.dark .ai-switch.is-on .ai-switch-knob {
 
   .drawer[data-state="closed"] .drawer-scrim {
     opacity: 0;
+  }
+
+  .job-progress-indeterminate {
+    animation: none;
+    transform: translateX(85%);
+  }
+}
+
+.job-progress-indeterminate {
+  width: 35%;
+  animation: job-progress-sweep 1.25s ease-in-out infinite alternate;
+}
+
+@keyframes job-progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(285%);
   }
 }

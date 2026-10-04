@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listJobs, onJobProgress } from "./api";
+import { errorMessage, listJobs, onJobProgress } from "./api";
 import type { JobState, JobStatus } from "./types";
 
 /** 进度事件节流窗口：洪峰期间每窗口最多一次 listJobs，窗口结束必补一次 */
@@ -45,6 +45,8 @@ export function jobsEqual(a: JobStatus[], b: JobStatus[]): boolean {
 
 export function useJobs() {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const lastFireRef = useRef(0);
   const tailTimerRef = useRef<number | null>(null);
 
@@ -53,8 +55,11 @@ export function useJobs() {
       const list = await listJobs();
       // 浅比较：无变化时不触发 setState，避免空闲状态 1.5s 一次全量重渲染
       setJobs((prev) => (jobsEqual(prev, list) ? prev : list));
-    } catch {
-      /* backend not ready */
+      setError(null);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -103,5 +108,5 @@ export function useJobs() {
     };
   }, [refreshJobs, scheduleRefresh, jobsActive]);
 
-  return { jobs, setJobs, refreshJobs, jobsActive };
+  return { jobs, setJobs, refreshJobs, jobsActive, loading, error };
 }

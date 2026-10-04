@@ -172,6 +172,7 @@ export function useLibrary(opts: {
     await yieldToPaint();
     try {
       let done = 0;
+      let failed = 0;
       let lastNotice: string | null = null;
       const prior = libraryRef.current;
       for (const p of paths) {
@@ -180,13 +181,27 @@ export function useLibrary(opts: {
           const entry = await addLibraryPath(p);
           lastNotice = noticeForUpsert(i18n, before, entry);
         } catch {
-          /* single fail continues */
+          /* 单个失败继续，但**计入失败数**：旧实现静默吞掉，
+             多选 5 个失败 2 个时用户只看到"已处理 5 个文件"，不知道少了书 */
+          failed += 1;
         }
         done += 1;
         setLibraryImportProgress({ done, total: paths.length });
       }
       await refreshLibrary();
-      setLibraryNotice(paths.length === 1 ? lastNotice : `已处理 ${paths.length} 个文件`);
+      if (paths.length === 1) {
+        setLibraryNotice(lastNotice ?? fillMsg(i18n.libraryImportFailedOne, {}));
+      } else {
+        setLibraryNotice(
+          failed === 0
+            ? `已导入 ${paths.length} 个文件`
+            : fillMsg(i18n.libraryImportPartialFail, {
+                ok: paths.length - failed,
+                total: paths.length,
+                failed,
+              }),
+        );
+      }
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -312,8 +327,22 @@ export function useLibrary(opts: {
     [changeCollection],
   );
   const onDissolveCollection = useCallback(
-    (id: string) => changeCollection(() => dissolveLibraryCollection(id)),
-    [changeCollection],
+    async (id: string) => {
+      // 解散会丢掉用户手动排的卷顺序（书籍本体保留），与删除单本同级风险 → 同样二次确认
+      const title = collections.find((c) => c.id === id)?.title ?? "";
+      let ok: boolean;
+      try {
+        ok = await ask(
+          fillMsg(i18n.libraryCollectionDissolveConfirm, { title }),
+          { title: i18n.libraryCollectionDissolve, kind: "warning" },
+        );
+      } catch {
+        return;
+      }
+      if (!ok) return;
+      await changeCollection(() => dissolveLibraryCollection(id));
+    },
+    [changeCollection, collections, i18n],
   );
 
   return {

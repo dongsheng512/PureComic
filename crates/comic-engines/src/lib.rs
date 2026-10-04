@@ -279,6 +279,50 @@ pub trait UpscaleEngine: Send + Sync {
         req: EnhanceBatchRequest,
         cancel: CancellationToken,
     ) -> Result<EnhanceBatchResult, EngineError>;
+
+    /// Load and warm the model. Default is a no-op for engines without a resident model.
+    async fn preheat(&self, _noise: i8) -> Result<(), EngineError> {
+        Ok(())
+    }
+}
+
+/// Warm a resident Core ML model if nobody is already using it.
+///
+/// A busy batch lock means export or reader inference is in progress; skip
+/// rather than queue behind it. A timed-out load keeps the lock until the
+/// thread exits, same as `enhance_batch`, so a later batch cannot observe a
+/// half-loaded model.
+pub(crate) async fn preheat_coreml(
+    batch: &'static tokio::sync::Mutex<()>,
+    poisoned: &'static std::sync::atomic::AtomicBool,
+    timeout: Duration,
+    label: &str,
+    load: impl FnOnce() -> Result<(), EngineError> + Send + 'static,
+) -> Result<(), EngineError> {
+    use std::sync::atomic::Ordering;
+    if poisoned.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let Ok(guard) = batch.try_lock() else {
+        return Ok(());
+    };
+    let mut loader = tokio::task::spawn_blocking(move || {
+        let _hold = guard;
+        load()
+    });
+    match tokio::time::timeout(timeout, &mut loader).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join)) => Err(EngineError::Process(join.to_string())),
+        Err(_) => {
+            poisoned.store(true, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let _ = loader.await;
+                poisoned.store(false, Ordering::Relaxed);
+            });
+            tracing::warn!("{label} preheat timed out");
+            Err(EngineError::Timeout(timeout))
+        }
+    }
 }
 
 struct ShaCacheHit {

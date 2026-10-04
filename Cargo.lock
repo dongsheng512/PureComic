@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "comic-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "comic-engines"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "async-trait",
  "cc",
@@ -2962,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "purecomic"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "comic-core",
  "comic-engines",

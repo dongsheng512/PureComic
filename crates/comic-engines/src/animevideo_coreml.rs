@@ -300,6 +300,18 @@ impl UpscaleEngine for AnimeVideoCoreMlEngine {
         }])
     }
 
+    async fn preheat(&self, _noise: i8) -> Result<(), EngineError> {
+        let engine = self.clone();
+        crate::preheat_coreml(
+            &COREML_BATCH_LOCK,
+            &COREML_POISONED,
+            MODEL_LOAD_TIMEOUT,
+            "animevideo-coreml",
+            move || engine.load(),
+        )
+        .await
+    }
+
     async fn enhance_batch(
         &self,
         req: EnhanceBatchRequest,

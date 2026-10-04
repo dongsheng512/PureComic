@@ -27,7 +27,13 @@ import {
   type ReaderBgId,
   type SpreadMode,
 } from "./prefs";
-import { jobFileName, type LoadedPage, type ReadingModeChoice } from "./readerNav";
+import {
+  aiStatusText,
+  jobFileName,
+  readingModeActive,
+  type LoadedPage,
+  type ReadingModeChoice,
+} from "./readerNav";
 import { fitWindowToPageUrls, restoreDefaultWindowMinSize } from "./smartFit";
 
 type EngineOption = { id: string; main: string; sub: string; noise?: boolean };
@@ -58,7 +64,10 @@ export type ReaderToolbarProps = {
   setBar: (hidden: boolean) => void;
   toggleFullscreen: () => void;
   webtoon: boolean;
-  effectiveSpread: SpreadMode;
+  /* ⚠️ 这里**刻意不接收** effectiveSpread。竖读时它会被强制成 "single"，
+     拿去当高亮依据就会让「单页」和「竖读」同时亮（修过的 bug）。
+     版式高亮只认 `spread`（用户选的）+ `webtoon`，见 readingModeActive。
+     渲染排版要用 effectiveSpread 时请在 ReaderView 里算，别往这一层传。 */
   direction: ReadDirection;
   setDirection: Dispatch<SetStateAction<ReadDirection>>;
   pageIndex: number;
@@ -149,47 +158,79 @@ function AiEnginePanel(p: {
               onClick={() => p.onSelectEngine(eng.id)}
             >
               <span className="ai-engine-main">{eng.main}</span>
+              {/* 顺序必须是 main → sub → check：对勾靠 margin-left:auto 推到行尾。
+                  放中间会让主名与副标签的间距随选中态跳变（多一个元素多一段 gap）。 */}
+              <span className="ai-engine-sub">{eng.sub}</span>
               {p.engineValue === eng.id && (
                 <span className="ai-check" aria-hidden="true">
                   ✓
                 </span>
               )}
-              <span className="ai-engine-sub">{eng.sub}</span>
+            </button>
+          ))}
+        </div>
+        {/* 引擎切换提示：它解释的是**上面这份引擎列表**切换的代价，
+            所以必须挂在引擎区里。旧位置在"清除缓存"按钮下面（缓存区末尾），
+            视觉上像在描述那个按钮，且 `engineSwitchHint` 只在点"清除缓存"时
+            才会复位 —— 切一次引擎后这条 10pt 小字会永久残留。 */}
+        {p.engineSwitchHint && (
+          <p className="ai-hint">{p.i18n.readerAiEngineCacheHint}</p>
+        )}
+      </div>
+      {/* ⚠️ 区块**常驻**，不支持降噪时置灰 + 说明，不要整块卸载。
+          原来用 `noiseSupported !== false` 直接不渲染：用户从 Real-CUGAN 切到
+          Real-ESRGAN（无降噪参数）时，这一整段连同它的高度突然消失，
+          下面的「AI 缓存」和「应用」按钮**整体上跳**，正好在鼠标位置附近塌陷 ——
+          点完引擎想接着点下面，目标已经移走了。
+          置灰还能顺带把"为什么没有降噪"讲清楚（禁用原因是信息，不是噪音）。 */}
+      <div className="ai-section">
+        {/* 禁用原因放在**标题同一行**，不另起一行。
+            另起一行会让"支持降噪"与"不支持"两种引擎的面板高度差 21px，
+            切换引擎时下面的内容仍会小幅跳动；放进标题行后两种状态高度完全一致。 */}
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="ai-block-title">{p.i18n.readerNoiseLevel}</p>
+          {p.noiseSupported === false && (
+            <span className="ai-block-note">{p.i18n.readerNoiseNotSupported}</span>
+          )}
+        </div>
+        <div
+          className={`ai-seg ai-seg-sm mt-2 ${p.noiseSupported === false ? "is-locked" : ""}`}
+          role="radiogroup"
+          aria-label={p.i18n.readerNoiseLevel}
+          aria-disabled={p.noiseSupported === false}
+        >
+          <span
+            className="ai-seg-thumb"
+            aria-hidden="true"
+            style={{
+              transform: `translateX(calc(100% * ${p.noiseValue}))`,
+              visibility: p.noiseSupported === false ? "hidden" : undefined,
+            }}
+          />
+          {(
+            [
+              [0, p.i18n.readerNoiseLight],
+              [1, p.i18n.readerNoiseStandard],
+              [2, p.i18n.readerNoiseStrong],
+              [3, p.i18n.readerNoiseMax],
+            ] as const
+          ).map(([n, label]) => (
+            <button
+              key={n}
+              type="button"
+              role="radio"
+              aria-checked={p.noiseSupported !== false && p.noiseValue === n}
+              disabled={p.noiseSupported === false}
+              className={`ai-seg-item ${
+                p.noiseSupported !== false && p.noiseValue === n ? "is-active" : ""
+              }`}
+              onClick={() => p.onSelectNoise(n)}
+            >
+              {label}
             </button>
           ))}
         </div>
       </div>
-      {p.noiseSupported !== false && (
-        <div className="ai-section">
-          <p className="ai-block-title">{p.i18n.readerNoiseLevel}</p>
-          <div className="ai-seg ai-seg-sm mt-2" role="radiogroup" aria-label={p.i18n.readerNoiseLevel}>
-            <span
-              className="ai-seg-thumb"
-              aria-hidden="true"
-              style={{ transform: `translateX(calc(100% * ${p.noiseValue}))` }}
-            />
-            {(
-              [
-                [0, p.i18n.readerNoiseLight],
-                [1, p.i18n.readerNoiseStandard],
-                [2, p.i18n.readerNoiseStrong],
-                [3, p.i18n.readerNoiseMax],
-              ] as const
-            ).map(([n, label]) => (
-              <button
-                key={n}
-                type="button"
-                role="radio"
-                aria-checked={p.noiseValue === n}
-                className={`ai-seg-item ${p.noiseValue === n ? "is-active" : ""}`}
-                onClick={() => p.onSelectNoise(n)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
       {p.handleClearClick && (
         <div className="ai-section">
           <p className="ai-block-title">{p.i18n.readerAiCache}</p>
@@ -220,9 +261,6 @@ function AiEnginePanel(p: {
               p.i18n.readerAiCacheClear
             )}
           </button>
-          {p.engineSwitchHint && (
-            <p className="ai-hint">{p.i18n.readerAiEngineCacheHint}</p>
-          )}
         </div>
       )}
     </>
@@ -250,7 +288,6 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     setBar,
     toggleFullscreen,
     webtoon,
-    effectiveSpread,
     direction,
     total,
     pageEditing,
@@ -296,6 +333,16 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
 
   const aiEngineMain =
     engineOptions.find((eng) => eng.id === engineId)?.main ?? engineId;
+
+  /* 面板头部的状态文案走 readerNav.aiStatusText（三态：未开启 / 处理中 / 引擎名），
+     那边注释写清了为什么不能用 showingAi 当开关判定。 */
+  const aiStatus = aiStatusText({
+    enhanceOn,
+    pageEnhancing,
+    engineMain: aiEngineMain,
+    offLabel: i18n.readerAiOff,
+    busyLabel: i18n.readerAiBusy,
+  });
 
   // 草稿对应引擎（决定降噪区块显隐）：优先草稿，回落当前引擎
   const effectiveEngineId = draftEngineId ?? engineId;
@@ -412,6 +459,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
     };
   }, [aiMenuOpen, closeAiMenu]);
 
+  /* 三格高亮判定（互斥、最多一个为真）—— 走 readerNav.readingModeActive，
+     这样"用 spread 而不是 effectiveSpread"这条约束有测试兜底。
+     见该函数注释：合并这两个概念会让竖读时单页/竖读同时高亮。 */
+  const modeActive = readingModeActive(webtoon, spread);
+
   const readingModeSeg = (
     <div className="reader-seg" role="group" aria-label={i18n.readerMode}>
       {/* 单页 / 双页 / 竖读 = 三个**互斥版式**，两两都能直接切。
@@ -420,24 +472,29 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
           竖读下点单页/双页会退出竖读并切到该版式。
           ⚠️ 因此不再有 disabled={webtoon}，title 里那两句「竖读时不可…」
             也不再适用（它们描述的是已废弃的限制）。 */}
+      {/* ⚠️ 高亮判定用 `spread`（用户选的版式）而**不是** `effectiveSpread`。
+          `effectiveSpread` 在竖读下会被强制成 "single"（竖读本来就是单列滚动），
+          但那是"渲染时按单页排版"，不是"用户选了单页"。
+          旧写法直接拿它当高亮依据 → 竖读时「单页」和「竖读」同时亮起。
+          两者语义必须分开：effectiveSpread 管排版，spread 管选中态。 */}
       <button
         type="button"
-        className={`reader-seg-item ${effectiveSpread === "single" ? "is-active" : ""}`}
+        className={`reader-seg-item ${modeActive.single ? "is-active" : ""}`}
         aria-label={i18n.readerSingle}
         onMouseEnter={(e) => showTip(e, i18n.readerSingle)}
         onMouseLeave={hideTip}
-        aria-pressed={effectiveSpread === "single"}
+        aria-pressed={modeActive.single}
         onClick={() => p.selectReadingMode("single")}
       >
         <IconSinglePage />
       </button>
       <button
         type="button"
-        className={`reader-seg-item ${effectiveSpread === "double" ? "is-active" : ""}`}
+        className={`reader-seg-item ${modeActive.double ? "is-active" : ""}`}
         aria-label={i18n.readerDouble}
         onMouseEnter={(e) => showTip(e, i18n.readerDouble)}
         onMouseLeave={hideTip}
-        aria-pressed={effectiveSpread === "double"}
+        aria-pressed={modeActive.double}
         onClick={() => p.selectReadingMode("double")}
       >
         <IconDoublePage />
@@ -447,29 +504,44 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
           换后「单页·双页·竖读」三个都是**版式**，方向是阅读顺序，
           版式聚在一起、顺序单独在右，分组读起来更顺。
           竖读按钮是**开关**语义（再点一次退回页模式）。 */}
+      {/* ⚠️ 不要再加 `title=`：本组件已经有自己的 showTip 气泡，
+          两者会同时弹出（原生 title 延迟更久，于是屏幕上先后出现两个）。
+          竖读是**开关**，所以已激活时 tip 改成「退出竖读」的说法，
+          否则用户看到"宽度撑满，向下滚动"会以为点了没反应。 */}
       <button
         type="button"
-        className={`reader-seg-item ${webtoon ? "is-active" : ""}`}
+        className={`reader-seg-item ${modeActive.webtoon ? "is-active" : ""}`}
         aria-label={i18n.readerWebtoon}
         aria-pressed={webtoon}
-        title={i18n.readerWebtoonHint}
-        onMouseEnter={(e) => showTip(e, i18n.readerWebtoonHint)}
+        onMouseEnter={(e) =>
+          showTip(e, webtoon ? i18n.readerWebtoonExit : i18n.readerWebtoonHint)
+        }
         onMouseLeave={hideTip}
         onClick={p.toggleView}
       >
         <IconWebtoon />
       </button>
+      {/* 竖读下方向无意义，按钮禁用。禁用态的说明也走 showTip：
+          `title` 只在原生 tooltip 里出现，和自定义气泡并存时文案会打架
+          （实测竖读下悬停这个按钮，弹出的是「从左到右」而不是禁用原因）。
+          ⚠️ 禁用按钮仍会触发 mouseenter，所以这里能正常显示。 */}
       <button
         type="button"
         className={`reader-seg-item ${direction === "rtl" ? "is-active" : ""} disabled:opacity-35`}
         aria-label={direction === "rtl" ? i18n.readerRtl : i18n.readerLtr}
         onMouseEnter={(e) =>
-          showTip(e, direction === "rtl" ? i18n.readerRtl : i18n.readerLtr)
+          showTip(
+            e,
+            webtoon
+              ? i18n.readerWebtoonNoRtl
+              : direction === "rtl"
+                ? i18n.readerRtl
+                : i18n.readerLtr,
+          )
         }
         onMouseLeave={hideTip}
         aria-pressed={direction === "rtl"}
         disabled={webtoon}
-        title={webtoon ? i18n.readerWebtoonNoRtl : undefined}
         onClick={() => p.setDirection((d) => (d === "ltr" ? "rtl" : "ltr"))}
       >
         {direction === "rtl" ? <IconRtl /> : <IconLtr />}
@@ -686,10 +758,14 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
             <div className="relative z-20 ml-auto flex shrink-0 items-center gap-1 pointer-events-auto">
               {!barTiny && (
                 <div className="relative z-50" ref={aiRef}>
+                  {/* 忙态只有图标位的 spinner 表达（见下方 reader-ai-spin）。
+                      ⚠️ 这里原来还渲染一个 `<span class="reader-ai-ring">`，但 styles.css 里
+                      从来没有这个类（407db62 把忙态改成扫光时连 ring 的样式一起删了，
+                      只剩 JSX）—— 等于渲染了个什么都不画的空元素。已删。
+                      要重新加进度环就在 styles.css 里补类，别只往 JSX 里塞类名。 */}
                   <div
                     className={`reader-ai-capsule ${(enhanceOn || showingAi) ? "is-on" : ""} ${pageEnhancing ? "is-busy" : ""}`}
                   >
-                    {pageEnhancing && <span className="reader-ai-ring" aria-hidden="true" />}
                     <button
                       type="button"
                       className="reader-ai-trigger"
@@ -727,7 +803,12 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                     <div
                       ref={aiPopRef}
                       className="reader-menu reader-menu-ai"
-                      role="menu"
+                      /* role="dialog" 而不是 "menu"：面板内容是两个 radiogroup
+                         （引擎列表 / 去噪分段）+ 若干普通按钮。`role="menu"` 要求
+                         子元素是 menuitem/menuitemradio 之类，套在 radiogroup 上
+                         属于无效结构，读屏软件会念错甚至报错。 */
+                      role="dialog"
+                      aria-label={i18n.readerAiSettings}
                       onClick={(e) => e.stopPropagation()}
                     >
                       <div className="ai-section flex items-center justify-between">
@@ -736,11 +817,11 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         </span>
                         <span
                           className={`text-[10px] tabular-nums ${
-                            showingAi ? "" : "text-ink-400 dark:text-fg-muted"
+                            aiStatus.on ? "" : "text-ink-400 dark:text-fg-muted"
                           }`}
-                          style={showingAi ? { color: "var(--ai-accent)" } : undefined}
+                          style={aiStatus.on ? { color: "var(--ai-accent)" } : undefined}
                         >
-                          {showingAi ? aiEngineMain : i18n.readerAiOff}
+                          {aiStatus.text}
                         </span>
                       </div>
 <AiEnginePanel
@@ -761,8 +842,12 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                         cacheSizeText={p.cacheSizeText}
                       />
                       {aiDirty && (
+                        /* 竖排：说明占整行，按钮另起一行右对齐。
+                           横排时两段文字与两个按钮抢 260px，摘要会被截成
+                           「将应用：Real-ESR...」，正好把"要切到哪个引擎"这个
+                           最关键的词吃掉（改前实测）。 */
                         <div className="ai-section ai-apply-bar">
-                          <div className="min-w-0 flex-1">
+                          <div className="min-w-0">
                             <p className="ai-apply-summary">
                               {i18n.aiWillApply}
                               {aiDirtySummary}
@@ -773,7 +858,7 @@ export function ReaderToolbar(p: ReaderToolbarProps) {
                                 : i18n.aiDirtyHint}
                             </p>
                           </div>
-                          <div className="flex shrink-0 items-center gap-1.5">
+                          <div className="flex shrink-0 items-center justify-end gap-1.5">
                             <button
                               type="button"
                               className="ai-btn-discard"

@@ -8,10 +8,12 @@ import type {
   CacheGroupStats,
   CacheOverview,
 } from "../types";
-import { PanelCloseButton } from "./Drawer";
+import { PanelCloseButton, PanelFeedback } from "./Drawer";
 
 type Props = {
   i18n: ReturnType<typeof t>;
+  errorMessage: string | null;
+  onDismissError: () => void;
   overview: CacheOverview | null;
   scanning: boolean;
   /** 正在清理的组 id；"all" = 全部清理进行中 */
@@ -53,6 +55,8 @@ type Props = {
 
 /** 缓存页的两个轴。两边的取数是同一份磁盘事实（见后端 `collect_one_group`），只是呈现方式不同。 */
 export type CacheView = "book" | "type";
+type CacheSort = "size" | "reclaimable" | "recent";
+type CacheFilter = "all" | "reclaimable" | "missing";
 
 /** 穷举 switch 而非 `i18n[key]` —— 让 TS 在新增缓存组时直接报错漏配文案。 */
 function groupLabel(i18n: ReturnType<typeof t>, id: CacheGroupId): string {
@@ -141,6 +145,8 @@ function Chevron({ open }: { open: boolean }) {
 
 export function CachePanel({
   i18n,
+  errorMessage,
+  onDismissError,
   overview,
   scanning,
   busyId,
@@ -172,20 +178,51 @@ export function CachePanel({
   // 破坏性操作两段式确认：第一击进入待确认态，再击或失焦/超时复位
   const [confirmAll, setConfirmAll] = useState(false);
   const [confirmBookKey, setConfirmBookKey] = useState<string | null>(null);
+  const [confirmGroupId, setConfirmGroupId] = useState<CacheGroupId | null>(null);
+  const [confirmEntryKey, setConfirmEntryKey] = useState<string | null>(null);
+  const [bookQuery, setBookQuery] = useState("");
+  const [bookSort, setBookSort] = useState<CacheSort>("size");
+  const [bookFilter, setBookFilter] = useState<CacheFilter>("all");
   useEffect(() => {
-    if (!confirmAll && confirmBookKey == null) return;
+    if (
+      !confirmAll &&
+      confirmBookKey == null &&
+      confirmGroupId == null &&
+      confirmEntryKey == null
+    ) return;
     const timer = window.setTimeout(() => {
       setConfirmAll(false);
       setConfirmBookKey(null);
+      setConfirmGroupId(null);
+      setConfirmEntryKey(null);
     }, 3000);
     return () => window.clearTimeout(timer);
-  }, [confirmAll, confirmBookKey]);
+  }, [confirmAll, confirmBookKey, confirmGroupId, confirmEntryKey]);
   // 条形长度按"占本列表最大组"的比例 —— 绝对字节数在 0 和 1.4 GB 之间无法同屏比较
   const maxBytes = groups.reduce((m, g) => Math.max(m, g.bytes), 0);
 
   const rows = bookEntries ?? [];
+  const query = bookQuery.trim().toLocaleLowerCase();
+  const visibleRows = rows
+    .filter((row) => {
+      if (bookFilter === "reclaimable" && row.reclaimBytes <= 0) return false;
+      if (bookFilter === "missing" && !row.sourceMissing) return false;
+      if (!query) return true;
+      return [row.title, row.source, row.key]
+        .some((value) => value?.toLocaleLowerCase().includes(query));
+    })
+    .sort((a, b) => {
+      if (bookSort === "reclaimable" && b.reclaimBytes !== a.reclaimBytes) {
+        return b.reclaimBytes - a.reclaimBytes;
+      }
+      if (bookSort === "recent" && b.lastUsed !== a.lastUsed) {
+        return (b.lastUsed ?? 0) - (a.lastUsed ?? 0);
+      }
+      if (bookSort !== "recent" && b.bytes !== a.bytes) return b.bytes - a.bytes;
+      return (a.title ?? a.key).localeCompare(b.title ?? b.key);
+    });
   // 后端把未归属的项排在最后，这里只负责找断点插一条分隔说明
-  const firstUnknown = rows.findIndex((r) => r.bookId === null);
+  const firstUnknown = visibleRows.findIndex((r) => r.bookId === null);
 
   return (
     <div className="h-full min-h-0 flex flex-col p-4">
@@ -211,28 +248,35 @@ export function CachePanel({
             title={!canClearAll ? i18n.cacheNothingToClear : undefined}
           >
             {busyId === "all"
-              ? i18n.cacheScanning
+              ? i18n.cacheClearing
               : confirmAll
                 ? i18n.cacheConfirmClear
-                : i18n.cacheClearAll}
+                : i18n.cacheClearSafe}
           </button>
           <button
             type="button"
-            className="text-xs text-ink-500 hover:text-ink-950 dark:text-fg-muted dark:hover:text-fg"
+            className="text-xs text-ink-500 hover:text-ink-950 disabled:opacity-50 dark:text-fg-muted dark:hover:text-fg"
             onClick={onRefresh}
+            disabled={scanning}
           >
-            {i18n.cacheRefresh}
+            {scanning ? i18n.cacheScanning : i18n.cacheRefresh}
           </button>
           <PanelCloseButton onClick={onClose} label={i18n.cacheHide} />
         </div>
       </div>
+
+      <PanelFeedback
+        message={errorMessage}
+        dismissLabel={i18n.dismiss}
+        onDismiss={onDismissError}
+      />
 
       {overview && (
         <div className="mb-3 grid grid-cols-3 gap-2">
           {(
             [
               [i18n.cacheTotal, formatBytes(overview.totalBytes)],
-              [i18n.cacheReclaimable, formatBytes(overview.reclaimableBytes)],
+              [i18n.cacheBulkReclaimable, formatBytes(overview.reclaimableBytes)],
               [
                 i18n.cacheFree,
                 overview.freeBytes != null ? formatBytes(overview.freeBytes) : "—",
@@ -293,6 +337,41 @@ export function CachePanel({
         })}
       </div>
 
+      {view === "book" && (
+        <div className="mb-2 space-y-2">
+          <input
+            type="search"
+            value={bookQuery}
+            onChange={(event) => setBookQuery(event.target.value)}
+            placeholder={i18n.cacheSearch}
+            aria-label={i18n.cacheSearch}
+            className="h-9 w-full rounded-lg border border-ink-200 bg-white px-3 text-xs text-ink-900 placeholder:text-ink-400 focus:border-accent focus:outline-none dark:border-white/10 dark:bg-surface-raised dark:text-fg dark:placeholder:text-fg-muted"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={bookSort}
+              onChange={(event) => setBookSort(event.target.value as CacheSort)}
+              aria-label={i18n.cacheSortLabel}
+              className="h-8 min-w-0 rounded-lg border border-ink-200 bg-white px-2 text-xs text-ink-700 dark:border-white/10 dark:bg-surface-raised dark:text-fg"
+            >
+              <option value="size">{i18n.cacheSortLargest}</option>
+              <option value="reclaimable">{i18n.cacheSortReclaimable}</option>
+              <option value="recent">{i18n.cacheSortRecent}</option>
+            </select>
+            <select
+              value={bookFilter}
+              onChange={(event) => setBookFilter(event.target.value as CacheFilter)}
+              aria-label={i18n.cacheFilterLabel}
+              className="h-8 min-w-0 rounded-lg border border-ink-200 bg-white px-2 text-xs text-ink-700 dark:border-white/10 dark:bg-surface-raised dark:text-fg"
+            >
+              <option value="all">{i18n.cacheFilterAll}</option>
+              <option value="reclaimable">{i18n.cacheFilterReclaimable}</option>
+              <option value="missing">{i18n.cacheFilterMissing}</option>
+            </select>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 min-h-0 overflow-auto pr-1">
         {/* ---------- 按漫画：一行 = 一本漫画的全部缓存，清理直接挂在行上 ---------- */}
         {view === "book" ? (
@@ -305,9 +384,13 @@ export function CachePanel({
               <p className="px-1 py-3 text-xs text-ink-500 dark:text-fg-muted">
                 {scanning ? i18n.cacheScanning : i18n.cacheBookEmpty}
               </p>
+            ) : visibleRows.length === 0 ? (
+              <p className="px-1 py-3 text-xs text-ink-500 dark:text-fg-muted">
+                {i18n.cacheNoResults}
+              </p>
             ) : (
               <ul className="space-y-2">
-                {rows.map((row, i) => {
+                {visibleRows.map((row, i) => {
                   // 行标识由后端给出，前端不自己拼（否则展开状态与高亮会两处漂）
                   const key = row.key;
                   const expanded = expandedBookKey === key;
@@ -390,9 +473,11 @@ export function CachePanel({
                               }
                             >
                               {busy
-                                ? i18n.cacheScanning
+                                ? i18n.cacheClearing
                                 : confirmBookKey === row.key
-                                  ? i18n.cacheConfirmClear
+                                  ? row.parts.some((p) => p.group === "jobs")
+                                    ? i18n.cacheConfirmClearJob
+                                    : i18n.cacheConfirmClear
                                   : i18n.cacheClear}
                             </button>
                           </span>
@@ -468,6 +553,11 @@ export function CachePanel({
             )}
           </>
         ) : (
+          groups.length === 0 ? (
+            <p className="px-1 py-3 text-xs text-ink-500 dark:text-fg-muted">
+              {scanning ? i18n.cacheScanning : i18n.cacheEmpty}
+            </p>
+          ) : (
           <ul className="space-y-3">
             {groups.map((g) => {
               const disabled = g.busy || g.reclaimBytes === 0 || anyBusy;
@@ -532,12 +622,27 @@ export function CachePanel({
                     <span className="ml-auto">
                       <button
                         type="button"
-                        className="rounded-lg border border-ink-300 bg-ink-200 px-2.5 py-1 text-xs font-medium text-ink-800 transition hover:bg-ink-300 disabled:pointer-events-none disabled:opacity-40 dark:border-white/10 dark:bg-surface-high dark:text-fg"
-                        onClick={() => onClear(g.id)}
+                        className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:pointer-events-none disabled:opacity-40 ${
+                          confirmGroupId === g.id
+                            ? "border-rose-500/50 bg-rose-500/10 text-rose-700 dark:border-danger-border dark:bg-danger-soft dark:text-danger-fg"
+                            : "border-ink-300 bg-ink-200 text-ink-800 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-high dark:text-fg"
+                        }`}
+                        onClick={() => {
+                          if (g.id === "jobs" && confirmGroupId !== g.id) {
+                            setConfirmGroupId(g.id);
+                            return;
+                          }
+                          setConfirmGroupId(null);
+                          onClear(g.id);
+                        }}
                         disabled={disabled}
                         title={clearTitle(i18n, g)}
                       >
-                        {busyId === g.id ? i18n.cacheScanning : i18n.cacheClear}
+                        {busyId === g.id
+                          ? i18n.cacheClearing
+                          : confirmGroupId === g.id
+                            ? i18n.cacheConfirmClearJob
+                            : i18n.cacheClear}
                       </button>
                     </span>
                   </div>
@@ -600,8 +705,20 @@ export function CachePanel({
                                 </span>
                                 <button
                                   type="button"
-                                  className="shrink-0 rounded-md border border-ink-300 bg-ink-200 px-1.5 py-0.5 text-[11px] text-ink-800 transition hover:bg-ink-300 disabled:pointer-events-none disabled:opacity-40 dark:border-white/10 dark:bg-surface-high dark:text-fg"
-                                  onClick={() => onClearEntry(g.id, e.key)}
+                                  className={`shrink-0 rounded-md border px-1.5 py-0.5 text-[11px] transition disabled:pointer-events-none disabled:opacity-40 ${
+                                    confirmEntryKey === `${g.id}:${e.key}`
+                                      ? "border-rose-500/50 bg-rose-500/10 text-rose-700 dark:border-danger-border dark:bg-danger-soft dark:text-danger-fg"
+                                      : "border-ink-300 bg-ink-200 text-ink-800 hover:bg-ink-300 dark:border-white/10 dark:bg-surface-high dark:text-fg"
+                                  }`}
+                                  onClick={() => {
+                                    const entryKey = `${g.id}:${e.key}`;
+                                    if (g.id === "jobs" && confirmEntryKey !== entryKey) {
+                                      setConfirmEntryKey(entryKey);
+                                      return;
+                                    }
+                                    setConfirmEntryKey(null);
+                                    onClearEntry(g.id, e.key);
+                                  }}
                                   disabled={rowDisabled}
                                   title={
                                     e.reclaimBytes === 0
@@ -610,8 +727,10 @@ export function CachePanel({
                                   }
                                 >
                                   {busyEntryKeys.has(`${g.id}:${e.key}`)
-                                    ? i18n.cacheScanning
-                                    : i18n.cacheClear}
+                                    ? i18n.cacheClearing
+                                    : confirmEntryKey === `${g.id}:${e.key}`
+                                      ? i18n.cacheConfirmClearJob
+                                      : i18n.cacheClear}
                                 </button>
                               </li>
                             );
@@ -624,6 +743,7 @@ export function CachePanel({
               );
             })}
           </ul>
+          )
         )}
       </div>
     </div>
